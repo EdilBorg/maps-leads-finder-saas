@@ -77,6 +77,11 @@ function createApp(options = {}) {
     app.get('/__test/client-ip', (req, res) => {
       res.json({ ip: req.ip || null, ips: req.ips || [] });
     });
+    // Same key construction as auth rate limiters: `login:${req.ip}`
+    app.get('/__test/rate-key', (req, res) => {
+      const ip = req.ip || null;
+      res.json({ ip, rateKey: `login:${ip}` });
+    });
   }
 
   app.get('/', (req, res) => {
