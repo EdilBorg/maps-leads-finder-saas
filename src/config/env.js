@@ -1,6 +1,5 @@
 /**
  * Environment configuration and validation.
- * Fails fast on missing required variables in production.
  */
 
 require('dotenv').config();
@@ -22,6 +21,8 @@ const config = {
   appUrl: getEnv('APP_URL', 'http://localhost:3000'),
 
   sessionSecret: getEnv('SESSION_SECRET', 'dev-only-change-me-not-for-production'),
+  sessionCookieName: getEnv('SESSION_COOKIE_NAME', 'mlf.sid'),
+  sessionMaxAgeMs: parseInt(getEnv('SESSION_MAX_AGE_MS', String(7 * 24 * 60 * 60 * 1000)), 10),
 
   database: {
     url: getEnv('DATABASE_URL'),
@@ -35,10 +36,6 @@ const config = {
   sessionTable: getEnv('SESSION_TABLE', 'session'),
 };
 
-/**
- * Validate required configuration.
- * In development we only warn; in production we throw.
- */
 function validateConfig() {
   const missing = [];
 
