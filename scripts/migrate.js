@@ -8,6 +8,13 @@ const path = require('path');
 const { getPool, closePool } = require('../src/db/pool');
 
 async function migrate() {
+  // When opting into test mode, refuse to migrate anything except a validated test DB.
+  if (process.env.ALLOW_DB_TESTS === '1') {
+    const { assertSafeTestDatabase } = require('../tests/helpers/testDbGuard');
+    const name = assertSafeTestDatabase();
+    console.log('[migrate] test mode — target database:', name);
+  }
+
   const dir = path.join(__dirname, '..', 'migrations');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
   const pool = getPool();

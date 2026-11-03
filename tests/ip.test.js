@@ -1,6 +1,7 @@
 /**
- * Trust proxy / req.ip behaviour.
- * With TRUST_PROXY_HOPS=0, spoofed X-Forwarded-For must not become req.ip.
+ * Trust proxy / req.ip / rate-limit key behaviour.
+ * Proves rate limiter key material is req.ip, not client-controlled X-Forwarded-For,
+ * when TRUST_PROXY_HOPS=0 (the default).
  */
 require('dotenv').config();
 const { describe, it, before } = require('node:test');
@@ -8,7 +9,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const session = require('express-session');
 
-function request(app, { method = 'GET', path, body, cookie, headers = {} } = {}) {
+function request(app, { method = 'GET', path, body, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     const server = app.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
@@ -17,7 +18,6 @@ function request(app, { method = 'GET', path, body, cookie, headers = {} } = {})
         ...(payload
           ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
           : {}),
-        ...(cookie ? { Cookie: cookie } : {}),
         ...headers,
       };
       const req = http.request(
@@ -60,24 +60,41 @@ function loadAppWithTrust(hops) {
   return createApp({ sessionStore: new session.MemoryStore() });
 }
 
-describe('client IP with TRUST_PROXY_HOPS=0', () => {
+describe('rate-limit keys use req.ip (TRUST_PROXY_HOPS=0)', () => {
   let app;
   before(() => {
     app = loadAppWithTrust(0);
   });
 
-  it('req.ip is loopback, not the spoofed X-Forwarded-For value', async () => {
+  it('default trust hops is 0 for these tests', () => {
+    assert.equal(process.env.TRUST_PROXY_HOPS, '0');
+  });
+
+  it('spoofed X-Forwarded-For does not change req.ip or rate key', async () => {
+    const a = await request(app, {
+      path: '/__test/rate-key',
+      headers: { 'X-Forwarded-For': '203.0.113.10' },
+    });
+    const b = await request(app, {
+      path: '/__test/rate-key',
+      headers: { 'X-Forwarded-For': '198.51.100.20' },
+    });
+    assert.equal(a.statusCode, 200);
+    assert.equal(b.statusCode, 200);
+    assert.notEqual(a.json().ip, '203.0.113.10');
+    assert.notEqual(b.json().ip, '198.51.100.20');
+    assert.equal(a.json().rateKey, b.json().rateKey);
+    assert.match(a.json().rateKey, /^login:/);
+  });
+
+  it('rate key is built from req.ip only (login:${ip})', async () => {
     const res = await request(app, {
-      path: '/__test/client-ip',
+      path: '/__test/rate-key',
       headers: { 'X-Forwarded-For': '203.0.113.99' },
     });
     assert.equal(res.statusCode, 200);
-    const ip = res.json().ip;
-    assert.ok(
-      ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1',
-      `unexpected ip ${ip}`
-    );
-    assert.notEqual(ip, '203.0.113.99');
+    const { ip, rateKey } = res.json();
+    assert.equal(rateKey, `login:${ip}`);
   });
 
   it('rejects CSRF-less login even with spoofed XFF', async () => {
@@ -92,19 +109,18 @@ describe('client IP with TRUST_PROXY_HOPS=0', () => {
   });
 });
 
-describe('client IP with TRUST_PROXY_HOPS=1 (in-process simulation only)', () => {
+describe('TRUST_PROXY_HOPS=1 is not claimed as production-safe', () => {
   let app;
   before(() => {
     app = loadAppWithTrust(1);
   });
 
-  it('documents Express behaviour when one hop is trusted — not production proof', async () => {
+  it('endpoint still responds; operators must validate real topology', async () => {
     const res = await request(app, {
-      path: '/__test/client-ip',
+      path: '/__test/rate-key',
       headers: { 'X-Forwarded-For': '203.0.113.50' },
     });
     assert.equal(res.statusCode, 200);
-    const ip = res.json().ip;
-    assert.ok(typeof ip === 'string' || ip === null);
+    assert.ok(res.json().rateKey.startsWith('login:');
   });
 });
