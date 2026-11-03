@@ -1,26 +1,11 @@
 /**
  * Guard against running integration tests against production databases.
  *
- * Safe mode requires ALL of:
- * - NODE_ENV !== 'production'
- * - ALLOW_DB_TESTS=1 (explicit opt-in)
- * - DATABASE_URL (or PG*) pointing at a database whose name ends with `_test`
- *   OR equals the value of TEST_DATABASE_NAME
- *
- * Presence of DATABASE_URL alone is NOT enough.
+ * Validates the SAME connection resolveConnection() / buildPoolConfig() use,
+ * so the pool cannot silently target a different database than the one checked.
  */
 
-function databaseNameFromEnv() {
-  const url = process.env.DATABASE_URL || process.env.TEST_DATABASE_URL;
-  if (url) {
-    try {
-      const u = new URL(url);
-      const name = decodeURIComponent(u.pathname.replace(/^\//, ''));
-      if (name) return name;
-    } catch (_) {}
-  }
-  return process.env.PGDATABASE || null;
-}
+const { resolveConnection, nameFromConnectionString } = require('../../src/db/connectionConfig');
 
 function evaluateTestDbSafety() {
   if (process.env.NODE_ENV === 'production') {
@@ -33,28 +18,37 @@ function evaluateTestDbSafety() {
         'ALLOW_DB_TESTS is not set to 1. Integration tests that touch PostgreSQL require explicit opt-in.',
     };
   }
-  const dbName = databaseNameFromEnv();
+
+  const resolved = resolveConnection();
+  if (!resolved.ok) {
+    return { ok: false, reason: resolved.reason };
+  }
+
+  const dbName = resolved.database;
   if (!dbName) {
     return {
       ok: false,
-      reason: 'No database name found (set TEST_DATABASE_URL or DATABASE_URL / PGDATABASE).',
+      reason:
+        'No database name in the resolved connection (set DATABASE_URL or TEST_DATABASE_URL with a path, or PGDATABASE).',
     };
   }
+
   const expected = process.env.TEST_DATABASE_NAME;
   if (expected) {
     if (dbName !== expected) {
       return {
         ok: false,
-        reason: `Database name "${dbName}" does not match TEST_DATABASE_NAME="${expected}".`,
+        reason: `Resolved database "${dbName}" (source=${resolved.source}) does not match TEST_DATABASE_NAME="${expected}".`,
       };
     }
   } else if (!dbName.endsWith('_test')) {
     return {
       ok: false,
-      reason: `Database name "${dbName}" must end with "_test" (or set TEST_DATABASE_NAME to the exact name).`,
+      reason: `Resolved database "${dbName}" (source=${resolved.source}) must end with "_test" (or set TEST_DATABASE_NAME).`,
     };
   }
-  return { ok: true, databaseName: dbName };
+
+  return { ok: true, databaseName: dbName, source: resolved.source };
 }
 
 function assertSafeTestDatabase() {
@@ -75,5 +69,6 @@ module.exports = {
   evaluateTestDbSafety,
   assertSafeTestDatabase,
   shouldRunDbIntegration,
-  databaseNameFromEnv,
+  resolveConnection,
+  nameFromConnectionString,
 };

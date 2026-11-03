@@ -1,34 +1,13 @@
 /**
  * PostgreSQL connection pool.
- * Ready for use; tables and migrations belong to later stages.
- *
- * Connection is configured exclusively via environment variables.
+ * Connection settings come only from connectionConfig (env-driven).
  * No credentials are hardcoded.
- *
- * checkConnection can be overridden in tests via setCheckConnection()
- * so health tests do not require a live database.
  */
 
 const { Pool } = require('pg');
-const { config } = require('../config/env');
+const { buildPoolConfig } = require('./connectionConfig');
 
 let pool = null;
-
-function buildPoolConfig() {
-  if (config.database.url) {
-    return {
-      connectionString: config.database.url,
-    };
-  }
-
-  return {
-    host: config.database.host,
-    port: config.database.port,
-    user: config.database.user,
-    password: config.database.password,
-    database: config.database.database,
-  };
-}
 
 function getPool() {
   if (!pool) {
@@ -42,10 +21,6 @@ function getPool() {
   return pool;
 }
 
-/**
- * Default health check against the real pool.
- * Returns { ok: true, latencyMs } or throws.
- */
 async function defaultCheckConnection() {
   const start = Date.now();
   const client = await getPool().connect();
@@ -60,20 +35,12 @@ async function defaultCheckConnection() {
   }
 }
 
-/** Active implementation (overridable in tests). */
 let checkConnectionImpl = defaultCheckConnection;
 
-/**
- * Public health-check entry point used by routes.
- */
 async function checkConnection() {
   return checkConnectionImpl();
 }
 
-/**
- * Replace the connection checker (for tests).
- * Pass null/undefined to restore the default implementation.
- */
 function setCheckConnection(fn) {
   checkConnectionImpl = typeof fn === 'function' ? fn : defaultCheckConnection;
 }
@@ -85,9 +52,14 @@ async function closePool() {
   }
 }
 
+function resetPoolForTests() {
+  pool = null;
+}
+
 module.exports = {
   getPool,
   checkConnection,
   setCheckConnection,
   closePool,
+  resetPoolForTests,
 };
