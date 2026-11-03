@@ -27,7 +27,9 @@ validateConfig();
 function createApp(options = {}) {
   const app = express();
 
-  app.set('trust proxy', 1);
+  // Only trust the configured number of reverse-proxy hops (Abasthan/nginx).
+  // Never trust an arbitrary client-supplied X-Forwarded-For chain.
+  app.set('trust proxy', config.trustProxyHops > 0 ? config.trustProxyHops : false);
 
   app.use(
     helmet({
