@@ -8,113 +8,160 @@ Plataforma SaaS multiutilizador para pesquisa e gestão de leads comerciais a pa
 
 ---
 
-## Estado atual
+## Estado do projeto
 
-**Etapa 3 — Sistema visual e interface** (concluída)
+| Etapa | Estado |
+|-------|--------|
+| 1 — Especificação | Concluída |
+| 2 — Estrutura inicial (Express, health, config) | Concluída |
+| 3 — Sistema visual e interface (DESIGN.md) | Concluída |
+| 4 — Autenticação e segurança | Implementação concluída; **aguarda validação final dos testes** |
+| 5 — Modelo de dados do domínio | **Não iniciada** |
 
-Interface frontend implementada com o design system definido em `DESIGN.md` (midnight precision / Linear-inspired):
+### Etapa 4 — o que está implementado
 
-- Shell da aplicação (sidebar, topbar, navegação responsiva)
-- Dashboard com indicadores de demonstração
-- Formulário de nova pesquisa (categoria, localização, fornecedores, filtros)
-- Tabela de resultados com estados empty / loading e simulação client-side
-- Histórico de pesquisas e leads guardados (dados de demonstração)
-- Tokens CSS, componentes e tipografia Inter alinhados à referência visual
+- Registo, login, logout
+- Verificação de email e recuperação / redefinição de palavra-passe
+- Hashing **Argon2id**
+- Sessões em PostgreSQL (`express-session` + `connect-pg-simple`)
+- Proteção **CSRF** (token de sessão + cabeçalho `X-CSRF-Token`)
+- Rate limiting atómico em PostgreSQL (`rate_limit_buckets`), com fallback em memória se a BD falhar
+- `req.ip` como única fonte de IP; `TRUST_PROXY_HOPS` (omissão **0**)
+- Páginas: login, registo, verificar email, recuperar / redefinir palavra-passe
 
-**Etapas anteriores**
+### Ainda não implementado (Etapa 5+)
 
-1. Especificação geral (`SPECIFICATION.md` v1.1)
-2. Estrutura inicial Node.js / Express / PostgreSQL / health check
-
----
-
-## Interface em modo demonstração
-
-Disponível no protótipo visual (sem backend de negócio):
-
-- Navegação entre Dashboard, Nova pesquisa, Resultados, Histórico e Leads
-- Seleção visual de fornecedores e filtros
-- Botão **Simular resultados (demo)** — preenche a tabela com dados fictícios identificados como demonstração
-- Filtro client-side na tabela de resultados
-- Banner permanente a indicar que os dados são de demonstração
-
-**Ainda não implementado** (etapas posteriores):
-
-- Autenticação (email/password, Argon2id, sessões PostgreSQL)
-- Reserva de quotas e motor de pesquisa real
-- Integração com fornecedores de dados
-- Planos, pagamentos e painel administrativo
-- Persistência de leads e histórico
-- Exportação
+- Schema completo de pesquisas, leads, quotas e planos
+- Motor de pesquisa e integração com fornecedores
+- Pagamentos e painel administrativo
+- Persistência real de histórico de pesquisas / leads (UI ainda em modo demo)
 
 ---
 
-## Estrutura frontend
+## Requisitos
 
-```
-public/
-├── index.html          # Shell SPA (views por secção)
-├── css/
-│   ├── tokens.css      # Tokens de design (cores, tipografia, spacing, radii)
-│   └── main.css        # Layout, componentes, estados, responsividade
-└── js/
-    └── app.js          # Navegação, mobile menu, simulação de resultados
-```
-
-Backend (sem alteração de arquitetura nesta etapa):
-
-```
-src/
-├── app.js              # createApp() + static public/ + /api/health
-├── server.js           # listen apenas como módulo principal
-└── ...
-```
+- Node.js **20+**
+- PostgreSQL **12+** (obrigatório para autenticação e sessões)
 
 ---
 
-## Decisões técnicas fechadas
-
-1. **Autenticação:** email/password, **Argon2id**, sessões **PostgreSQL** (`connect-pg-simple`).
-2. **Quotas:** reserva **transacional e idempotente** antes de qualquer pesquisa.
-3. **Leads guardados:** **snapshots independentes** da retenção de 30 dias.
-
----
-
-## Arranque rápido
+## Instalação local
 
 ```bash
 git clone https://github.com/EdilBorg/maps-leads-finder-saas.git
 cd maps-leads-finder-saas
-npm install
 cp .env.example .env
+```
+
+Editar `.env` no mínimo:
+
+| Variável | Notas |
+|----------|--------|
+| `SESSION_SECRET` | Segredo forte (≥ 16 caracteres); obrigatório em produção |
+| `DATABASE_URL` | PostgreSQL da aplicação |
+| `TRUST_PROXY_HOPS` | **0** em desenvolvimento. Em produção, definir só depois de validar quantos proxies confiáveis existem à frente da app (ex. Abasthan). Valor errado compromete `req.ip`. |
+| `SMTP_*` | Opcional em desenvolvimento (emails registados no log) |
+
+```bash
+npm install
+npm run migrate
 npm run dev
 ```
 
-- UI: http://localhost:3000  
-- Health: http://localhost:3000/api/health  
+Scripts disponíveis em `package.json`:
 
-Requisitos: Node.js ≥ 20. PostgreSQL só é necessário para etapas posteriores (o health check tolera BD indisponível nesta fase).
+| Script | Comando |
+|--------|---------|
+| `npm run dev` | `node --watch src/server.js` |
+| `npm start` | `node src/server.js` |
+| `npm test` | `node --test tests/` |
+| `npm run migrate` | `node scripts/migrate.js` |
 
----
-
-## Scripts
-
-| Comando       | Descrição                        |
-|---------------|----------------------------------|
-| `npm run dev` | Desenvolvimento com `--watch`    |
-| `npm start`   | Produção                         |
-| `npm test`    | Testes (health isolado da BD)    |
+Servidor: `http://localhost:3000`
 
 ---
 
-## Próximas etapas
+## Migrations
 
-4. Autenticação e gestão de sessões  
-5. Base de dados, relações e permissões  
-6. … (ver `SPECIFICATION.md`)
+```bash
+npm run migrate
+```
+
+- `migrations/001_auth.sql` — users, session, tokens, login_attempts, rate_limit_buckets (sem `OIDS`)
+- `migrations/002_fix_session_oids.sql` — correção idempotente se o `CREATE session` antigo falhou
+
+Não executar migrations de teste sobre bases de produção (ver secção de testes).
 
 ---
 
-## Licença
+## Testes
 
-UNLICENSED — projeto privado.
+### Testes sem PostgreSQL
+
+```bash
+npm test
+```
+
+Correm sempre (quando o ambiente permite instalar dependências): CSRF, crypto, health, migration SQL shape, testDbGuard, IP com `TRUST_PROXY_HOPS=0`.
+
+### Testes de integração com PostgreSQL
+
+Requerem **confirmação explícita** — a presença de `DATABASE_URL` **não** chega.
+
+1. Criar uma base **exclusiva** de testes, por exemplo:
+
+```sql
+CREATE DATABASE maps_leads_finder_test;
+```
+
+2. Configurar o ambiente:
+
+```bash
+export NODE_ENV=test
+export ALLOW_DB_TESTS=1
+export DATABASE_URL=postgresql://USER:PASS@localhost:5432/maps_leads_finder_test
+# Opcional se o nome não terminar em _test:
+# export TEST_DATABASE_NAME=maps_leads_finder_test
+npm run migrate
+npm test
+```
+
+O guard (`tests/helpers/testDbGuard.js`) **rejeita**:
+
+- `NODE_ENV=production`
+- `ALLOW_DB_TESTS` diferente de `1`
+- Nome da base que não termina em `_test` (salvo `TEST_DATABASE_NAME` exacto)
+
+Suites protegidas: `auth.test.js` (parte integração), `session.pg.test.js`, `rateLimit.concurrency.test.js`.
+
+### O que o teste de sessão comprova
+
+- Login grava linha na tabela `session`
+- **Novo processo Node** (`tests/helpers/session_child.js`) arranca a app e autentica com o mesmo cookie via PostgreSQL
+- Logout e reset de palavra-passe invalidam a sessão
+
+### Limitações conhecidas
+
+- **Rate limit em memória**: só se a BD estiver indisponível; **não** é protecção distribuída entre instâncias.
+- **TRUST_PROXY_HOPS**: spoofing mitiga-se apenas se o valor reflectir a topologia real. Na Abasthan, validar com documentação/rede — não assumir `1` sem evidência.
+- **Etapa 5** ainda não iniciada.
+
+---
+
+## Estrutura (resumo)
+
+```
+src/
+  app.js, server.js
+  config/env.js
+  db/pool.js
+  middleware/ (auth, csrf, rateLimit, errorHandler)
+  routes/ (health, auth)
+  services/ (authService, email)
+  utils/crypto.js
+public/          # UI Etapa 3 + páginas de auth
+migrations/
+tests/
+  helpers/testDbGuard.js
+  helpers/session_child.js
+```
