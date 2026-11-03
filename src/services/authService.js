@@ -101,11 +101,23 @@ async function register({ name, email, password, passwordConfirm, appUrl }) {
 
     const base = appUrl || config.appUrl || 'http://localhost:3000';
     const verifyUrl = `${base}/pages/verify-email.html?token=${encodeURIComponent(rawToken)}`;
-    await emailService.sendVerificationEmail(user.email, verifyUrl);
+    let emailSent = false;
+    try {
+      const mailResult = await emailService.sendVerificationEmail(user.email, verifyUrl);
+      emailSent = Boolean(mailResult && mailResult.sent);
+    } catch (mailErr) {
+      console.error('[auth] verification email failed after register:', mailErr.message);
+      emailSent = false;
+    }
 
-    return { ok: true, user: publicUser(user) };
+    return {
+      ok: true,
+      user: publicUser(user),
+      emailSent,
+      ...(config.isProduction ? {} : { _testVerifyToken: rawToken }),
+    };
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch (_) {}
     if (err.code === '23505') {
       return { ok: false, code: 'DUPLICATE', errors: ['Não foi possível concluir o registo.'] };
     }
@@ -125,6 +137,17 @@ async function countRecentFailedLogins(emailNormalized) {
   return rows[0].c;
 }
 
+async function countRecentFailedLoginsByIp(ip) {
+  if (!ip) return 0;
+  const since = new Date(Date.now() - LOGIN_WINDOW_MS);
+  const { rows } = await getPool().query(
+    `SELECT COUNT(*)::int AS c FROM login_attempts
+     WHERE ip = $1 AND success = FALSE AND created_at >= $2`,
+    [ip, since]
+  );
+  return rows[0].c;
+}
+
 async function recordLoginAttempt(emailNormalized, ip, success) {
   await getPool().query(
     `INSERT INTO login_attempts (email_normalized, ip, success) VALUES ($1, $2, $3)`,
@@ -137,8 +160,9 @@ async function login({ email, password, ip }) {
     return { ok: false, code: 'INVALID_CREDENTIALS' };
   }
   const emailNormalized = normalizeEmail(email);
-  const failed = await countRecentFailedLogins(emailNormalized);
-  if (failed >= MAX_LOGIN_ATTEMPTS) {
+  const failedEmail = await countRecentFailedLogins(emailNormalized);
+  const failedIp = ip ? await countRecentFailedLoginsByIp(ip) : 0;
+  if (failedEmail >= MAX_LOGIN_ATTEMPTS || failedIp >= MAX_LOGIN_ATTEMPTS) {
     return { ok: false, code: 'RATE_LIMITED' };
   }
 
@@ -244,8 +268,18 @@ async function resendVerification({ email, appUrl }) {
   );
   const base = appUrl || config.appUrl || 'http://localhost:3000';
   const verifyUrl = `${base}/pages/verify-email.html?token=${encodeURIComponent(rawToken)}`;
-  await emailService.sendVerificationEmail(user.email, verifyUrl);
-  return { ok: true };
+  let emailSent = false;
+  try {
+    const mailResult = await emailService.sendVerificationEmail(user.email, verifyUrl);
+    emailSent = Boolean(mailResult && mailResult.sent);
+  } catch (mailErr) {
+    console.error('[auth] resend verification email failed:', mailErr.message);
+  }
+  return {
+    ok: true,
+    emailSent,
+    ...(config.isProduction ? {} : { _testVerifyToken: rawToken }),
+  };
 }
 
 async function requestPasswordReset({ email, appUrl }) {
@@ -267,8 +301,15 @@ async function requestPasswordReset({ email, appUrl }) {
   );
   const base = appUrl || config.appUrl || 'http://localhost:3000';
   const resetUrl = `${base}/pages/reset-password.html?token=${encodeURIComponent(rawToken)}`;
-  await emailService.sendPasswordResetEmail(user.email, resetUrl);
-  return { ok: true };
+  try {
+    await emailService.sendPasswordResetEmail(user.email, resetUrl);
+  } catch (mailErr) {
+    console.error('[auth] password reset email failed:', mailErr.message);
+  }
+  return {
+    ok: true,
+    ...(config.isProduction ? {} : { _testResetToken: rawToken }),
+  };
 }
 
 async function resetPassword({ token, password, passwordConfirm }) {
@@ -311,10 +352,14 @@ async function resetPassword({ token, password, passwordConfirm }) {
        WHERE user_id = $1 AND used_at IS NULL`,
       [row.user_id]
     );
+    await client.query(
+      `DELETE FROM session WHERE sess::text LIKE $1`,
+      [`%"userId":"${row.user_id}"%`]
+    );
     await client.query('COMMIT');
     return { ok: true, userId: row.user_id };
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch (_) {}
     throw err;
   } finally {
     client.release();
