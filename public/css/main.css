@@ -292,7 +292,7 @@ button { cursor: pointer; border: none; background: none; }
   display: flex; align-items: center; gap: 8px;
   font-size: var(--text-caption); color: var(--color-fog); cursor: pointer;
 }
-.checkbox-item input { accent-color: var(--color-acid-lime); width: 14px; height: 14px; }
+.checkbox-item input { accent-color: var(--color-mist); width: 14px; height: 14px; }
 
 .card {
   background: var(--surface-panel);
@@ -403,7 +403,7 @@ table.data .mono { font-family: var(--font-mono); font-size: 12px; color: var(--
 .spinner {
   width: 20px; height: 20px;
   border: 2px solid var(--color-graphite);
-  border-top-color: var(--color-acid-lime);
+  border-top-color: var(--color-mist);
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
 }
