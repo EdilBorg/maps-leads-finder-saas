@@ -1,6 +1,6 @@
 /**
  * Trust proxy / req.ip behaviour.
- * Default TRUST_PROXY_HOPS=0: X-Forwarded-For from clients is ignored for req.ip.
+ * With TRUST_PROXY_HOPS=0, spoofed X-Forwarded-For must not become req.ip.
  */
 require('dotenv').config();
 const { describe, it, before } = require('node:test');
@@ -29,7 +29,6 @@ function request(app, { method = 'GET', path, body, cookie, headers = {} } = {})
           });
           res.on('end', () => {
             server.close(() => {
-              const setCookie = res.headers['set-cookie'];
               resolve({
                 statusCode: res.statusCode,
                 json: () => {
@@ -39,7 +38,6 @@ function request(app, { method = 'GET', path, body, cookie, headers = {} } = {})
                     return null;
                   }
                 },
-                cookie: setCookie ? setCookie.map((c) => c.split(';')[0]).join('; ') : cookie,
               });
             });
           });
@@ -52,17 +50,37 @@ function request(app, { method = 'GET', path, body, cookie, headers = {} } = {})
   });
 }
 
-describe('client IP trust (default no proxy trust)', () => {
+function loadAppWithTrust(hops) {
+  process.env.TRUST_PROXY_HOPS = String(hops);
+  process.env.ENABLE_TEST_ROUTES = '1';
+  if (process.env.NODE_ENV === 'production') process.env.NODE_ENV = 'test';
+  delete require.cache[require.resolve('../src/config/env')];
+  delete require.cache[require.resolve('../src/app')];
+  const { createApp } = require('../src/app');
+  return createApp({ sessionStore: new session.MemoryStore() });
+}
+
+describe('client IP with TRUST_PROXY_HOPS=0', () => {
   let app;
   before(() => {
-    process.env.TRUST_PROXY_HOPS = '0';
-    delete require.cache[require.resolve('../src/config/env')];
-    delete require.cache[require.resolve('../src/app')];
-    const { createApp } = require('../src/app');
-    app = createApp({ sessionStore: new session.MemoryStore() });
+    app = loadAppWithTrust(0);
   });
 
-  it('rejects CSRF-less requests even with spoofed X-Forwarded-For', async () => {
+  it('req.ip is loopback, not the spoofed X-Forwarded-For value', async () => {
+    const res = await request(app, {
+      path: '/__test/client-ip',
+      headers: { 'X-Forwarded-For': '203.0.113.99' },
+    });
+    assert.equal(res.statusCode, 200);
+    const ip = res.json().ip;
+    assert.ok(
+      ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1',
+      `unexpected ip ${ip}`
+    );
+    assert.notEqual(ip, '203.0.113.99');
+  });
+
+  it('rejects CSRF-less login even with spoofed XFF', async () => {
     const res = await request(app, {
       method: 'POST',
       path: '/api/auth/login',
@@ -72,21 +90,21 @@ describe('client IP trust (default no proxy trust)', () => {
     assert.equal(res.statusCode, 403);
     assert.equal(res.json().code, 'CSRF');
   });
+});
 
-  it('processes login under spoofed XFF without using it as identity', async () => {
-    const csrfRes = await request(app, { path: '/api/auth/csrf' });
-    assert.equal(csrfRes.statusCode, 200);
-    const token = csrfRes.json().csrfToken;
+describe('client IP with TRUST_PROXY_HOPS=1 (in-process simulation only)', () => {
+  let app;
+  before(() => {
+    app = loadAppWithTrust(1);
+  });
+
+  it('documents Express behaviour when one hop is trusted — not production proof', async () => {
     const res = await request(app, {
-      method: 'POST',
-      path: '/api/auth/login',
-      cookie: csrfRes.cookie,
-      headers: {
-        'X-CSRF-Token': token,
-        'X-Forwarded-For': '203.0.113.99, 198.51.100.1',
-      },
-      body: { email: 'spoof@example.com', password: 'password12' },
+      path: '/__test/client-ip',
+      headers: { 'X-Forwarded-For': '203.0.113.50' },
     });
-    assert.ok([401, 429].includes(res.statusCode));
+    assert.equal(res.statusCode, 200);
+    const ip = res.json().ip;
+    assert.ok(typeof ip === 'string' || ip === null);
   });
 });

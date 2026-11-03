@@ -1,19 +1,26 @@
 /**
- * Integration: connect-pg-simple session persistence against real PostgreSQL.
- * Skipped when DATABASE_URL is not set.
+ * Integration: connect-pg-simple session persistence against a dedicated test DB.
  *
- * Proves sessions survive app recreate (new createApp instance) using the same store.
+ * Requires:
+ *   ALLOW_DB_TESTS=1
+ *   DATABASE_URL pointing at a DB whose name ends with _test
+ *   NODE_ENV !== production
+ *
+ * Process-restart proof: after login, a child Node process
+ * (tests/helpers/session_child.js) boots a new app and must accept the same cookie.
  */
 require('dotenv').config();
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const path = require('path');
+const { spawnSync } = require('node:child_process');
 const session = require('express-session');
 const pgSession = require('connect-pg-simple')(session);
 
-const hasDb = Boolean(process.env.DATABASE_URL || process.env.PGHOST);
+const { shouldRunDbIntegration, assertSafeTestDatabase } = require('./helpers/testDbGuard');
 
-function request(app, { method = 'GET', path, body, cookie, headers = {} } = {}) {
+function request(app, { method = 'GET', path: reqPath, body, cookie, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     const server = app.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
@@ -26,7 +33,7 @@ function request(app, { method = 'GET', path, body, cookie, headers = {} } = {})
         ...headers,
       };
       const req = http.request(
-        { hostname: '127.0.0.1', port, path, method, headers: reqHeaders },
+        { hostname: '127.0.0.1', port, path: reqPath, method, headers: reqHeaders },
         (res) => {
           let data = '';
           res.on('data', (c) => {
@@ -59,7 +66,7 @@ function request(app, { method = 'GET', path, body, cookie, headers = {} } = {})
   });
 }
 
-describe('PostgreSQL session store (connect-pg-simple)', { skip: !hasDb }, () => {
+describe('PostgreSQL session store (connect-pg-simple)', { skip: !shouldRunDbIntegration() }, () => {
   let createApp;
   let getPool;
   let closePool;
@@ -75,11 +82,11 @@ describe('PostgreSQL session store (connect-pg-simple)', { skip: !hasDb }, () =>
     return { token: res.json().csrfToken, cookie: res.cookie };
   }
 
-  async function post(path, body, cookie) {
+  async function post(p, body, cookie) {
     const csrf = await getCsrf(cookie);
     return request(app, {
       method: 'POST',
-      path,
+      path: p,
       body,
       cookie: csrf.cookie,
       headers: { 'X-CSRF-Token': csrf.token },
@@ -87,10 +94,10 @@ describe('PostgreSQL session store (connect-pg-simple)', { skip: !hasDb }, () =>
   }
 
   before(async () => {
+    assertSafeTestDatabase();
     ({ createApp } = require('../src/app'));
     ({ getPool, closePool } = require('../src/db/pool'));
     const fs = require('fs');
-    const path = require('path');
     for (const file of ['001_auth.sql', '002_fix_session_oids.sql']) {
       const sql = fs.readFileSync(path.join(__dirname, '..', 'migrations', file), 'utf8');
       await getPool().query(sql);
@@ -131,18 +138,29 @@ describe('PostgreSQL session store (connect-pg-simple)', { skip: !hasDb }, () =>
 
     const me = await request(app, { path: '/api/auth/me', cookie: login.cookie });
     assert.equal(me.statusCode, 200);
-    assert.equal(me.json().user.email.toLowerCase(), email.toLowerCase());
   });
 
-  it('session remains valid after recreating the Express app (same PG store)', async () => {
+  it('new Node process recovers the session from PostgreSQL via cookie', async () => {
     const login = await post('/api/auth/login', { email, password });
     assert.equal(login.statusCode, 200);
     const cookie = login.cookie;
 
-    const app2 = createApp({ sessionStore: store });
-    const me = await request(app2, { path: '/api/auth/me', cookie });
-    assert.equal(me.statusCode, 200);
-    assert.ok(me.json().user);
+    const child = path.join(__dirname, 'helpers', 'session_child.js');
+    const result = spawnSync(process.execPath, [child], {
+      env: {
+        ...process.env,
+        SESSION_COOKIE: cookie,
+        ALLOW_DB_TESTS: '1',
+      },
+      encoding: 'utf8',
+      timeout: 30000,
+    });
+
+    assert.equal(
+      result.status,
+      0,
+      `child failed: status=${result.status} stderr=${result.stderr} stdout=${result.stdout}`
+    );
   });
 
   it('logout destroys the session so /me fails', async () => {

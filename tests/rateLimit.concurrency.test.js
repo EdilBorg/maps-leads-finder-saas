@@ -1,14 +1,14 @@
 /**
  * Concurrent rate-limit hits against PostgreSQL.
- * Skipped when DATABASE_URL is not set.
+ * Requires ALLOW_DB_TESTS=1 and a dedicated *_test database.
  */
 require('dotenv').config();
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 
-const hasDb = Boolean(process.env.DATABASE_URL || process.env.PGHOST);
+const { shouldRunDbIntegration, assertSafeTestDatabase } = require('./helpers/testDbGuard');
 
-describe('rate limit atomic concurrency', { skip: !hasDb }, () => {
+describe('rate limit atomic concurrency', { skip: !shouldRunDbIntegration() }, () => {
   let hitPg;
   let clearPgBucket;
   let getPool;
@@ -16,6 +16,7 @@ describe('rate limit atomic concurrency', { skip: !hasDb }, () => {
   const bucket = `concurrent-test-${Date.now()}`;
 
   before(async () => {
+    assertSafeTestDatabase();
     ({ hitPg, clearPgBucket } = require('../src/middleware/rateLimit'));
     ({ getPool, closePool } = require('../src/db/pool'));
     const fs = require('fs');
