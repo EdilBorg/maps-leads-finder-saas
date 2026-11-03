@@ -1,6 +1,9 @@
 /**
  * Health check routes.
  * Used by monitoring and deployment platforms.
+ *
+ * Never exposes internal error messages, stack traces or database
+ * connection details to the client.
  */
 
 const express = require('express');
@@ -12,8 +15,8 @@ const router = express.Router();
 /**
  * GET /api/health
  * Returns basic application status.
- * Database connectivity is reported when available, without failing the endpoint
- * if the database is not yet configured (this stage has no required tables).
+ * Database connectivity is reported as a boolean only.
+ * Internal error details are logged server-side, never returned to the client.
  */
 router.get('/health', async (req, res) => {
   const response = {
@@ -25,8 +28,6 @@ router.get('/health', async (req, res) => {
     uptimeSeconds: Math.floor(process.uptime()),
   };
 
-  // Attempt a lightweight DB check; do not fail the whole health endpoint
-  // if the database is unreachable during early setup.
   try {
     const db = await checkConnection();
     response.database = {
@@ -34,12 +35,12 @@ router.get('/health', async (req, res) => {
       latencyMs: db.latencyMs,
     };
   } catch (err) {
+    // Log internal details only on the server
+    console.warn('[health] Database check failed:', err.message);
     response.database = {
       connected: false,
-      error: err.message,
     };
-    // Keep overall status "ok" for process health; database readiness
-    // will be required in later stages once migrations exist.
+    // Do not include err.message, connection strings, or any credentials
   }
 
   res.status(200).json(response);
