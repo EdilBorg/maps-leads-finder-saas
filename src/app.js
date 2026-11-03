@@ -73,6 +73,12 @@ function createApp(options = {}) {
   app.use('/api', healthRouter);
   app.use('/api/auth', authRouter);
 
+  if (process.env.ENABLE_TEST_ROUTES === '1' && process.env.NODE_ENV !== 'production') {
+    app.get('/__test/client-ip', (req, res) => {
+      res.json({ ip: req.ip || null, ips: req.ips || [] });
+    });
+  }
+
   app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
   });
