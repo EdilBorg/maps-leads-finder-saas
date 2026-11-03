@@ -1,5 +1,6 @@
 /**
- * Ensures rate limiting does not trust the left-most X-Forwarded-For from clients.
+ * Trust proxy / req.ip behaviour.
+ * Default TRUST_PROXY_HOPS=0: X-Forwarded-For from clients is ignored for req.ip.
  */
 require('dotenv').config();
 const { describe, it, before } = require('node:test');
@@ -51,9 +52,12 @@ function request(app, { method = 'GET', path, body, cookie, headers = {} } = {})
   });
 }
 
-describe('client IP trust', () => {
+describe('client IP trust (default no proxy trust)', () => {
   let app;
   before(() => {
+    process.env.TRUST_PROXY_HOPS = '0';
+    delete require.cache[require.resolve('../src/config/env')];
+    delete require.cache[require.resolve('../src/app')];
     const { createApp } = require('../src/app');
     app = createApp({ sessionStore: new session.MemoryStore() });
   });
@@ -69,7 +73,7 @@ describe('client IP trust', () => {
     assert.equal(res.json().code, 'CSRF');
   });
 
-  it('accepts CSRF and processes login without treating spoofed XFF as identity', async () => {
+  it('processes login under spoofed XFF without using it as identity', async () => {
     const csrfRes = await request(app, { path: '/api/auth/csrf' });
     assert.equal(csrfRes.statusCode, 200);
     const token = csrfRes.json().csrfToken;
