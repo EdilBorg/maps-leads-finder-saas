@@ -88,17 +88,18 @@ maps-leads-finder-saas/
 │   └── css/
 │       └── main.css        # Paleta oficial + tipografia Inter
 ├── src/
+│   ├── app.js              # Factory createApp() (sem listen)
+│   ├── server.js           # Entry point (listen apenas se main)
 │   ├── config/
 │   │   └── env.js          # Validação e carregamento de variáveis
 │   ├── db/
-│   │   └── pool.js         # Pool PostgreSQL (sem tabelas ainda)
+│   │   └── pool.js         # Pool PostgreSQL + checkConnection injetável
 │   ├── middleware/
 │   │   └── errorHandler.js # 404 + error handler centralizado
 │   ├── routes/
 │   │   └── health.js       # GET /api/health
 │   ├── services/           # (reservado para lógica de domínio)
-│   ├── utils/              # (reservado)
-│   └── server.js           # Entry point
+│   └── utils/              # (reservado)
 ├── tests/
 │   └── health.test.js
 ├── scripts/                # (reservado para migrações, seeds, etc.)
