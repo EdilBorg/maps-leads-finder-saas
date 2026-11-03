@@ -34,6 +34,9 @@ const config = {
   },
 
   sessionTable: getEnv('SESSION_TABLE', 'session'),
+
+  /** Number of trusted reverse-proxy hops (Abasthan/nginx). Default 1. */
+  trustProxyHops: parseInt(getEnv('TRUST_PROXY_HOPS', '1'), 10),
 };
 
 function validateConfig() {
