@@ -54,7 +54,7 @@ function createApp(options = {}) {
       name: config.sessionCookieName || 'mlf.sid',
       secret: config.sessionSecret,
       resave: false,
-      saveUninitialized: false,
+      saveUninitialized: true,
       cookie: {
         httpOnly: true,
         secure: config.isProduction,
