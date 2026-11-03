@@ -112,6 +112,22 @@
     } catch (_) {}
   }
 
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&')
+      .replace(/</g, '<')
+      .replace(/>/g, '>')
+      .replace(/"/g, '"')
+      .replace(/'/g, '&#39;');
+  }
+
+  function createTextCell(text, className) {
+    const td = document.createElement('td');
+    if (className) td.className = className;
+    td.textContent = text == null ? '' : String(text);
+    return td;
+  }
+
   function renderResultsState() {
     const empty = $('#results-empty');
     const loading = $('#results-loading');
@@ -128,62 +144,49 @@
     if (has) {
       const body = $('#results-body');
       if (!body) return;
-      body.innerHTML = currentResults
-        .map((r) => {
-          const badgeClass =
-            r.validation === 'Completo'
-              ? 'badge-success'
-              : r.validation === 'Parcial'
-                ? 'badge-warn'
-                : 'badge-info';
-          return (
-            '<tr>' +
-            '<td><input type="checkbox" aria-label="Selecionar"></td>' +
-            '<td class="cell-name">' +
-            escapeHtml(r.name) +
-            '</td>' +
-            '<td>' +
-            escapeHtml(r.category) +
-            '</td>' +
-            '<td>' +
-            escapeHtml(r.location) +
-            '</td>' +
-            '<td class="mono">' +
-            escapeHtml(r.phone) +
-            '</td>' +
-            '<td class="mono">' +
-            escapeHtml(r.email) +
-            '</td>' +
-            '<td class="mono">' +
-            escapeHtml(r.website) +
-            '</td>' +
-            '<td>' +
-            escapeHtml(r.rating) +
-            '</td>' +
-            '<td>' +
-            escapeHtml(r.reviews) +
-            '</td>' +
-            '<td><span class="badge ' +
-            badgeClass +
-            '">' +
-            escapeHtml(r.validation) +
-            '</span></td>' +
-            '</tr>'
-          );
-        })
-        .join('');
+
+      while (body.firstChild) {
+        body.removeChild(body.firstChild);
+      }
+
+      currentResults.forEach((r) => {
+        const tr = document.createElement('tr');
+
+        const tdCheck = document.createElement('td');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.setAttribute('aria-label', 'Selecionar');
+        tdCheck.appendChild(cb);
+        tr.appendChild(tdCheck);
+
+        tr.appendChild(createTextCell(r.name, 'cell-name'));
+        tr.appendChild(createTextCell(r.category));
+        tr.appendChild(createTextCell(r.location));
+        tr.appendChild(createTextCell(r.phone, 'mono'));
+        tr.appendChild(createTextCell(r.email, 'mono'));
+        tr.appendChild(createTextCell(r.website, 'mono'));
+        tr.appendChild(createTextCell(r.rating));
+        tr.appendChild(createTextCell(r.reviews));
+
+        const tdVal = document.createElement('td');
+        const badge = document.createElement('span');
+        const badgeClass =
+          r.validation === 'Completo'
+            ? 'badge badge-success'
+            : r.validation === 'Parcial'
+              ? 'badge badge-warn'
+              : 'badge badge-info';
+        badge.className = badgeClass;
+        badge.textContent = r.validation == null ? '' : String(r.validation);
+        tdVal.appendChild(badge);
+        tr.appendChild(tdVal);
+
+        body.appendChild(tr);
+      });
 
       const count = $('#results-count');
       if (count) count.textContent = currentResults.length + ' resultados (demo)';
     }
-  }
-
-  function escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, '&')
-      .replace(/</g, '<')
-      .replace(/>/g, '>')
-      .replace(/"/g, '"');
   }
 
   function simulateSearch() {
