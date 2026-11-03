@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Verificar email — Maps Leads Finder</title>
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/auth.css">
+</head>
+<body>
+  <div class="auth-page">
+    <div class="auth-card">
+      <div class="auth-brand">Maps Leads Finder</div>
+      <h1>Verificação de email</h1>
+      <p class="sub">A confirmar o seu endereço…</p>
+      <div class="error-box" id="err"></div>
+      <div class="success-box" id="ok"></div>
+      <div class="links"><a href="/pages/login.html">Ir para login</a></div>
+    </div>
+  </div>
+  <script>
+  async function postJson(url, body) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { res, data };
+  }
+  (async () => {
+    const params = new URLSearchParams(location.search);
+    const token = params.get('token') || '';
+    const err = document.getElementById('err');
+    const ok = document.getElementById('ok');
+    if (!token) {
+      err.textContent = 'Token em falta.';
+      err.classList.add('visible');
+      return;
+    }
+    const { res, data } = await postJson('/api/auth/verify-email', { token });
+    if (!res.ok) {
+      err.textContent = data.error || 'Verificação falhou.';
+      err.classList.add('visible');
+      return;
+    }
+    ok.textContent = data.message || 'Email verificado.';
+    ok.classList.add('visible');
+  })();
+  </script>
+</body>
+</html>
