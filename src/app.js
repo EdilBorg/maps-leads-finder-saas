@@ -8,22 +8,30 @@ const path = require('path');
 const express = require('express');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const session = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
 
 const { config, validateConfig } = require('./config/env');
+const { getPool } = require('./db/pool');
 const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
+const { loadUser } = require('./middleware/auth');
 const healthRouter = require('./routes/health');
+const authRouter = require('./routes/auth');
 
-// Validate environment once when the module is loaded
 validateConfig();
 
-function createApp() {
+/**
+ * @param {object} [options]
+ * @param {import('express-session').Store} [options.sessionStore] - override for tests
+ */
+function createApp(options = {}) {
   const app = express();
 
   app.set('trust proxy', 1);
 
   app.use(
     helmet({
-      contentSecurityPolicy: false, // Tuned later when frontend is fully defined
+      contentSecurityPolicy: false,
     })
   );
 
@@ -32,18 +40,41 @@ function createApp() {
   app.use(express.json({ limit: '64kb' }));
   app.use(express.urlencoded({ extended: false }));
 
-  // Static frontend (HTML / CSS / JS Vanilla)
+  const store =
+    options.sessionStore ||
+    new pgSession({
+      pool: getPool(),
+      tableName: config.sessionTable || 'session',
+      createTableIfMissing: false,
+    });
+
+  app.use(
+    session({
+      store,
+      name: config.sessionCookieName || 'mlf.sid',
+      secret: config.sessionSecret,
+      resave: false,
+      saveUninitialized: false,
+      cookie: {
+        httpOnly: true,
+        secure: config.isProduction,
+        sameSite: 'lax',
+        maxAge: config.sessionMaxAgeMs,
+      },
+    })
+  );
+
+  app.use(loadUser);
+
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
-  // API routes
   app.use('/api', healthRouter);
+  app.use('/api/auth', authRouter);
 
-  // SPA shell — public/index.html
   app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
   });
 
-  // 404 + centralized error handler
   app.use(notFoundHandler);
   app.use(errorHandler);
 
