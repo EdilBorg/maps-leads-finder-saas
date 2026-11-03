@@ -20,15 +20,13 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_normalized_uidx ON users (email_normalized);
 
+-- connect-pg-simple session table (compatible with PostgreSQL 12+)
 CREATE TABLE IF NOT EXISTS "session" (
-  "sid" varchar NOT NULL COLLATE "default",
+  "sid" varchar NOT NULL PRIMARY KEY,
   "sess" json NOT NULL,
   "expire" timestamp(6) NOT NULL
-)
-WITH (OIDS=FALSE);
+);
 
-ALTER TABLE "session" DROP CONSTRAINT IF EXISTS session_pkey;
-ALTER TABLE "session" ADD CONSTRAINT session_pkey PRIMARY KEY ("sid") NOT DEFERRABLE INITIALLY IMMEDIATE;
 CREATE INDEX IF NOT EXISTS "IDX_session_expire" ON "session" ("expire");
 
 CREATE TABLE IF NOT EXISTS email_verification_tokens (
@@ -64,3 +62,12 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 );
 
 CREATE INDEX IF NOT EXISTS login_attempts_email_created_idx ON login_attempts (email_normalized, created_at DESC);
+
+-- Rate limit buckets (shared across app instances; no Redis)
+CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+  bucket_key  TEXT PRIMARY KEY,
+  hit_count   INT NOT NULL DEFAULT 0,
+  reset_at    TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS rate_limit_buckets_reset_idx ON rate_limit_buckets (reset_at);
