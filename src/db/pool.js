@@ -4,6 +4,9 @@
  *
  * Connection is configured exclusively via environment variables.
  * No credentials are hardcoded.
+ *
+ * checkConnection can be overridden in tests via setCheckConnection()
+ * so health tests do not require a live database.
  */
 
 const { Pool } = require('pg');
@@ -11,15 +14,10 @@ const { config } = require('../config/env');
 
 let pool = null;
 
-/**
- * Build connection configuration from environment.
- */
 function buildPoolConfig() {
   if (config.database.url) {
     return {
       connectionString: config.database.url,
-      // SSL can be enabled later via env when deploying to managed Postgres
-      // ssl: config.isProduction ? { rejectUnauthorized: false } : false,
     };
   }
 
@@ -32,9 +30,6 @@ function buildPoolConfig() {
   };
 }
 
-/**
- * Returns a shared Pool instance (lazy initialization).
- */
 function getPool() {
   if (!pool) {
     const poolConfig = buildPoolConfig();
@@ -48,10 +43,10 @@ function getPool() {
 }
 
 /**
- * Simple health check query.
+ * Default health check against the real pool.
  * Returns { ok: true, latencyMs } or throws.
  */
-async function checkConnection() {
+async function defaultCheckConnection() {
   const start = Date.now();
   const client = await getPool().connect();
   try {
@@ -65,9 +60,24 @@ async function checkConnection() {
   }
 }
 
+/** Active implementation (overridable in tests). */
+let checkConnectionImpl = defaultCheckConnection;
+
 /**
- * Graceful shutdown of the pool.
+ * Public health-check entry point used by routes.
  */
+async function checkConnection() {
+  return checkConnectionImpl();
+}
+
+/**
+ * Replace the connection checker (for tests).
+ * Pass null/undefined to restore the default implementation.
+ */
+function setCheckConnection(fn) {
+  checkConnectionImpl = typeof fn === 'function' ? fn : defaultCheckConnection;
+}
+
 async function closePool() {
   if (pool) {
     await pool.end();
@@ -78,5 +88,6 @@ async function closePool() {
 module.exports = {
   getPool,
   checkConnection,
+  setCheckConnection,
   closePool,
 };
