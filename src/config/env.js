@@ -35,8 +35,18 @@ const config = {
 
   sessionTable: getEnv('SESSION_TABLE', 'session'),
 
-  /** Number of trusted reverse-proxy hops (Abasthan/nginx). Default 1. */
-  trustProxyHops: parseInt(getEnv('TRUST_PROXY_HOPS', '1'), 10),
+  /**
+   * Trusted reverse-proxy hops for Express req.ip.
+   * Default 0 (do not trust X-Forwarded-For) in all environments unless set.
+   * Production must set TRUST_PROXY_HOPS explicitly to match the real proxy chain
+   * after validating the host platform (e.g. Abasthan/nginx). Never assume a universal value.
+   */
+  trustProxyHops: (() => {
+    const raw = getEnv('TRUST_PROXY_HOPS');
+    if (raw === undefined || raw === '') return 0;
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  })(),
 };
 
 function validateConfig() {

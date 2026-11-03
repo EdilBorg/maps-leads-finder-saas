@@ -1,13 +1,19 @@
 /**
  * Rate limiter backed by PostgreSQL (rate_limit_buckets).
  * Shared across process restarts and multiple app instances — no Redis.
+ *
+ * Atomic increment uses a single INSERT ... ON CONFLICT DO UPDATE so concurrent
+ * requests on the same bucket cannot under-count.
+ *
  * Falls back to in-process Map only if the database is unavailable
- * (degraded mode; documented in README).
+ * (degraded mode: NOT distributed; documented in README).
  */
 
 const { getPool } = require('../db/pool');
 
 const memoryBuckets = new Map();
+let lastCleanupAt = 0;
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 function pruneMemory(now) {
   if (memoryBuckets.size < 2000) return;
@@ -16,43 +22,42 @@ function pruneMemory(now) {
   }
 }
 
+/**
+ * Atomically record a hit and return { count, resetAt, limited }.
+ * Exported for concurrency tests.
+ */
 async function hitPg(bucketKey, windowMs, max) {
   const pool = getPool();
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const { rows } = await client.query(
-      `SELECT hit_count, reset_at FROM rate_limit_buckets WHERE bucket_key = $1 FOR UPDATE`,
-      [bucketKey]
-    );
-    const now = new Date();
-    let hitCount;
-    let resetAt;
-    if (!rows.length || new Date(rows[0].reset_at) <= now) {
-      hitCount = 1;
-      resetAt = new Date(now.getTime() + windowMs);
-      await client.query(
-        `INSERT INTO rate_limit_buckets (bucket_key, hit_count, reset_at)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (bucket_key) DO UPDATE SET hit_count = $2, reset_at = $3`,
-        [bucketKey, hitCount, resetAt]
-      );
-    } else {
-      hitCount = rows[0].hit_count + 1;
-      resetAt = new Date(rows[0].reset_at);
-      await client.query(
-        `UPDATE rate_limit_buckets SET hit_count = $2 WHERE bucket_key = $1`,
-        [bucketKey, hitCount]
-      );
-    }
-    await client.query('COMMIT');
-    return { count: hitCount, resetAt, limited: hitCount > max };
-  } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    throw err;
-  } finally {
-    client.release();
+  const resetAtCandidate = new Date(Date.now() + windowMs);
+
+  const { rows } = await pool.query(
+    `INSERT INTO rate_limit_buckets (bucket_key, hit_count, reset_at)
+     VALUES ($1, 1, $2)
+     ON CONFLICT (bucket_key) DO UPDATE SET
+       hit_count = CASE
+         WHEN rate_limit_buckets.reset_at <= NOW() THEN 1
+         ELSE rate_limit_buckets.hit_count + 1
+       END,
+       reset_at = CASE
+         WHEN rate_limit_buckets.reset_at <= NOW() THEN EXCLUDED.reset_at
+         ELSE rate_limit_buckets.reset_at
+       END
+     RETURNING hit_count, reset_at`,
+    [bucketKey, resetAtCandidate]
+  );
+
+  const hitCount = rows[0].hit_count;
+  const resetAt = new Date(rows[0].reset_at);
+
+  const now = Date.now();
+  if (now - lastCleanupAt > CLEANUP_INTERVAL_MS) {
+    lastCleanupAt = now;
+    pool
+      .query(`DELETE FROM rate_limit_buckets WHERE reset_at < NOW() - interval '1 hour'`)
+      .catch((err) => console.warn('[rateLimit] cleanup failed:', err.message));
   }
+
+  return { count: hitCount, resetAt, limited: hitCount > max };
 }
 
 function hitMemory(bucketKey, windowMs, max) {
@@ -81,7 +86,10 @@ function rateLimit({ windowMs, max, keyFn }) {
       try {
         result = await hitPg(bucketKey, windowMs, max);
       } catch (dbErr) {
-        console.warn('[rateLimit] PostgreSQL unavailable, using in-memory fallback:', dbErr.message);
+        console.warn(
+          '[rateLimit] PostgreSQL unavailable, using in-memory fallback (not distributed):',
+          dbErr.message
+        );
         result = hitMemory(bucketKey, windowMs, max);
       }
 
@@ -104,4 +112,14 @@ function resetRateLimits() {
   memoryBuckets.clear();
 }
 
-module.exports = { rateLimit, resetRateLimits };
+async function clearPgBucket(bucketKey) {
+  await getPool().query(`DELETE FROM rate_limit_buckets WHERE bucket_key = $1`, [bucketKey]);
+}
+
+module.exports = {
+  rateLimit,
+  resetRateLimits,
+  hitPg,
+  hitMemory,
+  clearPgBucket,
+};
