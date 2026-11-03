@@ -27,8 +27,8 @@ validateConfig();
 function createApp(options = {}) {
   const app = express();
 
-  // Only trust the configured number of reverse-proxy hops (Abasthan/nginx).
-  // Never trust an arbitrary client-supplied X-Forwarded-For chain.
+  // Trust proxy only when TRUST_PROXY_HOPS > 0 (explicit). Default is no trust.
+  // Never read X-Forwarded-For manually — clients can spoof it.
   app.set('trust proxy', config.trustProxyHops > 0 ? config.trustProxyHops : false);
 
   app.use(
