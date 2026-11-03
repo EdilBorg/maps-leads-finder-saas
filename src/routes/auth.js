@@ -1,20 +1,50 @@
 /**
  * Auth API routes.
- * Never returns password hashes or raw tokens.
+ * Never returns password hashes or raw tokens in production.
  */
 
 const express = require('express');
 const authService = require('../services/authService');
 const { requireAuth } = require('../middleware/auth');
+const { requireCsrf, csrfTokenHandler } = require('../middleware/csrf');
+const { rateLimit } = require('../middleware/rateLimit');
 const { config } = require('../config/env');
 
 const router = express.Router();
 
 function clientIp(req) {
-  return req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null;
+  const xf = req.headers['x-forwarded-for'];
+  if (typeof xf === 'string' && xf.length) return xf.split(',')[0].trim();
+  return req.ip || req.socket?.remoteAddress || null;
 }
 
-router.post('/register', async (req, res, next) => {
+const limitRegister = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  keyFn: (req) => `reg:${clientIp(req)}`,
+});
+
+const limitLogin = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  keyFn: (req) => `login:${clientIp(req)}`,
+});
+
+const limitForgot = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyFn: (req) => `forgot:${clientIp(req)}`,
+});
+
+const limitResend = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyFn: (req) => `resend:${clientIp(req)}`,
+});
+
+router.get('/csrf', csrfTokenHandler);
+
+router.post('/register', limitRegister, requireCsrf, async (req, res, next) => {
   try {
     const { name, email, password, passwordConfirm } = req.body || {};
     const result = await authService.register({
@@ -32,16 +62,24 @@ router.post('/register', async (req, res, next) => {
         errors: result.errors,
       });
     }
-    return res.status(201).json({
-      message: 'Conta criada. Verifique o seu email para ativar a conta.',
+
+    const payload = {
       user: result.user,
-    });
+      emailSent: result.emailSent,
+      message: result.emailSent
+        ? 'Conta criada. Verifique o seu email para ativar a conta.'
+        : 'Conta criada, mas o email de verificação não pôde ser enviado. Use “Reenviar verificação”.',
+    };
+    if (!config.isProduction && result._testVerifyToken) {
+      payload._testVerifyToken = result._testVerifyToken;
+    }
+    return res.status(201).json(payload);
   } catch (err) {
     return next(err);
   }
 });
 
-router.post('/login', async (req, res, next) => {
+router.post('/login', limitLogin, requireCsrf, async (req, res, next) => {
   try {
     const { email, password } = req.body || {};
     const result = await authService.login({
@@ -63,9 +101,13 @@ router.post('/login', async (req, res, next) => {
       if (err) return next(err);
       req.session.userId = result.user.id;
       req.session.emailVerified = result.user.emailVerified;
+      req.session.csrfToken = require('crypto').randomBytes(32).toString('base64url');
       req.session.save((saveErr) => {
         if (saveErr) return next(saveErr);
-        return res.json({ user: result.user });
+        return res.json({
+          user: result.user,
+          csrfToken: req.session.csrfToken,
+        });
       });
     });
   } catch (err) {
@@ -73,13 +115,13 @@ router.post('/login', async (req, res, next) => {
   }
 });
 
-router.post('/logout', (req, res, next) => {
+router.post('/logout', requireCsrf, (req, res, next) => {
   if (!req.session) {
     return res.json({ message: 'Sessão terminada.' });
   }
   req.session.destroy((err) => {
     if (err) return next(err);
-    res.clearCookie(config.sessionCookieName || 'connect.sid');
+    res.clearCookie(config.sessionCookieName || 'mlf.sid');
     return res.json({ message: 'Sessão terminada.' });
   });
 });
@@ -96,7 +138,7 @@ router.get('/me', requireAuth, async (req, res, next) => {
   }
 });
 
-router.post('/verify-email', async (req, res, next) => {
+router.post('/verify-email', requireCsrf, async (req, res, next) => {
   try {
     const token = (req.body && req.body.token) || req.query.token;
     const result = await authService.verifyEmail(token);
@@ -117,32 +159,42 @@ router.post('/verify-email', async (req, res, next) => {
   }
 });
 
-router.post('/resend-verification', async (req, res, next) => {
+router.post('/resend-verification', limitResend, requireCsrf, async (req, res, next) => {
   try {
     const { email } = req.body || {};
     const result = await authService.resendVerification({ email, appUrl: config.appUrl });
     if (result.code === 'RATE_LIMITED') {
       return res.status(429).json({ error: 'Aguarde antes de solicitar outro email.' });
     }
-    return res.json({ message: 'Se a conta existir e o email não estiver verificado, enviámos instruções.' });
+    const payload = {
+      message: 'Se a conta existir e o email não estiver verificado, enviámos instruções.',
+    };
+    if (!config.isProduction && result._testVerifyToken) {
+      payload._testVerifyToken = result._testVerifyToken;
+    }
+    return res.json(payload);
   } catch (err) {
     return next(err);
   }
 });
 
-router.post('/forgot-password', async (req, res, next) => {
+router.post('/forgot-password', limitForgot, requireCsrf, async (req, res, next) => {
   try {
     const { email } = req.body || {};
-    await authService.requestPasswordReset({ email, appUrl: config.appUrl });
-    return res.json({
+    const result = await authService.requestPasswordReset({ email, appUrl: config.appUrl });
+    const payload = {
       message: 'Se o email estiver associado a uma conta, enviámos instruções de recuperação.',
-    });
+    };
+    if (!config.isProduction && result._testResetToken) {
+      payload._testResetToken = result._testResetToken;
+    }
+    return res.json(payload);
   } catch (err) {
     return next(err);
   }
 });
 
-router.post('/reset-password', async (req, res, next) => {
+router.post('/reset-password', requireCsrf, async (req, res, next) => {
   try {
     const { token, password, passwordConfirm } = req.body || {};
     const result = await authService.resetPassword({ token, password, passwordConfirm });
@@ -157,7 +209,6 @@ router.post('/reset-password', async (req, res, next) => {
       };
       return res.status(400).json({ error: map[result.code] || 'Redefinição falhou.', code: result.code });
     }
-    await authService.revokeUserSessions(result.userId);
     return res.json({ message: 'Palavra-passe atualizada. Inicie sessão novamente.' });
   } catch (err) {
     return next(err);
