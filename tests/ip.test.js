@@ -121,6 +121,6 @@ describe('TRUST_PROXY_HOPS=1 is not claimed as production-safe', () => {
       headers: { 'X-Forwarded-For': '203.0.113.50' },
     });
     assert.equal(res.statusCode, 200);
-    assert.ok(res.json().rateKey.startsWith('login:');
+    assert.ok(res.json().rateKey.startsWith('login:'));
   });
 });
