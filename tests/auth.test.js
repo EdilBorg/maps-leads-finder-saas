@@ -1,7 +1,7 @@
 /**
  * Auth behavioural tests.
- * - Without DATABASE_URL: CSRF middleware behaviour.
- * - With DATABASE_URL: full register/login/verify/reset integration.
+ * - Always: CSRF middleware behaviour (MemoryStore).
+ * - With ALLOW_DB_TESTS=1 and a dedicated *_test database: full integration.
  */
 
 require('dotenv').config();
@@ -10,7 +10,8 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const session = require('express-session');
 
-const hasDb = Boolean(process.env.DATABASE_URL || process.env.PGHOST);
+const { shouldRunDbIntegration, assertSafeTestDatabase } = require('./helpers/testDbGuard');
+const hasDb = shouldRunDbIntegration();
 
 function request(app, { method = 'GET', path, body, cookie, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
@@ -110,6 +111,7 @@ describe('auth integration', { skip: !hasDb }, () => {
   const password = 'test-password-9';
 
   before(async () => {
+    assertSafeTestDatabase();
     ({ createApp } = require('../src/app'));
     ({ getPool, closePool } = require('../src/db/pool'));
     ({ resetRateLimits } = require('../src/middleware/rateLimit'));
