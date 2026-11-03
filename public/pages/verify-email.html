@@ -19,10 +19,25 @@
     </div>
   </div>
   <script>
+  async function getCsrf() {
+    const res = await fetch('/api/auth/csrf', { credentials: 'same-origin' });
+    if (!res.ok) {
+      throw new Error('Não foi possível obter o token de segurança (CSRF).');
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!data.csrfToken) {
+      throw new Error('Token de segurança inválido.');
+    }
+    return data.csrfToken;
+  }
   async function postJson(url, body) {
+    const csrfToken = await getCsrf();
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': csrfToken,
+      },
       credentials: 'same-origin',
       body: JSON.stringify(body),
     });
@@ -39,14 +54,19 @@
       err.classList.add('visible');
       return;
     }
-    const { res, data } = await postJson('/api/auth/verify-email', { token });
-    if (!res.ok) {
-      err.textContent = data.error || 'Verificação falhou.';
+    try {
+      const { res, data } = await postJson('/api/auth/verify-email', { token });
+      if (!res.ok) {
+        err.textContent = data.error || 'Verificação falhou.';
+        err.classList.add('visible');
+        return;
+      }
+      ok.textContent = data.message || 'Email verificado.';
+      ok.classList.add('visible');
+    } catch (e) {
+      err.textContent = e.message || 'Erro de rede ou de segurança.';
       err.classList.add('visible');
-      return;
     }
-    ok.textContent = data.message || 'Email verificado.';
-    ok.classList.add('visible');
   })();
   </script>
 </body>
