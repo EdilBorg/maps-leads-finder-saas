@@ -1,6 +1,7 @@
 /**
  * Maps Leads Finder SaaS — Frontend shell (Vanilla JS)
  * Navigation, demo interactions, no real backend calls.
+ * Results rendered via createElement + textContent only (no innerHTML).
  */
 
 (function () {
@@ -110,15 +111,6 @@
     try {
       history.replaceState(null, '', '#' + view);
     } catch (_) {}
-  }
-
-  function escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, '&')
-      .replace(/</g, '<')
-      .replace(/>/g, '>')
-      .replace(/"/g, '"')
-      .replace(/'/g, '&#39;');
   }
 
   function createTextCell(text, className) {
