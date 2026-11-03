@@ -3,138 +3,115 @@
 Plataforma SaaS multiutilizador para pesquisa e gestão de leads comerciais a partir de múltiplos fornecedores de dados geográficos e comerciais.
 
 **Repositório oficial:** https://github.com/EdilBorg/maps-leads-finder-saas  
-**Especificação:** [SPECIFICATION.md](./SPECIFICATION.md)
+**Especificação:** [SPECIFICATION.md](./SPECIFICATION.md)  
+**Referência visual:** [DESIGN.md](./DESIGN.md)
 
 ---
 
 ## Estado atual
 
-**Etapa 2 — Estrutura inicial e configuração** (concluída)
+**Etapa 3 — Sistema visual e interface** (concluída)
 
-- Aplicação Node.js 20+ + Express
-- Frontend preparado (HTML / CSS / JavaScript Vanilla)
-- PostgreSQL (módulo de conexão configurável por variáveis de ambiente)
-- Endpoint `GET /api/health`
-- Middleware centralizado de erros
-- Validação de configuração
-- Estrutura modular pronta para as próximas etapas
+Interface frontend implementada com o design system definido em `DESIGN.md` (midnight precision / Linear-inspired):
 
-**Ainda não implementado** (pertence a etapas posteriores):
+- Shell da aplicação (sidebar, topbar, navegação responsiva)
+- Dashboard com indicadores de demonstração
+- Formulário de nova pesquisa (categoria, localização, fornecedores, filtros)
+- Tabela de resultados com estados empty / loading e simulação client-side
+- Histórico de pesquisas e leads guardados (dados de demonstração)
+- Tokens CSS, componentes e tipografia Inter alinhados à referência visual
 
-- Tabelas e migrações
-- Autenticação (email/password + Argon2id + sessões PostgreSQL)
-- Reserva de quotas
-- Motor de pesquisa e fornecedores
+**Etapas anteriores**
+
+1. Especificação geral (`SPECIFICATION.md` v1.1)
+2. Estrutura inicial Node.js / Express / PostgreSQL / health check
+
+---
+
+## Interface em modo demonstração
+
+Disponível no protótipo visual (sem backend de negócio):
+
+- Navegação entre Dashboard, Nova pesquisa, Resultados, Histórico e Leads
+- Seleção visual de fornecedores e filtros
+- Botão **Simular resultados (demo)** — preenche a tabela com dados fictícios identificados como demonstração
+- Filtro client-side na tabela de resultados
+- Banner permanente a indicar que os dados são de demonstração
+
+**Ainda não implementado** (etapas posteriores):
+
+- Autenticação (email/password, Argon2id, sessões PostgreSQL)
+- Reserva de quotas e motor de pesquisa real
+- Integração com fornecedores de dados
 - Planos, pagamentos e painel administrativo
+- Persistência de leads e histórico
+- Exportação
 
 ---
 
-## Decisões técnicas fechadas (incorporadas)
+## Estrutura frontend
 
-1. **Autenticação:** email/password, hashing com **Argon2id**, sessões armazenadas em **PostgreSQL** (`connect-pg-simple`).
-2. **Quotas:** reserva **transacional e idempotente** antes de iniciar qualquer pesquisa.
-3. **Leads guardados:** armazenados como **snapshots independentes** da retenção de 30 dias dos resultados de pesquisa.
+```
+public/
+├── index.html          # Shell SPA (views por secção)
+├── css/
+│   ├── tokens.css      # Tokens de design (cores, tipografia, spacing, radii)
+│   └── main.css        # Layout, componentes, estados, responsividade
+└── js/
+    └── app.js          # Navegação, mobile menu, simulação de resultados
+```
+
+Backend (sem alteração de arquitetura nesta etapa):
+
+```
+src/
+├── app.js              # createApp() + static public/ + /api/health
+├── server.js           # listen apenas como módulo principal
+└── ...
+```
 
 ---
 
-## Requisitos
+## Decisões técnicas fechadas
 
-- Node.js **≥ 20**
-- PostgreSQL (para etapas seguintes; o health check tolera ausência de BD nesta fase)
+1. **Autenticação:** email/password, **Argon2id**, sessões **PostgreSQL** (`connect-pg-simple`).
+2. **Quotas:** reserva **transacional e idempotente** antes de qualquer pesquisa.
+3. **Leads guardados:** **snapshots independentes** da retenção de 30 dias.
 
 ---
 
 ## Arranque rápido
 
 ```bash
-# 1. Clonar
 git clone https://github.com/EdilBorg/maps-leads-finder-saas.git
 cd maps-leads-finder-saas
-
-# 2. Instalar dependências
 npm install
-
-# 3. Configurar ambiente
 cp .env.example .env
-# Editar .env (pelo menos SESSION_SECRET; DATABASE_URL quando tiver PostgreSQL)
-
-# 4. Desenvolvimento (com reload)
 npm run dev
-
-# 5. Produção
-npm start
 ```
 
-Servidor: http://localhost:3000  
-Health: http://localhost:3000/api/health
+- UI: http://localhost:3000  
+- Health: http://localhost:3000/api/health  
+
+Requisitos: Node.js ≥ 20. PostgreSQL só é necessário para etapas posteriores (o health check tolera BD indisponível nesta fase).
 
 ---
 
 ## Scripts
 
-| Comando        | Descrição                          |
-|----------------|------------------------------------|
-| `npm run dev`  | Arranca com `--watch` (Node 20+)   |
-| `npm start`    | Arranca o servidor                 |
-| `npm test`     | Executa testes básicos             |
+| Comando       | Descrição                        |
+|---------------|----------------------------------|
+| `npm run dev` | Desenvolvimento com `--watch`    |
+| `npm start`   | Produção                         |
+| `npm test`    | Testes (health isolado da BD)    |
 
 ---
 
-## Estrutura do projeto
+## Próximas etapas
 
-```
-maps-leads-finder-saas/
-├── public/                 # Frontend estático (HTML, CSS, JS Vanilla)
-│   └── css/
-│       └── main.css        # Paleta oficial + tipografia Inter
-├── src/
-│   ├── app.js              # Factory createApp() (sem listen)
-│   ├── server.js           # Entry point (listen apenas se main)
-│   ├── config/
-│   │   └── env.js          # Validação e carregamento de variáveis
-│   ├── db/
-│   │   └── pool.js         # Pool PostgreSQL + checkConnection injetável
-│   ├── middleware/
-│   │   └── errorHandler.js # 404 + error handler centralizado
-│   ├── routes/
-│   │   └── health.js       # GET /api/health
-│   ├── services/           # (reservado para lógica de domínio)
-│   └── utils/              # (reservado)
-├── tests/
-│   └── health.test.js
-├── scripts/                # (reservado para migrações, seeds, etc.)
-├── .env.example
-├── .gitignore
-├── package.json
-├── README.md
-└── SPECIFICATION.md
-```
-
----
-
-## Variáveis de ambiente
-
-Ver `.env.example`. Principais:
-
-| Variável         | Obrigatório em produção | Descrição                          |
-|------------------|-------------------------|------------------------------------|
-| `NODE_ENV`       | Não                     | `development` / `production`       |
-| `PORT`           | Não                     | Porta (default 3000)               |
-| `SESSION_SECRET` | Sim                     | Segredo forte para sessões         |
-| `DATABASE_URL`   | Sim                     | Connection string PostgreSQL       |
-
-Nenhuma chave de API ou segredo é exposta ao frontend.
-
----
-
-## Próximas etapas (roadmap)
-
-1. ~~Especificação geral~~  
-2. ~~Estrutura inicial e configuração~~ ← **atual**  
-3. Sistema visual e interface  
 4. Autenticação e gestão de sessões  
 5. Base de dados, relações e permissões  
-6. … (ver SPECIFICATION.md)
+6. … (ver `SPECIFICATION.md`)
 
 ---
 
