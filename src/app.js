@@ -38,24 +38,9 @@ function createApp() {
   // API routes
   app.use('/api', healthRouter);
 
-  // Placeholder root — replaced by proper pages in later stages
+  // SPA shell — public/index.html
   app.get('/', (req, res) => {
-    res.type('html').send(`<!DOCTYPE html>
-<html lang="pt">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Maps Leads Finder SaaS</title>
-  <link rel="stylesheet" href="/css/main.css">
-</head>
-<body>
-  <main class="wrap">
-    <h1>Maps Leads Finder SaaS</h1>
-    <p>Estrutura inicial (Prompt 2). Servidor a funcionar.</p>
-    <p><a href="/api/health">/api/health</a></p>
-  </main>
-</body>
-</html>`);
+    res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
   });
 
   // 404 + centralized error handler
