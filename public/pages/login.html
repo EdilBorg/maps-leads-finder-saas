@@ -32,10 +32,19 @@
     </div>
   </div>
   <script>
+  async function getCsrf() {
+    const res = await fetch('/api/auth/csrf', { credentials: 'same-origin' });
+    const data = await res.json();
+    return data.csrfToken;
+  }
   async function postJson(url, body) {
+    const csrfToken = await getCsrf();
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': csrfToken,
+      },
       credentials: 'same-origin',
       body: JSON.stringify(body),
     });
