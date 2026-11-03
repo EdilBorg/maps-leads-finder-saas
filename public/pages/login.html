@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login — Maps Leads Finder</title>
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/auth.css">
+</head>
+<body>
+  <div class="auth-page">
+    <div class="auth-card">
+      <div class="auth-brand">Maps Leads Finder</div>
+      <h1>Iniciar sessão</h1>
+      <p class="sub">Aceda à sua conta</p>
+      <div class="error-box" id="err"></div>
+      <form id="form">
+        <div class="form-group">
+          <label class="form-label" for="email">Email</label>
+          <input class="input" type="email" id="email" name="email" required autocomplete="username">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="password">Palavra-passe</label>
+          <input class="input" type="password" id="password" name="password" required autocomplete="current-password">
+        </div>
+        <button type="submit" class="btn btn-primary btn-block" id="btn">Entrar</button>
+      </form>
+      <div class="links">
+        <a href="/pages/forgot-password.html">Esqueceu a palavra-passe?</a><br>
+        <a href="/pages/register.html">Criar conta</a> · <a href="/">Voltar</a>
+      </div>
+    </div>
+  </div>
+  <script>
+  async function postJson(url, body) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { res, data };
+  }
+  document.getElementById('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const err = document.getElementById('err');
+    err.classList.remove('visible');
+    const btn = document.getElementById('btn');
+    btn.disabled = true;
+    const { res, data } = await postJson('/api/auth/login', {
+      email: document.getElementById('email').value,
+      password: document.getElementById('password').value,
+    });
+    btn.disabled = false;
+    if (!res.ok) {
+      err.textContent = data.error || 'Falha no login.';
+      err.classList.add('visible');
+      return;
+    }
+    window.location.href = '/';
+  });
+  </script>
+</body>
+</html>

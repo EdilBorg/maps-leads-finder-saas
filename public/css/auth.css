@@ -1,0 +1,67 @@
+/* Auth pages — extends main design system */
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  background: var(--surface-canvas, #08090a);
+}
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  background: var(--surface-panel, #0f1011);
+  border-radius: 12px;
+  box-shadow: rgb(35, 37, 42) 0 0 0 1px inset;
+  padding: 32px 28px;
+}
+.auth-card h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 500;
+  color: #fff;
+  letter-spacing: -0.02em;
+}
+.auth-card .sub {
+  margin: 0 0 24px;
+  font-size: 13px;
+  color: #8a8f98;
+}
+.auth-card .form-group { margin-bottom: 14px; }
+.auth-card .error-box {
+  background: rgba(235, 87, 87, 0.12);
+  color: #f87171;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 13px;
+  margin-bottom: 14px;
+  display: none;
+}
+.auth-card .error-box.visible { display: block; }
+.auth-card .success-box {
+  background: rgba(39, 166, 68, 0.12);
+  color: #4ade80;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 13px;
+  margin-bottom: 14px;
+  display: none;
+}
+.auth-card .success-box.visible { display: block; }
+.auth-card .btn-block { width: 100%; margin-top: 8px; }
+.auth-card .links {
+  margin-top: 20px;
+  text-align: center;
+  font-size: 13px;
+  color: #8a8f98;
+}
+.auth-card .links a { color: #d0d6e0; }
+.auth-card .links a:hover { color: #fff; }
+.auth-brand {
+  text-align: center;
+  margin-bottom: 24px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+  letter-spacing: -0.015em;
+}
