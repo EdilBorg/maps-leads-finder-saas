@@ -12,10 +12,14 @@ const { config } = require('../config/env');
 
 const router = express.Router();
 
+/**
+ * Client IP for rate limiting.
+ * Uses Express req.ip only. Do NOT read X-Forwarded-For manually —
+ * clients can spoof that header. Configure TRUST_PROXY_HOPS so Express
+ * derives req.ip from the right-most trusted proxy hop(s).
+ */
 function clientIp(req) {
-  const xf = req.headers['x-forwarded-for'];
-  if (typeof xf === 'string' && xf.length) return xf.split(',')[0].trim();
-  return req.ip || req.socket?.remoteAddress || null;
+  return req.ip || null;
 }
 
 const limitRegister = rateLimit({
