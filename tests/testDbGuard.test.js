@@ -139,4 +139,16 @@ describe('testDbGuard + connectionConfig alignment', () => {
     const { evaluateTestDbSafety } = require('./helpers/testDbGuard');
     assert.equal(evaluateTestDbSafety().ok, true);
   });
+
+  it('Production + TEST_DATABASE_URL is rejected by resolveConnection', () => {
+    resetEnv({
+      NODE_ENV: 'production',
+      ALLOW_DB_TESTS: '1',
+      TEST_DATABASE_URL: 'postgresql://u:p@localhost:5432/maps_leads_finder_test',
+    });
+    const { resolveConnection } = require('../src/db/connectionConfig');
+    const { evaluateTestDbSafety } = require('./helpers/testDbGuard');
+    assert.equal(resolveConnection().ok, false);
+    assert.equal(evaluateTestDbSafety().ok, false);
+  });
 });
