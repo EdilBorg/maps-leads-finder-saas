@@ -1,5 +1,6 @@
 /**
  * Domain model (Etapa 5) — structure, multi-tenant isolation, integrity fixes (004/005).
+ * Concurrent lock races live in tests/domain.concurrency.test.js.
  * Requires ALLOW_DB_TESTS=1 and a dedicated *_test database.
  */
 try { require('dotenv').config(); } catch (_) {}
@@ -353,50 +354,5 @@ describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () =>
         ]),
       /multi-tenant|cannot change|is_duplicate_of|check_violation/i
     );
-  });
-
-  it('concurrent payment insert vs subscription owner change keeps invariant', async () => {
-    const sub = await pool.query(
-      `INSERT INTO subscriptions (user_id, plan_id, status) VALUES ($1, $2, 'active') RETURNING id`,
-      [userA, planId]
-    );
-    const sid = sub.rows[0].id;
-    const client1 = await pool.connect();
-    const client2 = await pool.connect();
-    try {
-      await client1.query('BEGIN');
-      await client2.query('BEGIN');
-      await client1.query(`SELECT id FROM subscriptions WHERE id = $1 FOR UPDATE`, [sid]);
-      const insertPromise = client2.query(
-        `INSERT INTO payments (user_id, subscription_id, plan_id, amount_cents, status, idempotency_key)
-         VALUES ($1, $2, $3, 1, 'pending', $4)`,
-        [userA, sid, planId, `race-${uuid()}`]
-      );
-      await new Promise((r) => setTimeout(r, 50));
-      try {
-        await client1.query(`UPDATE subscriptions SET user_id = $1 WHERE id = $2`, [userB, sid]);
-        await client1.query('COMMIT');
-      } catch (e) {
-        await client1.query('ROLLBACK').catch(() => {});
-      }
-      try {
-        await insertPromise;
-        await client2.query('COMMIT');
-      } catch (e) {
-        await client2.query('ROLLBACK').catch(() => {});
-      }
-      const { rows: subRows } = await pool.query(`SELECT user_id FROM subscriptions WHERE id = $1`, [sid]);
-      const { rows: payRows } = await pool.query(
-        `SELECT user_id FROM payments WHERE subscription_id = $1`,
-        [sid]
-      );
-      for (const p of payRows) {
-        assert.equal(p.user_id, subRows[0].user_id);
-      }
-      assert.ok(subRows[0]);
-    } finally {
-      client1.release();
-      client2.release();
-    }
   });
 });
