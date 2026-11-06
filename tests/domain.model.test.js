@@ -2,7 +2,7 @@
  * Domain model (Etapa 5) — structure, constraints, multi-tenant isolation.
  * Requires ALLOW_DB_TESTS=1 and a dedicated *_test database.
  */
-require('dotenv').config();
+try { require('dotenv').config(); } catch (_) {}
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
