@@ -1,5 +1,5 @@
 /**
- * Domain model (Etapa 5) — structure, multi-tenant isolation, integrity fixes (004).
+ * Domain model (Etapa 5) — structure, multi-tenant isolation, integrity fixes (004/005).
  * Requires ALLOW_DB_TESTS=1 and a dedicated *_test database.
  */
 try { require('dotenv').config(); } catch (_) {}
@@ -50,6 +50,11 @@ describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () =>
       'utf8'
     );
     await pool.query(sql4);
+    const sql5 = fs.readFileSync(
+      path.join(__dirname, '..', 'migrations', '005_domain_update_integrity.sql'),
+      'utf8'
+    );
+    await pool.query(sql5);
 
     const hash = '$argon2id$v=19$m=65536,t=3,p=4$placeholder';
     const ins = await pool.query(
@@ -276,15 +281,122 @@ describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () =>
     );
   });
 
-  it('migrations 001-004 remain applied and 004 is re-runnable', async () => {
-    const sql4 = fs.readFileSync(
-      path.join(__dirname, '..', 'migrations', '004_domain_integrity_fixes.sql'),
+  it('migrations 001-005 remain applied and integrity SQL is re-runnable', async () => {
+    const sql5 = fs.readFileSync(
+      path.join(__dirname, '..', 'migrations', '005_domain_update_integrity.sql'),
       'utf8'
     );
-    await pool.query(sql4);
+    await pool.query(sql5);
     const { rows } = await pool.query(
-      `SELECT 1 FROM pg_proc WHERE proname = 'enforce_payment_subscription_same_user'`
+      `SELECT 1 FROM pg_proc WHERE proname = 'enforce_subscription_user_change_safe'`
     );
     assert.equal(rows.length, 1);
+  });
+
+  it('rejects changing subscription owner when payments reference it', async () => {
+    const sub = await pool.query(
+      `INSERT INTO subscriptions (user_id, plan_id, status) VALUES ($1, $2, 'active') RETURNING id`,
+      [userA, planId]
+    );
+    await pool.query(
+      `INSERT INTO payments (user_id, subscription_id, plan_id, amount_cents, status, idempotency_key)
+       VALUES ($1, $2, $3, 10, 'pending', $4)`,
+      [userA, sub.rows[0].id, planId, `upd-sub-${uuid()}`]
+    );
+    await assert.rejects(
+      () => pool.query(`UPDATE subscriptions SET user_id = $1 WHERE id = $2`, [userB, sub.rows[0].id]),
+      /multi-tenant|cannot change|check_violation/i
+    );
+  });
+
+  it('rejects changing search owner when saved_leads reference it', async () => {
+    const s = await pool.query(
+      `INSERT INTO searches (user_id, query, status) VALUES ($1, 'owned', 'completed') RETURNING id`,
+      [userA]
+    );
+    await pool.query(
+      `INSERT INTO saved_leads (user_id, origin_search_id, name, snapshot)
+       VALUES ($1, $2, 'L', '{}'::jsonb)`,
+      [userA, s.rows[0].id]
+    );
+    await assert.rejects(
+      () => pool.query(`UPDATE searches SET user_id = $1 WHERE id = $2`, [userB, s.rows[0].id]),
+      /multi-tenant|cannot change|check_violation/i
+    );
+  });
+
+  it('rejects moving a result that is target of is_duplicate_of', async () => {
+    const s = await pool.query(
+      `INSERT INTO searches (user_id, query, status) VALUES ($1, 'dup-scope', 'completed') RETURNING id`,
+      [userA]
+    );
+    const sid = s.rows[0].id;
+    const orig = await pool.query(
+      `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id)
+       VALUES ($1, $2, 'O', 'demo', $3) RETURNING id`,
+      [sid, userA, `o-${uuid()}`]
+    );
+    await pool.query(
+      `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id, is_duplicate_of)
+       VALUES ($1, $2, 'D', 'demo', $3, $4)`,
+      [sid, userA, `d-${uuid()}`, orig.rows[0].id]
+    );
+    const s2 = await pool.query(
+      `INSERT INTO searches (user_id, query, status) VALUES ($1, 'other', 'completed') RETURNING id`,
+      [userA]
+    );
+    await assert.rejects(
+      () =>
+        pool.query(`UPDATE search_results SET search_id = $1 WHERE id = $2`, [
+          s2.rows[0].id,
+          orig.rows[0].id,
+        ]),
+      /multi-tenant|cannot change|is_duplicate_of|check_violation/i
+    );
+  });
+
+  it('concurrent payment insert vs subscription owner change keeps invariant', async () => {
+    const sub = await pool.query(
+      `INSERT INTO subscriptions (user_id, plan_id, status) VALUES ($1, $2, 'active') RETURNING id`,
+      [userA, planId]
+    );
+    const sid = sub.rows[0].id;
+    const client1 = await pool.connect();
+    const client2 = await pool.connect();
+    try {
+      await client1.query('BEGIN');
+      await client2.query('BEGIN');
+      await client1.query(`SELECT id FROM subscriptions WHERE id = $1 FOR UPDATE`, [sid]);
+      const insertPromise = client2.query(
+        `INSERT INTO payments (user_id, subscription_id, plan_id, amount_cents, status, idempotency_key)
+         VALUES ($1, $2, $3, 1, 'pending', $4)`,
+        [userA, sid, planId, `race-${uuid()}`]
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      try {
+        await client1.query(`UPDATE subscriptions SET user_id = $1 WHERE id = $2`, [userB, sid]);
+        await client1.query('COMMIT');
+      } catch (e) {
+        await client1.query('ROLLBACK').catch(() => {});
+      }
+      try {
+        await insertPromise;
+        await client2.query('COMMIT');
+      } catch (e) {
+        await client2.query('ROLLBACK').catch(() => {});
+      }
+      const { rows: subRows } = await pool.query(`SELECT user_id FROM subscriptions WHERE id = $1`, [sid]);
+      const { rows: payRows } = await pool.query(
+        `SELECT user_id FROM payments WHERE subscription_id = $1`,
+        [sid]
+      );
+      for (const p of payRows) {
+        assert.equal(p.user_id, subRows[0].user_id);
+      }
+      assert.ok(subRows[0]);
+    } finally {
+      client1.release();
+      client2.release();
+    }
   });
 });
