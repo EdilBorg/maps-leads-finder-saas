@@ -17,6 +17,7 @@ const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 const { loadUser } = require('./middleware/auth');
 const healthRouter = require('./routes/health');
 const authRouter = require('./routes/auth');
+const { loginRateKey, clientIp } = require('./middleware/rateLimitKeys');
 
 validateConfig();
 
@@ -77,10 +78,9 @@ function createApp(options = {}) {
     app.get('/__test/client-ip', (req, res) => {
       res.json({ ip: req.ip || null, ips: req.ips || [] });
     });
-    // Same key construction as auth rate limiters: `login:${req.ip}`
+    // Same function as production login limiter (loginRateKey)
     app.get('/__test/rate-key', (req, res) => {
-      const ip = req.ip || null;
-      res.json({ ip, rateKey: `login:${ip}` });
+      res.json({ ip: clientIp(req), rateKey: loginRateKey(req) });
     });
   }
 

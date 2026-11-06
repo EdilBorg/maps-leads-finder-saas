@@ -48,7 +48,47 @@ describe('testDbGuard + connectionConfig alignment', () => {
     assert.equal(conn.database, safety.databaseName);
   });
 
-  it('rejects database without test identification', () => {
+  it('rejects TEST_DATABASE_URL without ALLOW_DB_TESTS=1', () => {
+    resetEnv({
+      NODE_ENV: 'test',
+      TEST_DATABASE_URL: 'postgresql://u:p@localhost:5432/maps_leads_finder_test',
+    });
+    const { resolveConnection } = require('../src/db/connectionConfig');
+    const { evaluateTestDbSafety } = require('./helpers/testDbGuard');
+    const conn = resolveConnection();
+    assert.equal(conn.ok, false);
+    assert.match(conn.reason, /ALLOW_DB_TESTS/);
+    assert.equal(evaluateTestDbSafety().ok, false);
+  });
+
+  it('accepts TEST_DATABASE_URL with ALLOW_DB_TESTS=1 and valid test DB', () => {
+    resetEnv({
+      NODE_ENV: 'test',
+      ALLOW_DB_TESTS: '1',
+      TEST_DATABASE_URL: 'postgresql://u:p@localhost:5432/maps_leads_finder_test',
+    });
+    const { evaluateTestDbSafety, resolveConnection } = require('./helpers/testDbGuard');
+    const { buildPoolConfig } = require('../src/db/connectionConfig');
+    assert.equal(evaluateTestDbSafety().ok, true);
+    const conn = resolveConnection();
+    assert.equal(conn.source, 'TEST_DATABASE_URL');
+    assert.equal(buildPoolConfig().connectionString, conn.connectionString);
+  });
+
+  it('preserves normal DATABASE_URL without TEST_DATABASE_URL', () => {
+    resetEnv({
+      NODE_ENV: 'development',
+      DATABASE_URL: 'postgresql://u:p@localhost:5432/maps_leads_finder',
+    });
+    const { resolveConnection, buildPoolConfig } = require('../src/db/connectionConfig');
+    const conn = resolveConnection();
+    assert.equal(conn.ok, true);
+    assert.equal(conn.source, 'DATABASE_URL');
+    assert.equal(conn.database, 'maps_leads_finder');
+    assert.equal(buildPoolConfig().connectionString, conn.connectionString);
+  });
+
+  it('rejects database without test identification when ALLOW_DB_TESTS=1', () => {
     resetEnv({
       NODE_ENV: 'test',
       ALLOW_DB_TESTS: '1',
@@ -58,7 +98,7 @@ describe('testDbGuard + connectionConfig alignment', () => {
     assert.equal(evaluateTestDbSafety().ok, false);
   });
 
-  it('rejects NODE_ENV=production always', () => {
+  it('rejects NODE_ENV=production always for integration', () => {
     resetEnv({
       NODE_ENV: 'production',
       ALLOW_DB_TESTS: '1',
@@ -68,7 +108,7 @@ describe('testDbGuard + connectionConfig alignment', () => {
     assert.equal(evaluateTestDbSafety().ok, false);
   });
 
-  it('rejects missing ALLOW_DB_TESTS', () => {
+  it('rejects missing ALLOW_DB_TESTS for integration guard', () => {
     resetEnv({
       NODE_ENV: 'test',
       DATABASE_URL: 'postgresql://u:p@localhost:5432/maps_leads_finder_test',
@@ -87,23 +127,6 @@ describe('testDbGuard + connectionConfig alignment', () => {
     const { evaluateTestDbSafety, resolveConnection } = require('./helpers/testDbGuard');
     assert.equal(resolveConnection().ok, false);
     assert.equal(evaluateTestDbSafety().ok, false);
-  });
-
-  it('resolved connection matches buildPoolConfig when using TEST_DATABASE_URL', () => {
-    resetEnv({
-      NODE_ENV: 'test',
-      ALLOW_DB_TESTS: '1',
-      TEST_DATABASE_URL: 'postgresql://u:p@localhost:5432/maps_leads_finder_test',
-    });
-    const { evaluateTestDbSafety, resolveConnection } = require('./helpers/testDbGuard');
-    const { buildPoolConfig } = require('../src/db/connectionConfig');
-    const safety = evaluateTestDbSafety();
-    const conn = resolveConnection();
-    const poolCfg = buildPoolConfig();
-    assert.equal(safety.ok, true);
-    assert.equal(conn.source, 'TEST_DATABASE_URL');
-    assert.equal(poolCfg.connectionString, conn.connectionString);
-    assert.equal(safety.databaseName, 'maps_leads_finder_test');
   });
 
   it('accepts TEST_DATABASE_NAME exact match for non-_test suffix', () => {

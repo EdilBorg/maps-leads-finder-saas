@@ -8,42 +8,39 @@ const authService = require('../services/authService');
 const { requireAuth } = require('../middleware/auth');
 const { requireCsrf, csrfTokenHandler } = require('../middleware/csrf');
 const { rateLimit } = require('../middleware/rateLimit');
+const {
+  clientIp,
+  loginRateKey,
+  registerRateKey,
+  forgotRateKey,
+  resendRateKey,
+} = require('../middleware/rateLimitKeys');
 const { config } = require('../config/env');
 
 const router = express.Router();
 
-/**
- * Client IP for rate limiting.
- * Uses Express req.ip only. Do NOT read X-Forwarded-For manually —
- * clients can spoof that header. Configure TRUST_PROXY_HOPS so Express
- * derives req.ip from the right-most trusted proxy hop(s).
- */
-function clientIp(req) {
-  return req.ip || null;
-}
-
 const limitRegister = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
-  keyFn: (req) => `reg:${clientIp(req)}`,
+  keyFn: registerRateKey,
 });
 
 const limitLogin = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
-  keyFn: (req) => `login:${clientIp(req)}`,
+  keyFn: loginRateKey,
 });
 
 const limitForgot = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
-  keyFn: (req) => `forgot:${clientIp(req)}`,
+  keyFn: forgotRateKey,
 });
 
 const limitResend = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
-  keyFn: (req) => `resend:${clientIp(req)}`,
+  keyFn: resendRateKey,
 });
 
 router.get('/csrf', csrfTokenHandler);
