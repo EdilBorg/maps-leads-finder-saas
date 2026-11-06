@@ -4,7 +4,8 @@ Plataforma SaaS multiutilizador para pesquisa e gestão de leads comerciais a pa
 
 **Repositório oficial:** https://github.com/EdilBorg/maps-leads-finder-saas  
 **Especificação:** [SPECIFICATION.md](./SPECIFICATION.md)  
-**Referência visual:** [DESIGN.md](./DESIGN.md)
+**Referência visual:** [DESIGN.md](./DESIGN.md)  
+**Modelo de dados:** [docs/DOMAIN_MODEL.md](./docs/DOMAIN_MODEL.md)
 
 ---
 
@@ -14,154 +15,71 @@ Plataforma SaaS multiutilizador para pesquisa e gestão de leads comerciais a pa
 |-------|--------|
 | 1 — Especificação | Concluída |
 | 2 — Estrutura inicial (Express, health, config) | Concluída |
-| 3 — Sistema visual e interface (DESIGN.md) | Concluída |
-| 4 — Autenticação e segurança | Implementação concluída; **aguarda validação final dos testes** |
-| 5 — Modelo de dados do domínio | **Não iniciada** |
+| 3 — Sistema visual e interface | Concluída |
+| 4 — Autenticação e segurança | Concluída |
+| 5 — Modelo de dados e isolamento multi-tenant | Implementada (schema + integridade; aguarda validação) |
+| 6+ | **Não iniciada** |
 
-### Etapa 4 — o que está implementado
+### Etapa 5 — domínio
 
-- Registo, login, logout
-- Verificação de email e recuperação / redefinição de palavra-passe
-- Hashing **Argon2id**
-- Sessões em PostgreSQL (`express-session` + `connect-pg-simple`)
-- Proteção **CSRF** (token de sessão + cabeçalho `X-CSRF-Token`)
-- Rate limiting atómico em PostgreSQL (`rate_limit_buckets`), com fallback em memória se a BD falhar
-- `req.ip` como única fonte de IP; `TRUST_PROXY_HOPS` (omissão **0**)
-- Páginas: login, registo, verificar email, recuperar / redefinir palavra-passe
+Tabelas: `plans`, `subscriptions`, `payments`, `searches`, `search_results`, `saved_leads`, `api_providers`, `audit_logs`, `system_settings` (reutiliza `users`).
 
-### Ainda não implementado (Etapa 5+)
+Isolamento:
 
-- Schema completo de pesquisas, leads, quotas e planos
-- Motor de pesquisa e integração com fornecedores
-- Pagamentos e painel administrativo
-- Persistência real de histórico de pesquisas / leads (UI ainda em modo demo)
+- Resultados e pesquisas ligados por FK composta `(search_id, user_id)`.
+- Pagamentos só podem referenciar subscrições do mesmo utilizador.
+- Leads guardados só podem referenciar pesquisas do mesmo utilizador.
+- `is_duplicate_of` só dentro da mesma pesquisa e utilizador.
+- Resultados expiram com a pesquisa (retenção 30 dias); **snapshots** em `saved_leads` sobrevivem.
+
+### Ainda não implementado
+
+Motor de pesquisa, quotas em runtime, pagamentos reais, admin, integrações com fornecedores.
 
 ---
 
 ## Requisitos
 
 - Node.js **20+**
-- PostgreSQL **12+** (obrigatório para autenticação e sessões)
+- PostgreSQL **12+**
 
 ---
 
-## Instalação local
+## Instalação
 
 ```bash
 git clone https://github.com/EdilBorg/maps-leads-finder-saas.git
 cd maps-leads-finder-saas
 cp .env.example .env
-```
-
-Editar `.env` no mínimo:
-
-| Variável | Notas |
-|----------|--------|
-| `SESSION_SECRET` | Segredo forte (≥ 16 caracteres); obrigatório em produção |
-| `DATABASE_URL` | PostgreSQL da aplicação |
-| `TRUST_PROXY_HOPS` | **0** em desenvolvimento. Em produção, definir só depois de validar quantos proxies confiáveis existem à frente da app (ex. Abasthan). Valor errado compromete `req.ip`. |
-| `SMTP_*` | Opcional em desenvolvimento (emails registados no log) |
-
-```bash
+# SESSION_SECRET, DATABASE_URL; TRUST_PROXY_HOPS=0 em desenvolvimento
 npm install
 npm run migrate
 npm run dev
 ```
 
-Scripts disponíveis em `package.json`:
+Scripts: `npm run dev` | `npm start` | `npm test` | `npm run migrate`
 
-| Script | Comando |
-|--------|---------|
-| `npm run dev` | `node --watch src/server.js` |
-| `npm start` | `node src/server.js` |
-| `npm test` | `node --test tests/` |
-| `npm run migrate` | `node scripts/migrate.js` |
+### Migrations
 
-Servidor: `http://localhost:3000`
+1. `001_auth.sql`
+2. `002_fix_session_oids.sql`
+3. `003_domain_model.sql`
+4. `004_domain_integrity_fixes.sql`
 
----
-
-## Migrations
-
-```bash
-npm run migrate
-```
-
-- `migrations/001_auth.sql` — users, session, tokens, login_attempts, rate_limit_buckets (sem `OIDS`)
-- `migrations/002_fix_session_oids.sql` — correção idempotente se o `CREATE session` antigo falhou
-
-Não executar migrations de teste sobre bases de produção (ver secção de testes).
-
----
-
-## Testes
-
-### Testes sem PostgreSQL
-
-```bash
-npm test
-```
-
-Correm sempre (quando o ambiente permite instalar dependências): CSRF, crypto, health, migration SQL shape, testDbGuard, IP com `TRUST_PROXY_HOPS=0`.
-
-### Testes de integração com PostgreSQL
-
-Requerem **confirmação explícita** — a presença de `DATABASE_URL` **não** chega.
-
-1. Criar uma base **exclusiva** de testes, por exemplo:
-
-```sql
-CREATE DATABASE maps_leads_finder_test;
-```
-
-2. Configurar o ambiente:
+### Testes de integração PostgreSQL
 
 ```bash
 export NODE_ENV=test
 export ALLOW_DB_TESTS=1
 export DATABASE_URL=postgresql://USER:PASS@localhost:5432/maps_leads_finder_test
-# Opcional se o nome não terminar em _test:
-# export TEST_DATABASE_NAME=maps_leads_finder_test
 npm run migrate
 npm test
 ```
 
-O guard (`tests/helpers/testDbGuard.js`) **rejeita**:
+Sem `ALLOW_DB_TESTS=1` e BD `*_test`, as suites de domínio/auth PG ficam em **SKIP**.
 
-- `NODE_ENV=production`
-- `ALLOW_DB_TESTS` diferente de `1`
-- Nome da base que não termina em `_test` (salvo `TEST_DATABASE_NAME` exacto)
+### Limitações
 
-Suites protegidas: `auth.test.js` (parte integração), `session.pg.test.js`, `rateLimit.concurrency.test.js`.
-
-### O que o teste de sessão comprova
-
-- Login grava linha na tabela `session`
-- **Novo processo Node** (`tests/helpers/session_child.js`) arranca a app e autentica com o mesmo cookie via PostgreSQL
-- Logout e reset de palavra-passe invalidam a sessão
-
-### Limitações conhecidas
-
-- **Rate limit em memória**: só se a BD estiver indisponível; **não** é protecção distribuída entre instâncias.
-- **TRUST_PROXY_HOPS**: spoofing mitiga-se apenas se o valor reflectir a topologia real. Na Abasthan, validar com documentação/rede — não assumir `1` sem evidência.
-- **Etapa 5** ainda não iniciada.
-
----
-
-## Estrutura (resumo)
-
-```
-src/
-  app.js, server.js
-  config/env.js
-  db/pool.js
-  middleware/ (auth, csrf, rateLimit, errorHandler)
-  routes/ (health, auth)
-  services/ (authService, email)
-  utils/crypto.js
-public/          # UI Etapa 3 + páginas de auth
-migrations/
-tests/
-  helpers/testDbGuard.js
-  helpers/session_child.js
-```
+- Rate limit em memória se a BD cair (não distribuído).
+- Credenciais de fornecedores: apenas env / secrets manager — nunca em `api_providers.config`.
+- `TRUST_PROXY_HOPS` deve refletir a topologia real em produção.

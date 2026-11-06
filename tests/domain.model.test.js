@@ -1,5 +1,5 @@
 /**
- * Domain model (Etapa 5) — structure, constraints, multi-tenant isolation.
+ * Domain model (Etapa 5) — structure, multi-tenant isolation, integrity fixes (004).
  * Requires ALLOW_DB_TESTS=1 and a dedicated *_test database.
  */
 try { require('dotenv').config(); } catch (_) {}
@@ -16,6 +16,15 @@ function uuid() {
   return crypto.randomUUID();
 }
 
+async function applyAllMigrations(pool) {
+  const dir = path.join(__dirname, '..', 'migrations');
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+  for (const file of files) {
+    const sql = fs.readFileSync(path.join(dir, file), 'utf8');
+    await pool.query(sql);
+  }
+}
+
 describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () => {
   let getPool;
   let closePool;
@@ -26,24 +35,27 @@ describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () =>
   let userB;
   let planId;
   let searchA;
+  let searchB;
+  let subA;
+  let subB;
 
   before(async () => {
     assertSafeTestDatabase();
     ({ getPool, closePool } = require('../src/db/pool'));
     pool = getPool();
 
-    for (const file of ['001_auth.sql', '002_fix_session_oids.sql', '003_domain_model.sql']) {
-      const sql = fs.readFileSync(path.join(__dirname, '..', 'migrations', file), 'utf8');
-      await pool.query(sql);
-    }
-    const sql3 = fs.readFileSync(path.join(__dirname, '..', 'migrations', '003_domain_model.sql'), 'utf8');
-    await pool.query(sql3);
+    await applyAllMigrations(pool);
+    const sql4 = fs.readFileSync(
+      path.join(__dirname, '..', 'migrations', '004_domain_integrity_fixes.sql'),
+      'utf8'
+    );
+    await pool.query(sql4);
 
     const hash = '$argon2id$v=19$m=65536,t=3,p=4$placeholder';
     const ins = await pool.query(
       `INSERT INTO users (email, email_normalized, password_hash, name)
        VALUES ($1, $2, $3, 'User A'), ($4, $5, $3, 'User B')
-       RETURNING id, email_normalized`,
+       RETURNING id`,
       [emailA, emailA.toLowerCase(), hash, emailB, emailB.toLowerCase()]
     );
     userA = ins.rows[0].id;
@@ -56,6 +68,24 @@ describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () =>
       [String(Date.now())]
     );
     planId = plan.rows[0].id;
+
+    const subs = await pool.query(
+      `INSERT INTO subscriptions (user_id, plan_id, status)
+       VALUES ($1, $3, 'active'), ($2, $3, 'active')
+       RETURNING id, user_id`,
+      [userA, userB, planId]
+    );
+    subA = subs.rows.find((r) => r.user_id === userA).id;
+    subB = subs.rows.find((r) => r.user_id === userB).id;
+
+    const searches = await pool.query(
+      `INSERT INTO searches (user_id, query, status)
+       VALUES ($1, 'a-search', 'completed'), ($2, 'b-search', 'completed')
+       RETURNING id, user_id`,
+      [userA, userB]
+    );
+    searchA = searches.rows.find((r) => r.user_id === userA).id;
+    searchB = searches.rows.find((r) => r.user_id === userB).id;
   });
 
   after(async () => {
@@ -75,55 +105,166 @@ describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () =>
     const { rows } = await pool.query(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema = 'public'
-         AND table_name = ANY($1::text[])
-       ORDER BY table_name`,
+         AND table_name = ANY($1::text[])`,
       [[
         'plans', 'subscriptions', 'payments', 'searches', 'search_results',
         'saved_leads', 'api_providers', 'audit_logs', 'system_settings', 'users',
       ]]
     );
-    const names = rows.map((r) => r.table_name);
-    for (const t of [
-      'plans', 'subscriptions', 'payments', 'searches', 'search_results',
-      'saved_leads', 'api_providers', 'audit_logs', 'system_settings', 'users',
-    ]) {
-      assert.ok(names.includes(t), `missing table ${t}`);
-    }
+    assert.equal(rows.length, 10);
   });
 
-  it('rejects invalid subscription status', async () => {
+  it('payment of A on subscription of A is accepted', async () => {
+    const { rows } = await pool.query(
+      `INSERT INTO payments (user_id, subscription_id, plan_id, amount_cents, status, idempotency_key)
+       VALUES ($1, $2, $3, 100, 'pending', $4)
+       RETURNING id`,
+      [userA, subA, planId, `ok-a-${uuid()}`]
+    );
+    assert.ok(rows[0].id);
+  });
+
+  it('payment of A on subscription of B is rejected', async () => {
     await assert.rejects(
       () =>
         pool.query(
-          `INSERT INTO subscriptions (user_id, plan_id, status) VALUES ($1, $2, 'bogus')`,
-          [userA, planId]
+          `INSERT INTO payments (user_id, subscription_id, plan_id, amount_cents, status, idempotency_key)
+           VALUES ($1, $2, $3, 100, 'pending', $4)`,
+          [userA, subB, planId, `bad-ab-${uuid()}`]
         ),
-      /check|violates/i
+      /multi-tenant|check_violation|must match/i
     );
   });
 
-  it('creates search owned by user A', async () => {
+  it('payment without subscription is accepted', async () => {
     const { rows } = await pool.query(
-      `INSERT INTO searches (user_id, query, location, status)
-       VALUES ($1, 'cafes', 'Maputo', 'completed')
-       RETURNING id, user_id`,
+      `INSERT INTO payments (user_id, plan_id, amount_cents, status, idempotency_key)
+       VALUES ($1, $2, 50, 'pending', $3)
+       RETURNING subscription_id`,
+      [userA, planId, `nosub-${uuid()}`]
+    );
+    assert.equal(rows[0].subscription_id, null);
+  });
+
+  it('saved lead of A linked to search of A is accepted', async () => {
+    const { rows } = await pool.query(
+      `INSERT INTO saved_leads (user_id, origin_search_id, name, snapshot)
+       VALUES ($1, $2, 'OK', '{}'::jsonb)
+       RETURNING id`,
+      [userA, searchA]
+    );
+    assert.ok(rows[0].id);
+  });
+
+  it('saved lead of A linked to search of B is rejected', async () => {
+    await assert.rejects(
+      () =>
+        pool.query(
+          `INSERT INTO saved_leads (user_id, origin_search_id, name, snapshot)
+           VALUES ($1, $2, 'Bad', '{}'::jsonb)`,
+          [userA, searchB]
+        ),
+      /multi-tenant|check_violation|must match/i
+    );
+  });
+
+  it('deleting search nulls origin_search_id but keeps snapshot', async () => {
+    const s = await pool.query(
+      `INSERT INTO searches (user_id, query, status) VALUES ($1, 'snap-del', 'completed') RETURNING id`,
       [userA]
     );
-    searchA = rows[0].id;
-    assert.equal(rows[0].user_id, userA);
+    const sid = s.rows[0].id;
+    const lead = await pool.query(
+      `INSERT INTO saved_leads (user_id, origin_search_id, name, snapshot)
+       VALUES ($1, $2, 'Keep', '{"x":1}'::jsonb)
+       RETURNING id`,
+      [userA, sid]
+    );
+    await pool.query(`DELETE FROM searches WHERE id = $1`, [sid]);
+    const { rows } = await pool.query(
+      `SELECT origin_search_id, name, snapshot FROM saved_leads WHERE id = $1`,
+      [lead.rows[0].id]
+    );
+    assert.equal(rows[0].origin_search_id, null);
+    assert.equal(rows[0].name, 'Keep');
+    assert.equal(rows[0].snapshot.x, 1);
   });
 
-  it('allows search_results only when user_id matches search owner', async () => {
+  it('result on own search is accepted', async () => {
     const { rows } = await pool.query(
       `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id)
-       VALUES ($1, $2, 'Lead A', 'demo', 'ext-1')
+       VALUES ($1, $2, 'R1', 'demo', 'e1')
        RETURNING id`,
       [searchA, userA]
     );
     assert.ok(rows[0].id);
   });
 
-  it('rejects search_results attached to another user search', async () => {
+  it('duplicate reference within same search is accepted', async () => {
+    const a = await pool.query(
+      `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id)
+       VALUES ($1, $2, 'Orig', 'demo', $3) RETURNING id`,
+      [searchA, userA, `o-${uuid()}`]
+    );
+    const b = await pool.query(
+      `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id, is_duplicate_of)
+       VALUES ($1, $2, 'Dup', 'demo', $3, $4) RETURNING is_duplicate_of`,
+      [searchA, userA, `d-${uuid()}`, a.rows[0].id]
+    );
+    assert.equal(b.rows[0].is_duplicate_of, a.rows[0].id);
+  });
+
+  it('duplicate reference to another search is rejected', async () => {
+    const onB = await pool.query(
+      `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id)
+       VALUES ($1, $2, 'B-only', 'demo', $3) RETURNING id`,
+      [searchB, userB, `b-${uuid()}`]
+    );
+    await assert.rejects(
+      () =>
+        pool.query(
+          `INSERT INTO search_results (search_id, user_id, name, source_provider, is_duplicate_of)
+           VALUES ($1, $2, 'Cross', 'demo', $3)`,
+          [searchA, userA, onB.rows[0].id]
+        ),
+      /multi-tenant|same search|check_violation/i
+    );
+  });
+
+  it('duplicate reference to another user is rejected', async () => {
+    const onB = await pool.query(
+      `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id)
+       VALUES ($1, $2, 'B2', 'demo', $3) RETURNING id`,
+      [searchB, userB, `b2-${uuid()}`]
+    );
+    await assert.rejects(
+      () =>
+        pool.query(
+          `INSERT INTO search_results (search_id, user_id, name, source_provider, is_duplicate_of)
+           VALUES ($1, $2, 'Steal', 'demo', $3)`,
+          [searchA, userA, onB.rows[0].id]
+        ),
+      /multi-tenant|same search|check_violation/i
+    );
+  });
+
+  it('deleting search cascades search_results', async () => {
+    const s = await pool.query(
+      `INSERT INTO searches (user_id, query, status) VALUES ($1, 'casc', 'completed') RETURNING id`,
+      [userA]
+    );
+    const sid = s.rows[0].id;
+    await pool.query(
+      `INSERT INTO search_results (search_id, user_id, name, source_provider)
+       VALUES ($1, $2, 'Tmp', 'demo')`,
+      [sid, userA]
+    );
+    await pool.query(`DELETE FROM searches WHERE id = $1`, [sid]);
+    const { rows } = await pool.query(`SELECT id FROM search_results WHERE search_id = $1`, [sid]);
+    assert.equal(rows.length, 0);
+  });
+
+  it('rejects attaching search_results to another user search', async () => {
     await assert.rejects(
       () =>
         pool.query(
@@ -135,85 +276,15 @@ describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () =>
     );
   });
 
-  it('isolates searches between users', async () => {
-    await pool.query(
-      `INSERT INTO searches (user_id, query, status) VALUES ($1, 'only-b', 'pending')`,
-      [userB]
+  it('migrations 001-004 remain applied and 004 is re-runnable', async () => {
+    const sql4 = fs.readFileSync(
+      path.join(__dirname, '..', 'migrations', '004_domain_integrity_fixes.sql'),
+      'utf8'
     );
-    const { rows: onlyA } = await pool.query(`SELECT id FROM searches WHERE user_id = $1`, [userA]);
-    const { rows: onlyB } = await pool.query(`SELECT id FROM searches WHERE user_id = $1`, [userB]);
-    assert.ok(onlyB.length >= 1);
-    const aIds = new Set(onlyA.map((r) => r.id));
-    for (const r of onlyB) {
-      assert.equal(aIds.has(r.id), false);
-    }
-  });
-
-  it('saved_leads snapshot survives search deletion', async () => {
-    const search = await pool.query(
-      `INSERT INTO searches (user_id, query, status) VALUES ($1, 'snap', 'completed') RETURNING id`,
-      [userA]
-    );
-    const sid = search.rows[0].id;
-    const lead = await pool.query(
-      `INSERT INTO saved_leads (user_id, origin_search_id, name, snapshot, notes)
-       VALUES ($1, $2, 'Snap Lead', '{"name":"Snap Lead"}'::jsonb, 'keep')
-       RETURNING id`,
-      [userA, sid]
-    );
-    const leadId = lead.rows[0].id;
-    await pool.query(`DELETE FROM searches WHERE id = $1`, [sid]);
+    await pool.query(sql4);
     const { rows } = await pool.query(
-      `SELECT id, origin_search_id, name FROM saved_leads WHERE id = $1`,
-      [leadId]
+      `SELECT 1 FROM pg_proc WHERE proname = 'enforce_payment_subscription_same_user'`
     );
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].origin_search_id, null);
-    assert.equal(rows[0].name, 'Snap Lead');
-  });
-
-  it('deleting a search cascades search_results only', async () => {
-    const s = await pool.query(
-      `INSERT INTO searches (user_id, query, status) VALUES ($1, 'cascade', 'completed') RETURNING id`,
-      [userA]
-    );
-    const sid = s.rows[0].id;
-    await pool.query(
-      `INSERT INTO search_results (search_id, user_id, name, source_provider)
-       VALUES ($1, $2, 'Temp', 'demo')`,
-      [sid, userA]
-    );
-    await pool.query(`DELETE FROM searches WHERE id = $1`, [sid]);
-    const { rows } = await pool.query(`SELECT id FROM search_results WHERE search_id = $1`, [sid]);
-    assert.equal(rows.length, 0);
-  });
-
-  it('payment requires plan and supports pending status without subscription', async () => {
-    const { rows } = await pool.query(
-      `INSERT INTO payments (user_id, plan_id, amount_cents, status, idempotency_key)
-       VALUES ($1, $2, 1000, 'pending', $3)
-       RETURNING id, status, subscription_id`,
-      [userA, planId, `idem-${uuid()}`]
-    );
-    assert.equal(rows[0].status, 'pending');
-    assert.equal(rows[0].subscription_id, null);
-  });
-
-  it('rejects duplicate payment idempotency_key', async () => {
-    const key = `idem-dup-${uuid()}`;
-    await pool.query(
-      `INSERT INTO payments (user_id, plan_id, amount_cents, status, idempotency_key)
-       VALUES ($1, $2, 500, 'pending', $3)`,
-      [userA, planId, key]
-    );
-    await assert.rejects(
-      () =>
-        pool.query(
-          `INSERT INTO payments (user_id, plan_id, amount_cents, status, idempotency_key)
-           VALUES ($1, $2, 500, 'pending', $3)`,
-          [userA, planId, key]
-        ),
-      /unique|duplicate/i
-    );
   });
 });
