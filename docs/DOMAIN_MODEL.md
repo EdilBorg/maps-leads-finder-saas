@@ -24,8 +24,10 @@ Application code must still filter by `user_id` on every query.
 1. **Child path:** `SELECT … FOR UPDATE` on the referenced parent before comparing owners.  
 2. **Parent path:** `SELECT … FOR UPDATE` on dependents ordered by primary key (`ORDER BY id`) before rejecting owner/scope changes.  
 3. **Lock order:** Prefer locking the parent (by PK) first, then children ordered by `id`, to reduce deadlock cycles.  
-4. **Deadlocks:** Still possible under complex multi-row updates. PostgreSQL aborts one transaction with `40001`; clients should retry the aborted transaction.  
+4. **Deadlocks / serialization:** Still possible under complex multi-row updates. PostgreSQL may abort a transaction with `40P01` (`deadlock_detected`) or, under stricter isolation, `40001` (`serialization_failure`). Both require retrying the **entire** transaction when the operation is idempotent/safe to repeat. Do **not** treat `40001` as a deadlock code.  
 5. **Isolation:** Default `READ COMMITTED` is sufficient with these row locks; does not require `SERIALIZABLE`.
+
+Integration tests use two independent clients, `pg_backend_pid()`, and `pg_blocking_pids()` to wait until a session is actually blocked before completing the competing transaction (no reliance on arbitrary sleeps alone).
 
 ## Retention vs snapshots
 
@@ -41,4 +43,4 @@ Application code must still filter by `user_id` on every query.
 
 - Long duplicate cycles (A→B→A) are not fully blocked beyond self-reference.  
 - Changing `searches.user_id` is forbidden when any results exist (even same-tenant); reassign via application workflow if ever needed.  
-- Concurrent tests require a real PostgreSQL instance.
+- Concurrent tests require a real PostgreSQL instance (`ALLOW_DB_TESTS=1`, database name ending in `_test`).

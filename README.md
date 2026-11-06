@@ -78,6 +78,7 @@ Sem opt-in e BD `*_test`, as suites PG ficam em **SKIP**.
 
 ### Limitações
 
-- Rate limit em memória se a BD cair.
-- Credenciais de fornecedores só em env/secrets manager.
-- Deadlocks raros sob updates multi-linha: a aplicação deve repetir a transação abortada (`40001`).
+- Em concorrência, o PostgreSQL pode abortar uma transação com `40P01` (`deadlock_detected`) ou, sob isolamento mais estrito, `40001` (`serialization_failure`). Em ambos os casos, a aplicação deve repetir a **transação inteira** se a operação for segura para retry. **`40001` não é código de deadlock.**
+- Rate limit em memória se a BD cair (não distribuído).
+- Credenciais de fornecedores: apenas env / secrets manager — nunca em `api_providers.config`.
+- `TRUST_PROXY_HOPS` deve refletir a topologia real em produção.
