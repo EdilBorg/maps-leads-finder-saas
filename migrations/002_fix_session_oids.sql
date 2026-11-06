@@ -1,5 +1,5 @@
 -- Safe fix for environments where 001_auth.sql failed on session CREATE
--- because of WITH (OIDS=FALSE) on PostgreSQL 12+.
+-- because of the obsolete OIDS table option on PostgreSQL 12+.
 -- Idempotent: does not drop users or existing session rows.
 
 CREATE TABLE IF NOT EXISTS "session" (
