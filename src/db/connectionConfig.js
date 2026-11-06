@@ -20,6 +20,7 @@ function nameFromConnectionString(url) {
  *
  * Rules:
  * - If both DATABASE_URL and TEST_DATABASE_URL are set and differ → ambiguous (error).
+ * - TEST_DATABASE_URL without ALLOW_DB_TESTS=1 → error (never silent fallback).
  * - If ALLOW_DB_TESTS=1 and TEST_DATABASE_URL is set → use TEST_DATABASE_URL only.
  * - Else if DATABASE_URL is set → use DATABASE_URL.
  * - Else use discrete PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE.
@@ -38,6 +39,16 @@ function resolveConnection() {
     };
   }
 
+  if (testUrl && !allowTests) {
+    return {
+      ok: false,
+      reason:
+        'TEST_DATABASE_URL is set but ALLOW_DB_TESTS is not "1". ' +
+        'Refusing to use a test database URL without explicit authorization. ' +
+        'Set ALLOW_DB_TESTS=1 for integration tests, or unset TEST_DATABASE_URL for normal operation.',
+    };
+  }
+
   if (allowTests && testUrl) {
     return {
       ok: true,
@@ -53,15 +64,6 @@ function resolveConnection() {
       source: 'DATABASE_URL',
       connectionString: appUrl,
       database: nameFromConnectionString(appUrl),
-    };
-  }
-
-  if (testUrl) {
-    return {
-      ok: true,
-      source: 'TEST_DATABASE_URL',
-      connectionString: testUrl,
-      database: nameFromConnectionString(testUrl),
     };
   }
 
