@@ -6,24 +6,14 @@
 try { require('dotenv').config(); } catch (_) {}
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 const { shouldRunDbIntegration, assertSafeTestDatabase } = require('./helpers/testDbGuard');
+const { applyMigrationsOnce } = require('./helpers/applyMigrationsOnce');
 
 const hasDb = shouldRunDbIntegration();
 
 function uuid() {
   return crypto.randomUUID();
-}
-
-async function applyAllMigrations(pool) {
-  const dir = path.join(__dirname, '..', 'migrations');
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
-  for (const file of files) {
-    const sql = fs.readFileSync(path.join(dir, file), 'utf8');
-    await pool.query(sql);
-  }
 }
 
 describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () => {
@@ -44,18 +34,7 @@ describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () =>
     assertSafeTestDatabase();
     ({ getPool, closePool } = require('../src/db/pool'));
     pool = getPool();
-
-    await applyAllMigrations(pool);
-    const sql4 = fs.readFileSync(
-      path.join(__dirname, '..', 'migrations', '004_domain_integrity_fixes.sql'),
-      'utf8'
-    );
-    await pool.query(sql4);
-    const sql5 = fs.readFileSync(
-      path.join(__dirname, '..', 'migrations', '005_domain_update_integrity.sql'),
-      'utf8'
-    );
-    await pool.query(sql5);
+    await applyMigrationsOnce(pool);
 
     const hash = '$argon2id$v=19$m=65536,t=3,p=4$placeholder';
     const ins = await pool.query(
@@ -283,11 +262,7 @@ describe('domain model schema & multi-tenant isolation', { skip: !hasDb }, () =>
   });
 
   it('migrations 001-005 remain applied and integrity SQL is re-runnable', async () => {
-    const sql5 = fs.readFileSync(
-      path.join(__dirname, '..', 'migrations', '005_domain_update_integrity.sql'),
-      'utf8'
-    );
-    await pool.query(sql5);
+    await applyMigrationsOnce(pool);
     const { rows } = await pool.query(
       `SELECT 1 FROM pg_proc WHERE proname = 'enforce_subscription_user_change_safe'`
     );
