@@ -1,14 +1,27 @@
 /**
  * Application-level tenant lock helpers (Etapa 5).
  *
- * Call at the *start* of a transaction, before any INSERT/UPDATE on related tables.
- * Keys must match migrations/006–007: sub:|search:|result:
+ * CONTRACT (mandatory):
+ * - Call only inside an explicit transaction (BEGIN … COMMIT/ROLLBACK).
+ * - pg_advisory_xact_lock is released at the end of the statement when not
+ *   inside a transaction block; a lock followed by a separate UPDATE without
+ *   BEGIN does NOT protect the UPDATE.
+ * - Acquire locks BEFORE any row-level locks on parent/child tables that could
+ *   invert the global advisory order.
+ * - COMMIT and ROLLBACK both release transaction-level advisory locks.
  *
- * When changing a foreign key, lock BOTH the old and new parent keys (when non-null)
- * via lockReferenceChange / lockTenantKeysOrdered before the UPDATE.
+ * FK change protocol: stabilizeAndLockReferenceChange + optimistic UPDATE
+ * (see docs/DOMAIN_MODEL.md). Do not FOR UPDATE before advisory locks.
  */
 
 const VALID_KINDS = Object.freeze(['sub', 'search', 'result']);
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value) {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
 
 function assertId(id, kind) {
   if (id == null || id === '') {
@@ -17,7 +30,15 @@ function assertId(id, kind) {
   if (typeof id !== 'string') {
     throw new Error(`tenantLocks: id must be a string UUID for kind=${kind}`);
   }
+  if (!UUID_RE.test(id)) {
+    throw new Error(`tenantLocks: id must be a valid UUID for kind=${kind}`);
+  }
   return id;
+}
+
+function optionalUuid(id, kind) {
+  if (id == null || id === '') return null;
+  return assertId(id, kind);
 }
 
 function assertKind(kind) {
@@ -59,7 +80,8 @@ function normalizeTenantKeys(keys) {
   const seen = new Set();
   const out = [];
   for (const entry of keys) {
-    if (!entry || entry.id == null || entry.id === '') continue;
+    if (!entry) continue;
+    if (entry.id == null || entry.id === '') continue;
     const kind = assertKind(entry.kind);
     const id = assertId(entry.id, kind);
     const canon = tenantKeyString(kind, id);
@@ -83,16 +105,55 @@ async function lockTenantKeysOrdered(client, keys) {
   return ordered;
 }
 
-async function lockReferenceChange(client, kind, oldId, newId) {
+async function lockReferenceChange(client, kind, observedCurrentId, newId) {
   assertKind(kind);
+  const oldU = optionalUuid(observedCurrentId, kind);
+  const newU = optionalUuid(newId, kind);
   return lockTenantKeysOrdered(client, [
-    { kind, id: oldId },
-    { kind, id: newId },
+    { kind, id: oldU },
+    { kind, id: newU },
   ]);
+}
+
+async function stabilizeAndLockReferenceChange(client, kind, readCurrent, newId, opts = {}) {
+  assertKind(kind);
+  optionalUuid(newId, kind);
+  const maxAttempts = opts.maxAttempts != null ? opts.maxAttempts : 8;
+  if (typeof readCurrent !== 'function') {
+    throw new Error('tenantLocks.stabilizeAndLockReferenceChange: readCurrent must be a function');
+  }
+
+  let attempt = 0;
+  let observed = await readCurrent();
+  observed = optionalUuid(observed, kind);
+
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    await lockReferenceChange(client, kind, observed, newId);
+    let again = await readCurrent();
+    again = optionalUuid(again, kind);
+    if (again === observed) {
+      return {
+        observedCurrentId: observed,
+        newId: optionalUuid(newId, kind),
+        attempts: attempt,
+      };
+    }
+    observed = again;
+  }
+
+  const err = new Error(
+    `tenantLocks: could not stabilize FK reference for kind=${kind} after ${maxAttempts} attempts`
+  );
+  err.code = 'TENANT_LOCK_UNSTABLE';
+  throw err;
 }
 
 module.exports = {
   VALID_KINDS,
+  UUID_RE,
+  isUuid,
+  optionalUuid,
   tenantKeyString,
   normalizeTenantKeys,
   lockTenantKey,
@@ -101,4 +162,5 @@ module.exports = {
   lockSearchResult,
   lockTenantKeysOrdered,
   lockReferenceChange,
+  stabilizeAndLockReferenceChange,
 };

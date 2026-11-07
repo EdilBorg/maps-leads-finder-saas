@@ -1,52 +1,62 @@
 # Domain model (Etapa 5)
 
-Migrations:
-
-1. `001_auth.sql` — users, sessions, tokens  
-2. `002_fix_session_oids.sql` — session compatibility  
-3. `003_domain_model.sql` — domain tables  
-4. `004_domain_integrity_fixes.sql` — child INSERT/UPDATE same-tenant checks  
-5. `005_domain_update_integrity.sql` — parent UPDATE protection + row locks  
-6. `006_domain_lock_ordering.sql` — advisory locks inside triggers (defense in depth)  
-7. `007_domain_tenant_lock_helpers.sql` — SQL lock helpers + strategy notes  
+Migrations 001–007 (unchanged history). Helpers: `src/db/tenantLocks.js`, SQL `lock_tenant_*`.
 
 ## Multi-tenant isolation
 
-| Relation | Child INSERT/UPDATE | Parent UPDATE |
-|----------|-------------------|---------------|
-| payments → subscriptions | `user_id` must equal `subscriptions.user_id` | Cannot change `subscriptions.user_id` while payments reference it |
-| saved_leads → searches | `user_id` must equal origin `searches.user_id` | Cannot change `searches.user_id` while leads/results reference it |
-| search_results → searches | Composite FK `(search_id, user_id)` | Same for results |
-| is_duplicate_of | Same `search_id` + `user_id`; no self-ref | Cannot move a result targeted by `is_duplicate_of` |
+| Relation | Rule |
+|----------|------|
+| payments → subscriptions | same `user_id` |
+| saved_leads → searches | same `user_id` for origin |
+| search_results → searches | composite `(search_id, user_id)` |
+| is_duplicate_of | same search + user; no self-ref |
 
-Application queries must still filter by `user_id`.
+## Advisory lock contract
 
-## Concurrency strategy
+`pg_advisory_xact_lock` is **transaction-scoped**.
 
-### Implicit locks
+- Must be used only after `BEGIN` and before `COMMIT`/`ROLLBACK`.
+- Outside an explicit transaction, PostgreSQL may release the lock at the end of the statement — a later `UPDATE` is **not** protected.
+- `COMMIT` and `ROLLBACK` both release transaction advisory locks.
+- node-pg does not expose a reliable portable “am I in a transaction?” API for all modes; callers **must** open `BEGIN` themselves. Helpers do not claim to detect this automatically.
 
-On `UPDATE`/`DELETE`, PostgreSQL acquires the **row exclusive lock on the target row before BEFORE ROW triggers run**. Advisory locks taken *only* inside those triggers cannot establish an order relative to that first row lock.
+## FK change protocol (old + new, concurrent-safe)
 
-### Application locks (required)
-
-At the **start** of a transaction, **before** mutating related rows:
-
-- JS: `src/db/tenantLocks.js`  
-- SQL: `lock_tenant_subscription` / `lock_tenant_search` / `lock_tenant_search_result`
-
-**Changing a FK** requires locking **both** the old and the new parent (when non-null), in deterministic order via `lockReferenceChange`.
+**Do not** take `SELECT … FOR UPDATE` on the child/parent **before** advisory locks (lock-order inversion / deadlock risk).
 
 ```js
-const { lockReferenceChange } = require('../src/db/tenantLocks');
+const { stabilizeAndLockReferenceChange } = require('../src/db/tenantLocks');
 
-// payment.subscription_id: A → B
 await client.query('BEGIN');
 try {
-  await lockReferenceChange(client, 'sub', oldSubscriptionId, newSubscriptionId);
-  await client.query(
-    `UPDATE payments SET subscription_id = $1 WHERE id = $2 AND user_id = $3`,
-    [newSubscriptionId, paymentId, userId]
+  const paymentId = '…'; // UUID
+  const newSubscriptionId = '…'; // UUID or null
+
+  const { observedCurrentId } = await stabilizeAndLockReferenceChange(
+    client,
+    'sub',
+    async () => {
+      const { rows } = await client.query(
+        `SELECT subscription_id FROM payments WHERE id = $1`,
+        [paymentId]
+      );
+      if (!rows[0]) throw new Error('payment not found');
+      return rows[0].subscription_id;
+    },
+    newSubscriptionId
   );
+
+  const upd = await client.query(
+    `UPDATE payments
+     SET subscription_id = $1
+     WHERE id = $2
+       AND subscription_id IS NOT DISTINCT FROM $3`,
+    [newSubscriptionId, paymentId, observedCurrentId]
+  );
+  if (upd.rowCount !== 1) {
+    throw Object.assign(new Error('concurrent FK change'), { code: 'CONCURRENT_FK_CHANGE' });
+  }
+
   await client.query('COMMIT');
 } catch (err) {
   await client.query('ROLLBACK');
@@ -54,73 +64,35 @@ try {
 }
 ```
 
-```js
-// saved_leads.origin_search_id: SEARCH_A → SEARCH_B
-await client.query('BEGIN');
-try {
-  await lockReferenceChange(client, 'search', oldSearchId, newSearchId);
-  await client.query(
-    `UPDATE saved_leads SET origin_search_id = $1 WHERE id = $2 AND user_id = $3`,
-    [newSearchId, leadId, userId]
-  );
-  await client.query('COMMIT');
-} catch (err) {
-  await client.query('ROLLBACK');
-  throw err;
-}
-```
+Same protocol for `saved_leads.origin_search_id` (`'search'`) and `search_results.is_duplicate_of` (`'result'`).
 
-```js
-// search_results.is_duplicate_of: RESULT_A → RESULT_B
-await client.query('BEGIN');
-try {
-  await lockReferenceChange(client, 'result', oldDupId, newDupId);
-  await client.query(
-    `UPDATE search_results SET is_duplicate_of = $1 WHERE id = $2 AND user_id = $3`,
-    [newDupId, resultId, userId]
-  );
-  await client.query('COMMIT');
-} catch (err) {
-  await client.query('ROLLBACK');
-  throw err;
-}
-```
+IDs must be RFC UUID strings; invalid strings are rejected before SQL.
 
-`lockReferenceChange` skips null ids and deduplicates when old === new.
+## Triggers
 
-### Session vs transaction advisory locks
+Enforce multi-tenant predicates; not a substitute for application pre-locking.
 
-| API | Scope | Used for |
-|-----|--------|----------|
-| `pg_advisory_lock` | **Session** | Migration runner |
-| `pg_advisory_xact_lock` | **Transaction** | Tenant ops (released on COMMIT/ROLLBACK) |
+## Migration runner
 
-### Migration runner safety
+Session `pg_advisory_lock` for DDL. On unlock failure: `client.release(true)` (destroy), not returned to the pool.
 
-`src/db/migrate.js` takes a session lock for the run. On completion it calls `pg_advisory_unlock_all()`. If lock release cannot be confirmed, the client is **destroyed** (`client.release(true)`) and **not** returned to the pool.
+## Error codes
 
-### Error codes
-
-| SQLSTATE | Meaning | Guidance |
-|----------|---------|----------|
-| `23514` | check_violation | Fix request |
-| `23503` | foreign_key_violation | Fix request |
-| `40P01` | deadlock_detected | Retry entire transaction only if idempotent |
-| `40001` | serialization_failure | Not a deadlock |
+| SQLSTATE | Meaning |
+|----------|---------|
+| `23514` | check_violation |
+| `23503` | foreign_key_violation |
+| `40P01` | deadlock_detected — retry whole xact if idempotent |
+| `40001` | serialization_failure — not a deadlock |
 
 ## Limitations
 
-- Without application pre-locking, concurrent parent/child updates may deadlock (`40P01`).  
-- PostgreSQL integration test execution is **pending** until the deploy/test environment is available.
-
-## Running PostgreSQL tests later
+- Without this protocol, concurrent parent/child updates may deadlock (`40P01`).  
+- Stabilization may fail (`TENANT_LOCK_UNSTABLE`) under extreme contention.  
+- PostgreSQL integration tests: **pending**.
 
 ```bash
-export NODE_ENV=test
-export ALLOW_DB_TESTS=1
+export NODE_ENV=test ALLOW_DB_TESTS=1
 export DATABASE_URL=postgresql://USER:PASS@localhost:5432/maps_leads_finder_test
-npm install
-npm run migrate
-npm run migrate
-npm test
+npm run migrate && npm run migrate && npm test
 ```
