@@ -13,83 +13,39 @@ Migrations 001–007 (unchanged history). Helpers: `src/db/tenantLocks.js`, SQL 
 
 ## Advisory lock contract
 
-`pg_advisory_xact_lock` is **transaction-scoped**.
+`pg_advisory_xact_lock` is **transaction-scoped**. Use only after `BEGIN`. Outside a transaction block the lock may be released at statement end. `COMMIT`/`ROLLBACK` release xact locks.
 
-- Must be used only after `BEGIN` and before `COMMIT`/`ROLLBACK`.
-- Outside an explicit transaction, PostgreSQL may release the lock at the end of the statement — a later `UPDATE` is **not** protected.
-- `COMMIT` and `ROLLBACK` both release transaction advisory locks.
-- node-pg does not expose a reliable portable “am I in a transaction?” API for all modes; callers **must** open `BEGIN` themselves. Helpers do not claim to detect this automatically.
+## FK change protocol
 
-## FK change protocol (old + new, concurrent-safe)
+**Do not** `SELECT … FOR UPDATE` before advisory locks.
 
-**Do not** take `SELECT … FOR UPDATE` on the child/parent **before** advisory locks (lock-order inversion / deadlock risk).
+1. `BEGIN`
+2. `stabilizeAndLockReferenceChange(client, kind, readCurrent, newId)`
+   - reads FK once
+   - acquires locks for **observed + new** once (global order)
+   - re-reads; if equal → return
+   - if changed → **`TENANT_LOCK_RETRY`** (no extra locks) → `ROLLBACK` and **restart the whole transaction**
+3. `UPDATE … SET fk = $new WHERE id = $id AND fk IS NOT DISTINCT FROM $observed`
+4. `COMMIT`
 
-```js
-const { stabilizeAndLockReferenceChange } = require('../src/db/tenantLocks');
-
-await client.query('BEGIN');
-try {
-  const paymentId = '…'; // UUID
-  const newSubscriptionId = '…'; // UUID or null
-
-  const { observedCurrentId } = await stabilizeAndLockReferenceChange(
-    client,
-    'sub',
-    async () => {
-      const { rows } = await client.query(
-        `SELECT subscription_id FROM payments WHERE id = $1`,
-        [paymentId]
-      );
-      if (!rows[0]) throw new Error('payment not found');
-      return rows[0].subscription_id;
-    },
-    newSubscriptionId
-  );
-
-  const upd = await client.query(
-    `UPDATE payments
-     SET subscription_id = $1
-     WHERE id = $2
-       AND subscription_id IS NOT DISTINCT FROM $3`,
-    [newSubscriptionId, paymentId, observedCurrentId]
-  );
-  if (upd.rowCount !== 1) {
-    throw Object.assign(new Error('concurrent FK change'), { code: 'CONCURRENT_FK_CHANGE' });
-  }
-
-  await client.query('COMMIT');
-} catch (err) {
-  await client.query('ROLLBACK');
-  throw err;
-}
-```
-
-Same protocol for `saved_leads.origin_search_id` (`'search'`) and `search_results.is_duplicate_of` (`'result'`).
-
-IDs must be RFC UUID strings; invalid strings are rejected before SQL.
-
-## Triggers
-
-Enforce multi-tenant predicates; not a substitute for application pre-locking.
+Same for `'sub'`, `'search'`, `'result'`.
 
 ## Migration runner
 
-Session `pg_advisory_lock` for DDL. On unlock failure: `client.release(true)` (destroy), not returned to the pool.
+Session `pg_advisory_lock`. Acquire failure → `client.release(true)`. Unlock failure → destroy. Confirmed unlock → return to pool. Never double-release.
 
 ## Error codes
 
-| SQLSTATE | Meaning |
-|----------|---------|
+| Code | Meaning |
+|------|---------|
 | `23514` | check_violation |
-| `23503` | foreign_key_violation |
-| `40P01` | deadlock_detected — retry whole xact if idempotent |
-| `40001` | serialization_failure — not a deadlock |
+| `40P01` | deadlock — retry whole xact if idempotent |
+| `40001` | serialization_failure |
+| `TENANT_LOCK_RETRY` | FK changed underfoot — ROLLBACK + full retry |
 
 ## Limitations
 
-- Without this protocol, concurrent parent/child updates may deadlock (`40P01`).  
-- Stabilization may fail (`TENANT_LOCK_UNSTABLE`) under extreme contention.  
-- PostgreSQL integration tests: **pending**.
+PostgreSQL integration tests: **pending**.
 
 ```bash
 export NODE_ENV=test ALLOW_DB_TESTS=1
