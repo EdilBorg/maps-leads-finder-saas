@@ -1,287 +1,310 @@
-/**
- * Maps Leads Finder SaaS — Frontend shell (Vanilla JS)
- * Navigation, demo interactions, no real backend calls.
- * Results rendered via createElement + textContent only (no innerHTML).
- */
-
 (function () {
   'use strict';
-
-  const titles = {
-    dashboard: 'Dashboard',
-    search: 'Nova pesquisa',
-    results: 'Resultados',
-    history: 'Histórico',
-    leads: 'Leads guardados',
-  };
-
-  const DEMO_RESULTS = [
-    {
-      name: 'Clínica Sorriso',
-      category: 'Clínica dentária',
-      location: 'Maputo',
-      phone: '+258 84 000 0001',
-      email: 'contacto@demo.local',
-      website: '—',
-      rating: '4.6',
-      reviews: '128',
-      validation: 'Parcial',
-    },
-    {
-      name: 'Restaurante Mar',
-      category: 'Restaurante',
-      location: 'Beira',
-      phone: '+258 82 000 0002',
-      email: '—',
-      website: '—',
-      rating: '4.2',
-      reviews: '64',
-      validation: 'Telefone',
-    },
-    {
-      name: 'Auto Fix',
-      category: 'Oficina',
-      location: 'Nampula',
-      phone: '+258 86 000 0003',
-      email: 'oficina@demo.local',
-      website: 'https://demo.example',
-      rating: '3.9',
-      reviews: '31',
-      validation: 'Completo',
-    },
-    {
-      name: 'Farmácia Central',
-      category: 'Farmácia',
-      location: 'Maputo',
-      phone: '+258 84 000 0004',
-      email: '—',
-      website: '—',
-      rating: '4.8',
-      reviews: '210',
-      validation: 'Telefone',
-    },
-    {
-      name: 'Studio Design',
-      category: 'Agência digital',
-      location: 'Matola',
-      phone: '—',
-      email: 'hello@demo.local',
-      website: 'https://studio.demo',
-      rating: '4.4',
-      reviews: '19',
-      validation: 'Email',
-    },
-  ];
-
-  let currentResults = [];
-
-  function $(sel, root) {
-    return (root || document).querySelector(sel);
+  const titles = { dashboard: 'Dashboard', search: 'Nova pesquisa', results: 'Resultados', history: 'Histórico', leads: 'Leads guardados' };
+  let currentResults = [], currentSearchMeta = null, csrfToken = null;
+  const $ = (s, r) => (r || document).querySelector(s);
+  const $all = (s, r) => Array.from((r || document).querySelectorAll(s));
+  function esc(s) { return s == null ? '' : String(s); }
+  async function ensureCsrf() {
+    if (csrfToken) return csrfToken;
+    const res = await fetch('/api/auth/csrf', { credentials: 'same-origin' });
+    if (!res.ok) throw new Error('CSRF');
+    const data = await res.json();
+    csrfToken = data.csrfToken;
+    return csrfToken;
   }
-  function $all(sel, root) {
-    return Array.from((root || document).querySelectorAll(sel));
+  async function api(path, options = {}) {
+    const opts = { credentials: 'same-origin', headers: { Accept: 'application/json', ...(options.headers || {}) }, ...options };
+    if (opts.body && typeof opts.body === 'object' && !(opts.body instanceof FormData)) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(opts.body);
+    }
+    const res = await fetch(path, opts);
+    let data = null;
+    try { data = await res.json(); } catch (_) {}
+    return { res, data };
   }
-
   function navigate(view) {
-    if (!titles[view]) return;
-
-    $all('.view').forEach((el) => {
-      el.classList.toggle('active', el.id === 'view-' + view);
-    });
-
-    $all('.nav-item[data-view]').forEach((btn) => {
+    $all('.view').forEach((el) => el.classList.remove('active'));
+    const section = $('#view-' + view);
+    if (section) section.classList.add('active');
+    $all('.nav-item').forEach((btn) => {
       const active = btn.getAttribute('data-view') === view;
       btn.classList.toggle('active', active);
       if (active) btn.setAttribute('aria-current', 'page');
       else btn.removeAttribute('aria-current');
     });
-
-    const titleEl = $('#topbar-title');
-    if (titleEl) titleEl.textContent = titles[view];
-
-    const sidebar = $('#sidebar');
-    const overlay = $('#sidebar-overlay');
+    const title = $('#topbar-title');
+    if (title) title.textContent = titles[view] || 'Maps Leads Finder';
+    try { location.hash = view; } catch (_) {}
+    const sidebar = $('#sidebar'), overlay = $('#sidebar-overlay');
     if (sidebar) sidebar.classList.remove('open');
-    if (overlay) overlay.classList.remove('open');
-
-    if (view === 'results') {
-      renderResultsState();
+    if (overlay) { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); }
+    if (view === 'dashboard') loadDashboard();
+    if (view === 'history') loadHistory();
+    if (view === 'leads') loadLeads();
+    if (view === 'results') renderResultsState();
+  }
+  function initModalities() {
+    const grid = $('#modality-grid');
+    if (!grid) return;
+    $all('.modality-card', grid).forEach((card) => {
+      const input = card.querySelector('input[type="radio"]');
+      card.addEventListener('click', (e) => {
+        e.preventDefault();
+        $all('.modality-card', grid).forEach((c) => c.classList.remove('selected'));
+        card.classList.add('selected');
+        if (input) input.checked = true;
+      });
+    });
+  }
+  function selectedModality() {
+    const checked = document.querySelector('input[name="modality"]:checked');
+    return checked && checked.value === 'expanded' ? 'expanded' : 'standard';
+  }
+  function setStatus(msg, isError) {
+    const el = $('#search-status');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.style.color = isError ? 'var(--color-coral-red)' : 'var(--color-fog)';
+  }
+  function renderResultsState() {
+    const body = $('#results-body'), empty = $('#results-empty'), count = $('#results-count');
+    if (!body) return;
+    body.innerHTML = '';
+    if (!currentResults.length) {
+      if (empty) {
+        empty.hidden = false;
+        empty.textContent = (currentSearchMeta && currentSearchMeta.message) || 'Sem resultados para mostrar.';
+      }
+      if (count) count.textContent = '0 resultados';
+      return;
     }
-
+    if (empty) empty.hidden = true;
+    if (count) count.textContent = currentResults.length + ' resultado' + (currentResults.length === 1 ? '' : 's');
+    const frag = document.createDocumentFragment();
+    currentResults.forEach((r) => {
+      const tr = document.createElement('tr');
+      const tdCheck = document.createElement('td');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.className = 'result-check'; cb.value = r.id || '';
+      tdCheck.appendChild(cb);
+      tr.appendChild(tdCheck);
+      function cell(text) { const td = document.createElement('td'); td.textContent = esc(text == null ? '—' : text); return td; }
+      tr.appendChild(cell(r.name));
+      tr.appendChild(cell(r.address));
+      tr.appendChild(cell(r.phone));
+      tr.appendChild(cell(r.email));
+      tr.appendChild(cell(r.website));
+      tr.appendChild(cell(r.rating != null ? r.rating : '—'));
+      frag.appendChild(tr);
+    });
+    body.appendChild(frag);
+  }
+  async function submitSearch(ev) {
+    ev.preventDefault();
+    const query = ($('#query') || {}).value || '';
+    const location = ($('#location') || {}).value || '';
+    const limit = parseInt(($('#limit') || {}).value || '100', 10);
+    const minRating = ($('#min-rating') || {}).value || '';
+    const hasPhone = !!document.querySelector('input[name="hasPhone"]:checked');
+    const hasEmail = !!document.querySelector('input[name="hasEmail"]:checked');
+    const noWebsite = !!document.querySelector('input[name="noWebsite"]:checked');
+    const minReviews = !!document.querySelector('input[name="minReviews"]:checked');
+    if (!String(query).trim() || !String(location).trim()) { setStatus('Preenche categoria e localização.', true); return; }
+    const btn = $('#btn-search');
+    if (btn) btn.disabled = true;
+    setStatus('A pesquisar…');
     try {
-      history.replaceState(null, '', '#' + view);
+      const token = await ensureCsrf();
+      const { res, data } = await api('/api/searches', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': token },
+        body: { query: String(query).trim(), location: String(location).trim(), modality: selectedModality(), limit, minRating, hasPhone, hasEmail, noWebsite, minReviews },
+      });
+      if (res.status === 401) { setStatus('Inicia sessão para pesquisar.', true); return; }
+      if (res.status === 403 && data && data.code === 'EMAIL_NOT_VERIFIED') { setStatus('Verifica o teu email antes de pesquisar.', true); return; }
+      if (!res.ok) { setStatus((data && data.error) || 'Falha na pesquisa.', true); return; }
+      currentResults = data.results || [];
+      currentSearchMeta = { searchId: data.searchId, status: data.status, outcome: data.outcome, message: data.message };
+      setStatus(data.outcome === 'results' ? currentResults.length + ' resultado(s).' : data.message || '');
+      renderResultsState();
+      navigate('results');
+    } catch (_) {
+      setStatus('Não foi possível realizar a pesquisa. Tenta novamente.', true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+  function formatDate(v) {
+    if (!v) return '—';
+    try { return new Date(v).toLocaleString('pt-PT'); } catch (_) { return String(v); }
+  }
+  async function loadDashboard() {
+    const { res, data } = await api('/api/searches/dashboard');
+    if (!res.ok) {
+      ['stat-searches', 'stat-results', 'stat-leads'].forEach((id) => { const el = $('#' + id); if (el) el.textContent = '—'; });
+      const empty = $('#dashboard-recent-empty');
+      if (empty) {
+        empty.hidden = false;
+        empty.textContent = res.status === 401 ? 'Inicia sessão para ver a atividade da conta.' : res.status === 403 ? 'Verifica o email para aceder aos dados da conta.' : 'Não foi possível carregar o dashboard.';
+      }
+      return;
+    }
+    if ($('#stat-searches')) $('#stat-searches').textContent = String(data.searchesCount);
+    if ($('#stat-results')) $('#stat-results').textContent = String(data.resultsCount);
+    if ($('#stat-leads')) $('#stat-leads').textContent = String(data.savedLeadsCount);
+    const box = $('#dashboard-recent');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!data.recentSearches || !data.recentSearches.length) {
+      const p = document.createElement('p'); p.className = 'empty-hint'; p.textContent = 'Ainda não existem pesquisas.'; box.appendChild(p); return;
+    }
+    const table = document.createElement('table'); table.className = 'data-table';
+    const thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>Categoria</th><th>Localização</th><th>Resultados</th><th>Estado</th><th>Data</th></tr>';
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    data.recentSearches.forEach((item) => {
+      const tr = document.createElement('tr'); tr.style.cursor = 'pointer';
+      tr.addEventListener('click', () => openSearch(item.id));
+      [item.query, item.location, item.resultsCount, item.status, formatDate(item.createdAt)].forEach((val, idx) => {
+        const td = document.createElement('td');
+        if (idx === 3) { const pill = document.createElement('span'); pill.className = 'status-pill ' + esc(item.status); pill.textContent = esc(item.status); td.appendChild(pill); }
+        else td.textContent = esc(val == null ? '—' : val);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody); box.appendChild(table);
+  }
+  async function loadHistory() {
+    const body = $('#history-body'); if (!body) return; body.innerHTML = '';
+    const { res, data } = await api('/api/searches?limit=50');
+    if (!res.ok) {
+      const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 5;
+      td.textContent = res.status === 401 ? 'Inicia sessão para ver o histórico.' : 'Não foi possível carregar o histórico.';
+      tr.appendChild(td); body.appendChild(tr); return;
+    }
+    if (!data.items.length) {
+      const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 5; td.textContent = 'Sem pesquisas registadas.'; tr.appendChild(td); body.appendChild(tr); return;
+    }
+    data.items.forEach((item) => {
+      const tr = document.createElement('tr'); tr.style.cursor = 'pointer';
+      tr.addEventListener('click', () => openSearch(item.id));
+      [item.query, item.location, item.resultsCount, item.status, formatDate(item.createdAt)].forEach((val, idx) => {
+        const td = document.createElement('td');
+        if (idx === 3) { const pill = document.createElement('span'); pill.className = 'status-pill ' + esc(item.status); pill.textContent = esc(item.status); td.appendChild(pill); }
+        else td.textContent = esc(val == null ? '—' : val);
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+  }
+  async function openSearch(id) {
+    const { res, data } = await api('/api/searches/' + id + '/results');
+    if (!res.ok) return;
+    currentResults = data.results || [];
+    currentSearchMeta = { searchId: id, status: data.search && data.search.status };
+    renderResultsState();
+    navigate('results');
+  }
+  async function loadLeads() {
+    const body = $('#leads-body'); if (!body) return; body.innerHTML = '';
+    const { res, data } = await api('/api/searches/leads/saved');
+    if (!res.ok) {
+      const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 5;
+      td.textContent = res.status === 401 ? 'Inicia sessão para ver leads guardados.' : 'Não foi possível carregar leads.';
+      tr.appendChild(td); body.appendChild(tr); return;
+    }
+    if (!data.items.length) {
+      const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 5; td.textContent = 'Ainda não guardaste leads.'; tr.appendChild(td); body.appendChild(tr); return;
+    }
+    data.items.forEach((item) => {
+      const tr = document.createElement('tr');
+      [item.name, item.address, item.phone, item.email, formatDate(item.createdAt)].forEach((val) => {
+        const td = document.createElement('td'); td.textContent = esc(val == null ? '—' : val); tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+  }
+  async function saveSelectedLeads() {
+    const ids = $all('.result-check:checked').map((c) => c.value).filter(Boolean);
+    if (!ids.length) { setStatus('Seleciona resultados para guardar.', true); return; }
+    try {
+      const token = await ensureCsrf();
+      const { res, data } = await api('/api/searches/leads/save', { method: 'POST', headers: { 'X-CSRF-Token': token }, body: { resultIds: ids } });
+      if (!res.ok) { setStatus((data && data.error) || 'Falha ao guardar.', true); return; }
+      setStatus(((data.saved || []).length) + ' lead(s) guardado(s).');
+    } catch (_) { setStatus('Falha ao guardar leads.', true); }
+  }
+  async function refreshAuthUi() {
+    const login = document.getElementById('link-login');
+    const reg = document.getElementById('link-register');
+    const logout = document.getElementById('btn-logout');
+    const badge = document.getElementById('auth-badge');
+    try {
+      const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
+      if (res.ok) {
+        const data = await res.json();
+        if (login) login.hidden = true;
+        if (reg) reg.hidden = true;
+        if (logout) {
+          logout.hidden = false;
+          logout.onclick = async () => {
+            try {
+              const token = await ensureCsrf();
+              await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': token, 'Content-Type': 'application/json' }, body: '{}' });
+            } catch (_) {}
+            window.location.reload();
+          };
+        }
+        if (badge && data.user) badge.textContent = data.user.emailVerified ? data.user.name : data.user.name + ' (email por verificar)';
+      }
     } catch (_) {}
   }
-
-  function createTextCell(text, className) {
-    const td = document.createElement('td');
-    if (className) td.className = className;
-    td.textContent = text == null ? '' : String(text);
-    return td;
-  }
-
-  function renderResultsState() {
-    const empty = $('#results-empty');
-    const loading = $('#results-loading');
-    const table = $('#results-table-wrap');
-    const pagination = $('#results-pagination');
-
-    if (loading && !loading.hidden) return;
-
-    const has = currentResults.length > 0;
-    if (empty) empty.hidden = has;
-    if (table) table.hidden = !has;
-    if (pagination) pagination.hidden = !has;
-
-    if (has) {
-      const body = $('#results-body');
-      if (!body) return;
-
-      while (body.firstChild) {
-        body.removeChild(body.firstChild);
-      }
-
-      currentResults.forEach((r) => {
-        const tr = document.createElement('tr');
-
-        const tdCheck = document.createElement('td');
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.setAttribute('aria-label', 'Selecionar');
-        tdCheck.appendChild(cb);
-        tr.appendChild(tdCheck);
-
-        tr.appendChild(createTextCell(r.name, 'cell-name'));
-        tr.appendChild(createTextCell(r.category));
-        tr.appendChild(createTextCell(r.location));
-        tr.appendChild(createTextCell(r.phone, 'mono'));
-        tr.appendChild(createTextCell(r.email, 'mono'));
-        tr.appendChild(createTextCell(r.website, 'mono'));
-        tr.appendChild(createTextCell(r.rating));
-        tr.appendChild(createTextCell(r.reviews));
-
-        const tdVal = document.createElement('td');
-        const badge = document.createElement('span');
-        const badgeClass =
-          r.validation === 'Completo'
-            ? 'badge badge-success'
-            : r.validation === 'Parcial'
-              ? 'badge badge-warn'
-              : 'badge badge-info';
-        badge.className = badgeClass;
-        badge.textContent = r.validation == null ? '' : String(r.validation);
-        tdVal.appendChild(badge);
-        tr.appendChild(tdVal);
-
-        body.appendChild(tr);
-      });
-
-      const count = $('#results-count');
-      if (count) count.textContent = currentResults.length + ' resultados (demo)';
-    }
-  }
-
-  function simulateSearch() {
-    const status = $('#search-status');
-    const loading = $('#results-loading');
-    const empty = $('#results-empty');
-    const table = $('#results-table-wrap');
-    const pagination = $('#results-pagination');
-
-    if (status) status.textContent = 'Simulação em curso…';
-
-    navigate('results');
-    if (loading) loading.hidden = false;
-    if (empty) empty.hidden = true;
-    if (table) table.hidden = true;
-    if (pagination) pagination.hidden = true;
-
-    setTimeout(() => {
-      currentResults = DEMO_RESULTS.slice();
-      if (loading) loading.hidden = true;
-      renderResultsState();
-      if (status) status.textContent = 'Simulação concluída (dados de demonstração)';
-    }, 700);
-  }
-
-  function initProviders() {
-    $all('#provider-grid .provider-chip').forEach((chip) => {
-      chip.addEventListener('click', () => {
-        const input = chip.querySelector('input');
-        if (!input) return;
-        setTimeout(() => {
-          chip.classList.toggle('selected', input.checked);
-        }, 0);
-      });
-    });
-  }
-
   function init() {
-    $all('.nav-item[data-view]').forEach((btn) => {
+    $all('.nav-item').forEach((btn) => {
       btn.addEventListener('click', () => {
         if (btn.disabled) return;
-        navigate(btn.getAttribute('data-view'));
+        const view = btn.getAttribute('data-view');
+        if (view && titles[view]) navigate(view);
       });
     });
-
-    $all('[data-nav]').forEach((btn) => {
-      btn.addEventListener('click', () => navigate(btn.getAttribute('data-nav')));
-    });
-
-    const toggle = $('#mobile-toggle');
-    const sidebar = $('#sidebar');
+    const menuBtn = $('#btn-menu') || $('#mobile-toggle');
     const overlay = $('#sidebar-overlay');
-    if (toggle && sidebar) {
-      toggle.addEventListener('click', () => {
-        sidebar.classList.toggle('open');
-        if (overlay) overlay.classList.toggle('open', sidebar.classList.contains('open'));
+    if (menuBtn) {
+      menuBtn.addEventListener('click', () => {
+        const sidebar = $('#sidebar');
+        if (sidebar) sidebar.classList.toggle('open');
+        if (overlay) { overlay.classList.toggle('open'); overlay.setAttribute('aria-hidden', overlay.classList.contains('open') ? 'false' : 'true'); }
       });
     }
     if (overlay) {
       overlay.addEventListener('click', () => {
-        sidebar.classList.remove('open');
+        const sidebar = $('#sidebar');
+        if (sidebar) sidebar.classList.remove('open');
         overlay.classList.remove('open');
+        overlay.setAttribute('aria-hidden', 'true');
       });
     }
-
+    initModalities();
     const form = $('#search-form');
-    if (form) {
-      form.addEventListener('submit', (e) => {
-        e.preventDefault();
-        const status = $('#search-status');
-        if (status) {
-          status.textContent =
-            'Pesquisa real ainda não disponível. Use “Simular resultados (demo)”.';
-        }
-      });
-    }
-
-    const demoBtn = $('#btn-search-demo');
-    if (demoBtn) demoBtn.addEventListener('click', simulateSearch);
-
+    if (form) form.addEventListener('submit', submitSearch);
     const filterInput = $('#results-filter');
     if (filterInput) {
       filterInput.addEventListener('input', () => {
         const q = filterInput.value.trim().toLowerCase();
-        $all('#results-body tr').forEach((tr) => {
-          const text = tr.textContent.toLowerCase();
-          tr.style.display = !q || text.includes(q) ? '' : 'none';
-        });
+        $all('#results-body tr').forEach((tr) => { tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? '' : 'none'; });
       });
     }
-
-    initProviders();
-
+    const selectAll = $('#select-all');
+    if (selectAll) selectAll.addEventListener('change', () => { $all('.result-check').forEach((c) => { c.checked = selectAll.checked; }); });
+    const saveBtn = $('#btn-save-leads');
+    if (saveBtn) saveBtn.addEventListener('click', saveSelectedLeads);
     const hash = (location.hash || '#dashboard').replace('#', '');
     navigate(titles[hash] ? hash : 'dashboard');
-
-    currentResults = [];
-    renderResultsState();
   }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => { init(); refreshAuthUi(); });
+  else { init(); refreshAuthUi(); }
 })();
