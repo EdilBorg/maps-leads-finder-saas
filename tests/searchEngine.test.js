@@ -5,6 +5,8 @@ const {
   providersForModality,
   deduplicate,
   applyFilters,
+  normalizeLead,
+  perProviderLimit,
   clientMessageForOutcome,
   publicLead,
 } = require('../src/services/searchEngine');
@@ -13,15 +15,12 @@ describe('searchEngine modalities', () => {
   it('standard maps to google_maps + osm only', () => {
     assert.deepEqual(providersForModality('standard'), ['google_maps', 'osm']);
   });
-
   it('expanded maps to google_maps + apify only', () => {
     assert.deepEqual(providersForModality('expanded'), ['google_maps', 'apify']);
   });
-
   it('unknown modality falls back to standard', () => {
     assert.equal(resolveModality('other').id, 'standard');
   });
-
   it('never uses all three providers together', () => {
     const s = providersForModality('standard');
     const e = providersForModality('expanded');
@@ -32,17 +31,20 @@ describe('searchEngine modalities', () => {
   });
 });
 
-describe('searchEngine dedupe and filters', () => {
+describe('searchEngine normalize dedupe filter limit', () => {
+  it('normalizeLead trims and drops invalid ratings', () => {
+    const n = normalizeLead({ name: '  A  ', rating: 'x', sourceProvider: 'osm', externalId: '1' });
+    assert.equal(n.name, 'A');
+    assert.equal(n.rating, null);
+  });
   it('deduplicates by external id per provider', () => {
     const leads = [
       { name: 'A', sourceProvider: 'google_maps', externalId: '1', phone: null, address: 'x' },
       { name: 'A copy', sourceProvider: 'google_maps', externalId: '1', phone: null, address: 'y' },
       { name: 'B', sourceProvider: 'osm', externalId: '1', phone: null, address: 'z' },
     ];
-    const out = deduplicate(leads);
-    assert.equal(out.length, 2);
+    assert.equal(deduplicate(leads).length, 2);
   });
-
   it('deduplicates by phone', () => {
     const leads = [
       { name: 'A', phone: '+351 912 345 678', sourceProvider: 'google_maps', externalId: null, address: '' },
@@ -50,13 +52,21 @@ describe('searchEngine dedupe and filters', () => {
     ];
     assert.equal(deduplicate(leads).length, 1);
   });
-
   it('applyFilters hasPhone', () => {
-    const leads = [
-      { name: 'A', phone: '1' },
-      { name: 'B', phone: null },
-    ];
-    assert.equal(applyFilters(leads, { hasPhone: true }).length, 1);
+    assert.equal(
+      applyFilters([{ name: 'A', phone: '1' }, { name: 'B', phone: null }], { hasPhone: true }).length,
+      1
+    );
+  });
+  it('perProviderLimit is bounded', () => {
+    assert.ok(perProviderLimit(10) >= 10);
+    assert.ok(perProviderLimit(500) <= 200);
+  });
+  it('global limit applied after merge via slice contract', () => {
+    const many = Array.from({ length: 50 }, (_, i) =>
+      normalizeLead({ name: `N${i}`, sourceProvider: 'osm', externalId: String(i) })
+    );
+    assert.equal(deduplicate(many).slice(0, 15).length, 15);
   });
 });
 
@@ -66,27 +76,13 @@ describe('searchEngine client messages', () => {
     assert.equal(msg, 'Nenhum resultado encontrado.');
     assert.equal(/google|apify|osm|openstreet/i.test(msg), false);
   });
-
   it('error message is generic', () => {
-    const msg = clientMessageForOutcome('error');
-    assert.match(msg, /Não foi possível realizar a pesquisa/);
+    assert.match(clientMessageForOutcome('error'), /Não foi possível realizar a pesquisa/);
   });
-
   it('publicLead strips sourceProvider', () => {
     const p = publicLead({
-      id: 'x',
-      name: 'N',
-      sourceProvider: 'google_maps',
-      externalId: 'e',
-      address: 'a',
-      phone: null,
-      email: null,
-      website: null,
-      rating: 4,
-      reviewsCount: 1,
-      category: 'c',
-      lat: 1,
-      lng: 2,
+      id: 'x', name: 'N', sourceProvider: 'google_maps', externalId: 'e',
+      address: 'a', phone: null, email: null, website: null, rating: 4, reviewsCount: 1, category: 'c', lat: 1, lng: 2,
     });
     assert.equal(p.sourceProvider, undefined);
     assert.equal(p.name, 'N');
