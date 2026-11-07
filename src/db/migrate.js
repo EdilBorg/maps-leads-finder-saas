@@ -45,9 +45,14 @@ async function applyMigrationsWithClient(client, opts = {}) {
     }
     log('[migrate] done');
   } finally {
+    // Always drop session-level advisory locks on this connection before pool release.
     try {
-      await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]);
-    } catch (_) {}
+      await client.query('SELECT pg_advisory_unlock_all()');
+    } catch (_) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]);
+      } catch (_) {}
+    }
   }
 }
 
