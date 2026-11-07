@@ -73,7 +73,7 @@ describe('searchEngine normalize dedupe filter limit', () => {
 describe('searchEngine client messages', () => {
   it('no_results message is user-facing without provider names', () => {
     const msg = clientMessageForOutcome('no_results');
-    assert.equal(msg, 'Nenhum resultado encontrado.');
+    assert.equal(msg, 'Não foi possível encontrar resultados para esta pesquisa.');
     assert.equal(/google|apify|osm|openstreet/i.test(msg), false);
   });
   it('error message is generic', () => {
