@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Maps Leads Finder</title>
   <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/search.css">
 </head>
 <body>
   <div class="sidebar-overlay" id="sidebar-overlay" aria-hidden="true"></div>
@@ -27,12 +28,6 @@
         <button type="button" class="nav-item" data-view="leads">Leads guardados</button>
         <button type="button" class="nav-item" data-view="plans" disabled title="Disponível em etapas posteriores">Planos</button>
       </nav>
-      <div class="sidebar-footer">
-        <div class="plan-chip">
-          <span>Plano <strong>Demo</strong></span>
-          <span class="badge badge-warn">UI only</span>
-        </div>
-      </div>
     </aside>
     <div class="main">
       <header class="topbar">
@@ -41,49 +36,30 @@
           <span class="topbar-title" id="topbar-title">Dashboard</span>
         </div>
         <div class="topbar-actions">
-          <span class="badge">Protótipo visual</span>
+          <span id="auth-badge" class="badge"></span>
+          <a href="/pages/login.html" id="link-login" class="btn btn-ghost btn-sm">Entrar</a>
+          <a href="/pages/register.html" id="link-register" class="btn btn-ghost btn-sm">Registar</a>
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-logout" hidden>Sair</button>
         </div>
       </header>
-      <div class="demo-banner">
-        <strong>Dados de demonstração.</strong> Esta interface é apenas visual — pesquisas, autenticação e quotas reais ainda não estão implementadas.
-      </div>
+      <div class="demo-banner" id="app-banner" hidden></div>
       <main class="content">
         <section class="view active" id="view-dashboard" aria-label="Dashboard">
           <h2 class="page-heading">Dashboard</h2>
-          <p class="page-sub">Visão geral da conta · dados de demonstração</p>
+          <p class="page-sub">Visão geral da conta</p>
           <div class="stat-grid">
-            <div class="stat-card"><div class="stat-label">Pesquisas este mês</div><div class="stat-value">3</div><div class="stat-hint">de 10 no plano demo</div></div>
-            <div class="stat-card"><div class="stat-label">Resultados obtidos</div><div class="stat-value">412</div><div class="stat-hint">quota demo 2 000</div></div>
-            <div class="stat-card"><div class="stat-label">Leads guardados</div><div class="stat-value">18</div><div class="stat-hint">snapshots permanentes</div></div>
-            <div class="stat-card"><div class="stat-label">Plano</div><div class="stat-value" style="font-size:16px;">Demo</div><div class="stat-hint">sem cobrança real</div></div>
+            <div class="stat-card"><div class="stat-label">Pesquisas</div><div class="stat-value" id="stat-searches">—</div><div class="stat-hint">total na conta</div></div>
+            <div class="stat-card"><div class="stat-label">Resultados obtidos</div><div class="stat-value" id="stat-results">—</div><div class="stat-hint">registos encontrados</div></div>
+            <div class="stat-card"><div class="stat-label">Leads guardados</div><div class="stat-value" id="stat-leads">—</div><div class="stat-hint">snapshots permanentes</div></div>
           </div>
-          <div class="stack-gap-16 mt-24">
-            <div class="card">
-              <div class="card-header"><h3 class="card-title">Atalhos</h3></div>
-              <div class="toolbar-left">
-                <button type="button" class="btn btn-primary" data-nav="search">Nova pesquisa</button>
-                <button type="button" class="btn btn-ghost" data-nav="history">Ver histórico</button>
-                <button type="button" class="btn btn-ghost" data-nav="leads">Leads guardados</button>
-              </div>
-            </div>
-            <div class="card">
-              <div class="card-header"><h3 class="card-title">Pesquisas recentes</h3><span class="card-muted">Demonstração</span></div>
-              <div class="table-wrap">
-                <table class="data">
-                  <thead><tr><th>Consulta</th><th>Localização</th><th>Resultados</th><th>Estado</th><th>Data</th></tr></thead>
-                  <tbody>
-                    <tr><td class="cell-name">Clínicas dentárias</td><td>Maputo</td><td>86</td><td><span class="badge badge-success">Concluída</span></td><td class="mono">2026-10-28</td></tr>
-                    <tr><td class="cell-name">Restaurantes sem website</td><td>Beira</td><td>124</td><td><span class="badge badge-success">Concluída</span></td><td class="mono">2026-10-22</td></tr>
-                    <tr><td class="cell-name">Oficinas auto</td><td>Nampula</td><td>—</td><td><span class="badge badge-warn">Parcial</span></td><td class="mono">2026-10-15</td></tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
+          <div class="card" style="margin-top: var(--spacing-24)">
+            <div class="card-header"><h3 class="card-title">Pesquisas recentes</h3></div>
+            <div id="dashboard-recent"><p class="empty-hint" id="dashboard-recent-empty">Inicia sessão para ver a atividade da conta.</p></div>
           </div>
         </section>
         <section class="view" id="view-search" aria-label="Nova pesquisa">
           <h2 class="page-heading">Nova pesquisa</h2>
-          <p class="page-sub">Defina categoria, localização e filtros · protótipo sem execução real</p>
+          <p class="page-sub">Define categoria, localização e modalidade</p>
           <div class="card">
             <form id="search-form" class="stack-gap-16" novalidate>
               <div class="form-grid cols-2">
@@ -91,11 +67,20 @@
                 <div class="form-group"><label class="form-label" for="location">Localização</label><input class="input" id="location" name="location" type="text" placeholder="Ex.: Maputo, Beira" autocomplete="off"></div>
               </div>
               <div class="form-group">
-                <span class="form-label">Fornecedores de dados</span>
-                <div class="provider-grid" id="provider-grid">
-                  <label class="provider-chip selected"><input type="checkbox" name="providers" value="provider-a" checked><span class="dot"></span> Provider A</label>
-                  <label class="provider-chip selected"><input type="checkbox" name="providers" value="provider-b" checked><span class="dot"></span> Provider B</label>
-                  <label class="provider-chip"><input type="checkbox" name="providers" value="provider-c"><span class="dot"></span> Provider C</label>
+                <span class="form-label">Modalidade de pesquisa</span>
+                <div class="modality-grid" id="modality-grid" role="radiogroup" aria-label="Modalidade de pesquisa">
+                  <label class="modality-card selected">
+                    <input type="radio" name="modality" value="standard" checked>
+                    <span class="modality-title">Pesquisa padrão</span>
+                    <span class="modality-sub">Pesquisa equilibrada</span>
+                    <span class="modality-desc">Ideal para pesquisas habituais de empresas e estabelecimentos numa determinada localização.</span>
+                  </label>
+                  <label class="modality-card">
+                    <input type="radio" name="modality" value="expanded">
+                    <span class="modality-title">Pesquisa ampliada</span>
+                    <span class="modality-sub">Maior alcance</span>
+                    <span class="modality-desc">Ideal para pesquisas que exigem uma recolha mais abrangente de potenciais clientes.</span>
+                  </label>
                 </div>
               </div>
               <div class="form-grid cols-2">
@@ -112,10 +97,7 @@
                 </div>
               </div>
               <div class="toolbar">
-                <div class="toolbar-left">
-                  <button type="submit" class="btn btn-primary" id="btn-search">Iniciar pesquisa</button>
-                  <button type="button" class="btn btn-ghost" id="btn-search-demo">Simular resultados (demo)</button>
-                </div>
+                <div class="toolbar-left"><button type="submit" class="btn btn-primary" id="btn-search">Iniciar pesquisa</button></div>
                 <span class="card-muted" id="search-status"></span>
               </div>
             </form>
@@ -123,69 +105,52 @@
         </section>
         <section class="view" id="view-results" aria-label="Resultados">
           <h2 class="page-heading">Resultados</h2>
-          <p class="page-sub">Estrutura de apresentação · dados de demonstração apenas</p>
+          <p class="page-sub">Resultados da última pesquisa</p>
           <div class="toolbar">
             <div class="toolbar-left">
               <input class="input" type="search" id="results-filter" placeholder="Filtrar na tabela…" style="max-width:220px;padding:8px 12px;">
-              <select class="select" id="results-sort" style="max-width:160px;padding:8px 12px;"><option value="name">Ordenar: Nome</option><option value="rating">Ordenar: Rating</option><option value="reviews">Ordenar: Avaliações</option></select>
             </div>
             <div class="toolbar-right">
-              <button type="button" class="btn btn-ghost btn-sm" disabled title="Exportação em etapas posteriores">Exportar</button>
-              <button type="button" class="btn btn-ghost btn-sm" disabled title="Disponível com backend">Guardar selecionados</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-save-leads">Guardar selecionados</button>
+              <span id="results-count">0 resultados</span>
             </div>
           </div>
           <div id="results-empty" class="card state-box" hidden>
-            <h3>Sem resultados para mostrar</h3>
-            <p>Execute uma simulação a partir de Nova pesquisa ou aguarde a integração dos fornecedores.</p>
-            <button type="button" class="btn btn-ghost" data-nav="search">Ir para pesquisa</button>
+            <h3>Sem resultados</h3>
+            <p>Executa uma pesquisa a partir de Nova pesquisa.</p>
           </div>
-          <div id="results-loading" class="card state-box" hidden>
-            <div class="spinner" style="margin:0 auto 16px;"></div>
-            <h3>A carregar…</h3>
-            <p>Simulação de estado de carregamento.</p>
-          </div>
-          <div id="results-table-wrap" class="table-wrap" hidden>
+          <div id="results-table-wrap" class="table-wrap">
             <table class="data" id="results-table">
-              <thead><tr><th><input type="checkbox" id="select-all" aria-label="Selecionar todos"></th><th>Empresa</th><th>Categoria</th><th>Localização</th><th>Telefone</th><th>Email</th><th>Website</th><th>Rating</th><th>Avaliações</th><th>Validação</th></tr></thead>
+              <thead>
+                <tr>
+                  <th><input type="checkbox" id="select-all" aria-label="Selecionar todos"></th>
+                  <th>Empresa</th><th>Endereço</th><th>Telefone</th><th>Email</th><th>Website</th><th>Rating</th>
+                </tr>
+              </thead>
               <tbody id="results-body"></tbody>
             </table>
-          </div>
-          <div class="pagination" id="results-pagination" hidden>
-            <span id="results-count">0 resultados</span>
-            <div class="pagination-btns">
-              <button type="button" class="btn btn-ghost btn-sm" disabled>Anterior</button>
-              <button type="button" class="btn btn-ghost btn-sm" disabled>Seguinte</button>
-            </div>
           </div>
         </section>
         <section class="view" id="view-history" aria-label="Histórico">
           <h2 class="page-heading">Histórico de pesquisas</h2>
-          <p class="page-sub">Pesquisas anteriores · demonstração</p>
+          <p class="page-sub">Pesquisas anteriores da tua conta</p>
           <div class="card">
             <div class="table-wrap">
               <table class="data">
-                <thead><tr><th>Consulta</th><th>Localização</th><th>Fornecedores</th><th>Resultados</th><th>Estado</th><th>Concluída em</th><th>Expira</th></tr></thead>
-                <tbody>
-                  <tr><td class="cell-name">Clínicas dentárias</td><td>Maputo</td><td><span class="badge">A, B</span></td><td>86</td><td><span class="badge badge-success">Concluída</span></td><td class="mono">2026-10-28</td><td class="mono">2026-11-27</td></tr>
-                  <tr><td class="cell-name">Restaurantes sem website</td><td>Beira</td><td><span class="badge">A, B, C</span></td><td>124</td><td><span class="badge badge-success">Concluída</span></td><td class="mono">2026-10-22</td><td class="mono">2026-11-21</td></tr>
-                  <tr><td class="cell-name">Oficinas auto</td><td>Nampula</td><td><span class="badge">A</span></td><td>47</td><td><span class="badge badge-warn">Parcial</span></td><td class="mono">2026-10-15</td><td class="mono">2026-11-14</td></tr>
-                </tbody>
+                <thead><tr><th>Consulta</th><th>Localização</th><th>Resultados</th><th>Estado</th><th>Data</th></tr></thead>
+                <tbody id="history-body"></tbody>
               </table>
             </div>
           </div>
         </section>
         <section class="view" id="view-leads" aria-label="Leads guardados">
           <h2 class="page-heading">Leads guardados</h2>
-          <p class="page-sub">Snapshots independentes da retenção de 30 dias · demonstração</p>
+          <p class="page-sub">Snapshots independentes da retenção de 30 dias</p>
           <div class="card">
             <div class="table-wrap">
               <table class="data">
-                <thead><tr><th>Empresa</th><th>Telefone</th><th>Cidade</th><th>Guardado em</th><th>Notas</th></tr></thead>
-                <tbody>
-                  <tr><td class="cell-name">Clínica Sorriso</td><td class="mono">+258 84 000 0001</td><td>Maputo</td><td class="mono">2026-10-28</td><td>—</td></tr>
-                  <tr><td class="cell-name">Restaurante Mar</td><td class="mono">+258 82 000 0002</td><td>Beira</td><td class="mono">2026-10-22</td><td>Sem website</td></tr>
-                  <tr><td class="cell-name">Auto Fix</td><td class="mono">+258 86 000 0003</td><td>Nampula</td><td class="mono">2026-10-15</td><td>—</td></tr>
-                </tbody>
+                <thead><tr><th>Empresa</th><th>Endereço</th><th>Telefone</th><th>Email</th><th>Guardado em</th></tr></thead>
+                <tbody id="leads-body"></tbody>
               </table>
             </div>
           </div>
