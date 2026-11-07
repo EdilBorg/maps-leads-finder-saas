@@ -17,19 +17,14 @@ const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 const { loadUser } = require('./middleware/auth');
 const healthRouter = require('./routes/health');
 const authRouter = require('./routes/auth');
+const searchRouter = require('./routes/search');
 const { loginRateKey, clientIp } = require('./middleware/rateLimitKeys');
 
 validateConfig();
 
-/**
- * @param {object} [options]
- * @param {import('express-session').Store} [options.sessionStore] - override for tests
- */
 function createApp(options = {}) {
   const app = express();
 
-  // Trust proxy only when TRUST_PROXY_HOPS > 0 (explicit). Default is no trust.
-  // Never read X-Forwarded-For manually — clients can spoof it.
   app.set('trust proxy', config.trustProxyHops > 0 ? config.trustProxyHops : false);
 
   app.use(
@@ -73,12 +68,12 @@ function createApp(options = {}) {
 
   app.use('/api', healthRouter);
   app.use('/api/auth', authRouter);
+  app.use('/api/searches', searchRouter);
 
   if (process.env.ENABLE_TEST_ROUTES === '1' && process.env.NODE_ENV !== 'production') {
     app.get('/__test/client-ip', (req, res) => {
       res.json({ ip: req.ip || null, ips: req.ips || [] });
     });
-    // Same function as production login limiter (loginRateKey)
     app.get('/__test/rate-key', (req, res) => {
       res.json({ ip: clientIp(req), rateKey: loginRateKey(req) });
     });
