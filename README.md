@@ -24,7 +24,7 @@ Plataforma SaaS multiutilizador para pesquisa e gestão de leads comerciais a pa
 
 Tabelas: `plans`, `subscriptions`, `payments`, `searches`, `search_results`, `saved_leads`, `api_providers`, `audit_logs`, `system_settings` (reutiliza `users`).
 
-Isolamento multi-tenant via FKs compostas, triggers e **locks de aplicação** (`src/db/tenantLocks.js` / `lock_tenant_*`). Detalhe em `docs/DOMAIN_MODEL.md`.
+Isolamento multi-tenant via FKs, triggers e **locks de aplicação** (`src/db/tenantLocks.js` / `lock_tenant_*`). Em alterações de FK: `lockReferenceChange` (referência antiga e nova). Ver `docs/DOMAIN_MODEL.md`.
 
 ### Ainda não implementado
 
@@ -58,9 +58,9 @@ Scripts: `npm run dev` | `npm start` | `npm test` | `npm run migrate`
 2. `002_fix_session_oids.sql`
 3. `003_domain_model.sql`
 4. `004_domain_integrity_fixes.sql`
-5. `005_domain_update_integrity.sql` — integridade em UPDATE + locks de concorrência
-6. `006_domain_lock_ordering.sql` — advisory locks nos triggers (defense in depth)
-7. `007_domain_tenant_lock_helpers.sql` — helpers SQL + estratégia de locks na aplicação
+5. `005_domain_update_integrity.sql`
+6. `006_domain_lock_ordering.sql`
+7. `007_domain_tenant_lock_helpers.sql`
 
 ### Testes de integração PostgreSQL (posterior)
 
@@ -73,15 +73,13 @@ npm run migrate
 npm test
 ```
 
-Sem opt-in e BD `*_test`, as suites PG ficam em **SKIP**. A execução real fica para o ambiente de testes/deploy.
-
 ### Locks multi-tenant (aplicação)
 
-Antes de mutações em payments/subscriptions/searches/leads/results, a aplicação deve adquirir locks de transação (`src/db/tenantLocks.js` ou `lock_tenant_*` no SQL). Ver `docs/DOMAIN_MODEL.md`.
+Antes de mutações, adquirir locks de transação (`src/db/tenantLocks.js`). Em alterações de FK, bloquear **referência antiga e nova** via `lockReferenceChange`. Ver `docs/DOMAIN_MODEL.md`.
 
 ### Limitações
 
-- Em concorrência sem pre-lock de aplicação, pode ocorrer `40P01` (`deadlock_detected`). `40001` é `serialization_failure`, não deadlock. Retry só se a operação for segura.
-- Rate limit em memória se a BD cair (não distribuído).
-- Credenciais de fornecedores: apenas env / secrets manager — nunca em `api_providers.config`.
+- Sem pre-lock de aplicação, pode ocorrer `40P01`. `40001` é serialization_failure, não deadlock.
+- Rate limit em memória se a BD cair.
+- Credenciais de fornecedores: apenas env / secrets manager.
 - `TRUST_PROXY_HOPS` deve refletir a topologia real em produção.

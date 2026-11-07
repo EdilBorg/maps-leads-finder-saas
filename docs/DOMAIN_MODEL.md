@@ -8,7 +8,7 @@ Migrations:
 4. `004_domain_integrity_fixes.sql` — child INSERT/UPDATE same-tenant checks  
 5. `005_domain_update_integrity.sql` — parent UPDATE protection + row locks  
 6. `006_domain_lock_ordering.sql` — advisory locks inside triggers (defense in depth)  
-7. `007_domain_tenant_lock_helpers.sql` — SQL lock helpers + explicit strategy notes  
+7. `007_domain_tenant_lock_helpers.sql` — SQL lock helpers + strategy notes  
 
 ## Multi-tenant isolation
 
@@ -21,64 +21,97 @@ Migrations:
 
 Application queries must still filter by `user_id`.
 
-## Concurrency strategy (revised)
+## Concurrency strategy
 
 ### Implicit locks
 
-On `UPDATE`/`DELETE`, PostgreSQL acquires the **row exclusive lock on the target row before BEFORE ROW triggers run**. Advisory locks taken *only* inside those triggers therefore cannot establish an order relative to that first row lock.
+On `UPDATE`/`DELETE`, PostgreSQL acquires the **row exclusive lock on the target row before BEFORE ROW triggers run**. Advisory locks taken *only* inside those triggers cannot establish an order relative to that first row lock.
 
-Classic cycle under concurrent parent/child updates:
+### Application locks (required)
 
-1. T1 `UPDATE payments` → locks payment row → trigger wants subscription  
-2. T2 `UPDATE subscriptions` → locks subscription row → trigger wants payments  
-→ **40P01 deadlock_detected** is possible.
+At the **start** of a transaction, **before** mutating related rows:
 
-### Required application pattern
+- JS: `src/db/tenantLocks.js`  
+- SQL: `lock_tenant_subscription` / `lock_tenant_search` / `lock_tenant_search_result`
 
-At the start of a transaction, **before** mutating related rows, call:
+**Changing a FK** requires locking **both** the old and the new parent (when non-null), in deterministic order via `lockReferenceChange`.
 
-- SQL: `SELECT lock_tenant_subscription(id)` / `lock_tenant_search(id)` / `lock_tenant_search_result(id)`  
-- or JS: `src/db/tenantLocks.js` (`lockSubscription`, `lockSearch`, `lockSearchResult`, `lockTenantKeysOrdered`)
+```js
+const { lockReferenceChange } = require('../src/db/tenantLocks');
 
-Keys (must stay aligned with triggers):
+// payment.subscription_id: A → B
+await client.query('BEGIN');
+try {
+  await lockReferenceChange(client, 'sub', oldSubscriptionId, newSubscriptionId);
+  await client.query(
+    `UPDATE payments SET subscription_id = $1 WHERE id = $2 AND user_id = $3`,
+    [newSubscriptionId, paymentId, userId]
+  );
+  await client.query('COMMIT');
+} catch (err) {
+  await client.query('ROLLBACK');
+  throw err;
+}
+```
 
-- `hashtext('sub:' || subscription_id)`  
-- `hashtext('search:' || search_id)`  
-- `hashtext('result:' || result_id)`  
+```js
+// saved_leads.origin_search_id: SEARCH_A → SEARCH_B
+await client.query('BEGIN');
+try {
+  await lockReferenceChange(client, 'search', oldSearchId, newSearchId);
+  await client.query(
+    `UPDATE saved_leads SET origin_search_id = $1 WHERE id = $2 AND user_id = $3`,
+    [newSearchId, leadId, userId]
+  );
+  await client.query('COMMIT');
+} catch (err) {
+  await client.query('ROLLBACK');
+  throw err;
+}
+```
 
-When multiple keys are needed, acquire them in **lexicographic order** of `kind:id` (`lockTenantKeysOrdered`).
+```js
+// search_results.is_duplicate_of: RESULT_A → RESULT_B
+await client.query('BEGIN');
+try {
+  await lockReferenceChange(client, 'result', oldDupId, newDupId);
+  await client.query(
+    `UPDATE search_results SET is_duplicate_of = $1 WHERE id = $2 AND user_id = $3`,
+    [newDupId, resultId, userId]
+  );
+  await client.query('COMMIT');
+} catch (err) {
+  await client.query('ROLLBACK');
+  throw err;
+}
+```
 
-### Role of triggers
+`lockReferenceChange` skips null ids and deduplicates when old === new.
 
-Triggers enforce multi-tenant **predicates** (same user / same search). They still take the same advisory keys as defense in depth when callers forget pre-locking, but **do not claim deadlock-freedom** under arbitrary concurrent parent/child updates without application pre-locking.
+### Session vs transaction advisory locks
+
+| API | Scope | Used for |
+|-----|--------|----------|
+| `pg_advisory_lock` | **Session** | Migration runner |
+| `pg_advisory_xact_lock` | **Transaction** | Tenant ops (released on COMMIT/ROLLBACK) |
+
+### Migration runner safety
+
+`src/db/migrate.js` takes a session lock for the run. On completion it calls `pg_advisory_unlock_all()`. If lock release cannot be confirmed, the client is **destroyed** (`client.release(true)`) and **not** returned to the pool.
 
 ### Error codes
 
 | SQLSTATE | Meaning | Guidance |
 |----------|---------|----------|
-| `23514` | check_violation (multi-tenant reject) | Fix request; do not retry as success |
+| `23514` | check_violation | Fix request |
 | `23503` | foreign_key_violation | Fix request |
-| `40P01` | deadlock_detected | Retry **entire** transaction only if idempotent |
-| `40001` | serialization_failure | Not a deadlock; retry only under appropriate isolation |
-
-## Migrations runner
-
-`src/db/migrate.js` is the single runner (CLI + tests). It uses a **session** `pg_advisory_lock` for the whole run and releases via `pg_advisory_unlock_all()` before returning the connection to the pool so locks cannot leak to other borrowers.
-
-## Retention vs snapshots
-
-- Deleting a search **cascades** `search_results`.  
-- Deleting a search sets `saved_leads.origin_search_id` to **NULL**; snapshot columns remain.
-
-## api_providers secrets
-
-Credentials never in `api_providers.config` — env / secrets manager only.
+| `40P01` | deadlock_detected | Retry entire transaction only if idempotent |
+| `40001` | serialization_failure | Not a deadlock |
 
 ## Limitations
 
-- Deadlock-free concurrent parent/child updates are **not** guaranteed without application-level `lock_tenant_*`.  
-- Long `is_duplicate_of` cycles beyond self-reference are not fully blocked.  
-- Integration tests require `ALLOW_DB_TESTS=1` and a database name ending in `_test` (or `TEST_DATABASE_NAME`).
+- Without application pre-locking, concurrent parent/child updates may deadlock (`40P01`).  
+- PostgreSQL integration test execution is **pending** until the deploy/test environment is available.
 
 ## Running PostgreSQL tests later
 
@@ -87,10 +120,7 @@ export NODE_ENV=test
 export ALLOW_DB_TESTS=1
 export DATABASE_URL=postgresql://USER:PASS@localhost:5432/maps_leads_finder_test
 npm install
-npm run migrate   # first apply
-npm run migrate   # must skip all
+npm run migrate
+npm run migrate
 npm test
-# repeat concurrency-focused runs as needed
 ```
-
-Validation of locks against a live cluster is **pending** until the deploy/test environment is available.
