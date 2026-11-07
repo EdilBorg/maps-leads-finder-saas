@@ -1,24 +1,23 @@
-/** Persist searches/results/leads — multi-tenant isolation. */
+/**
+ * Persist searches / results / leads with multi-tenant isolation.
+ * Free-search quota uses an atomic hold token on users (no long TX during providers).
+ */
+
 const { getPool } = require('../db/pool');
-const { executeSearch, publicLead, clientMessageForOutcome } = require('./searchEngine');
+const {
+  executeSearch,
+  publicLead,
+  clientMessageForOutcome,
+  clientHintForOutcome,
+} = require('./searchEngine');
+const {
+  acquireFreeSearchHold,
+  consumeFreeSearchHold,
+  releaseFreeSearchHold,
+  FREE_SEARCH_HOLD_MINUTES,
+} = require('./freeSearchHold');
+
 const RETENTION_DAYS = 30;
-
-async function reserveQuota(client, userId) {
-  const { rows } = await client.query(
-    'SELECT free_search_used FROM users WHERE id = $1 FOR UPDATE',
-    [userId]
-  );
-  if (!rows[0]) return { allowed: false, reason: 'USER_NOT_FOUND' };
-  return { allowed: true, freeSearch: !rows[0].free_search_used };
-}
-
-async function markFreeSearchUsed(client, userId) {
-  await client.query(
-    `UPDATE users SET free_search_used = TRUE, updated_at = NOW()
-     WHERE id = $1 AND free_search_used = FALSE`,
-    [userId]
-  );
-}
 
 function mapPublicRow(r, i) {
   return publicLead(
@@ -41,41 +40,57 @@ function mapPublicRow(r, i) {
 
 async function runAndPersist(opts) {
   const pool = getPool();
-  const client = await pool.connect();
   let searchId = null;
-  try {
-    await client.query('BEGIN');
-    const quota = await reserveQuota(client, opts.userId);
-    if (!quota.allowed) {
-      await client.query('ROLLBACK');
-      const err = new Error('Quota indisponível.');
-      err.code = 'QUOTA';
+  let holdToken = null;
+
+  {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const hold = await acquireFreeSearchHold(client, opts.userId);
+      if (!hold.allowed) {
+        await client.query('ROLLBACK');
+        const err = new Error(
+          hold.reason === 'FREE_SEARCH_IN_PROGRESS'
+            ? 'Já existe uma pesquisa gratuita em curso. Aguarde ou tente mais tarde.'
+            : 'Quota gratuita indisponível.'
+        );
+        err.code = 'QUOTA';
+        err.reason = hold.reason;
+        throw err;
+      }
+      holdToken = hold.holdToken;
+
+      const ins = await client.query(
+        `INSERT INTO searches (
+           user_id, query, location, filters, status, providers_used, started_at, expires_at
+         ) VALUES ($1,$2,$3,$4::jsonb,'running',$5::jsonb,NOW(), NOW() + ($6 || ' days')::interval)
+         RETURNING id`,
+        [
+          opts.userId,
+          opts.query,
+          opts.location,
+          JSON.stringify({
+            modality: opts.modality === 'expanded' ? 'expanded' : 'standard',
+            ...(opts.filters || {}),
+            limit: opts.limit || 100,
+            holdToken,
+          }),
+          JSON.stringify([]),
+          String(RETENTION_DAYS),
+        ]
+      );
+      searchId = ins.rows[0].id;
+      await client.query('COMMIT');
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      if (holdToken && err.code !== 'QUOTA') {
+        try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
+      }
+      client.release();
       throw err;
     }
-    const ins = await client.query(
-      `INSERT INTO searches (
-         user_id, query, location, filters, status, providers_used, started_at, expires_at
-       ) VALUES ($1,$2,$3,$4::jsonb,'running',$5::jsonb,NOW(), NOW() + ($6 || ' days')::interval)
-       RETURNING id`,
-      [
-        opts.userId,
-        opts.query,
-        opts.location,
-        JSON.stringify({
-          modality: opts.modality === 'expanded' ? 'expanded' : 'standard',
-          ...(opts.filters || {}),
-          limit: opts.limit || 100,
-        }),
-        JSON.stringify([]),
-        String(RETENTION_DAYS),
-      ]
-    );
-    searchId = ins.rows[0].id;
-    await client.query('COMMIT');
-  } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
     client.release();
-    throw err;
   }
 
   let engineResult;
@@ -86,17 +101,29 @@ async function runAndPersist(opts) {
       location: opts.location,
       filters: opts.filters,
       limit: opts.limit,
+      providers: opts.providers,
     });
   } catch (err) {
-    await pool.query(
-      `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2
-       WHERE id=$1 AND user_id=$3`,
-      [searchId, err.message || 'engine error', opts.userId]
-    );
-    client.release();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2
+         WHERE id=$1 AND user_id=$3`,
+        [searchId, err.message || 'engine error', opts.userId]
+      );
+      await releaseFreeSearchHold(client, opts.userId, holdToken);
+      await client.query('COMMIT');
+    } catch (e2) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      throw e2;
+    } finally {
+      client.release();
+    }
     throw err;
   }
 
+  const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query(
@@ -117,6 +144,7 @@ async function runAndPersist(opts) {
         opts.userId,
       ]
     );
+
     const inserted = [];
     for (const lead of engineResult.results) {
       const row = await client.query(
@@ -133,20 +161,44 @@ async function runAndPersist(opts) {
       );
       inserted.push(row.rows[0]);
     }
-    if (inserted.length > 0 && (engineResult.outcome === 'results' || engineResult.searchStatus === 'partial')) {
-      await markFreeSearchUsed(client, opts.userId);
+
+    const shouldConsume =
+      inserted.length > 0 &&
+      (engineResult.outcome === 'results' || engineResult.searchStatus === 'partial');
+
+    if (shouldConsume) {
+      await consumeFreeSearchHold(client, opts.userId, holdToken);
+    } else {
+      await releaseFreeSearchHold(client, opts.userId, holdToken);
     }
+
     await client.query('COMMIT');
     return {
       searchId,
       status: engineResult.searchStatus,
       outcome: engineResult.outcome,
       message: clientMessageForOutcome(engineResult.outcome),
-      totals: { results: inserted.length },
+      hint: clientHintForOutcome(engineResult.outcome),
+      totals: {
+        results: inserted.length,
+        raw: engineResult.totals.raw,
+        normalized: engineResult.totals.normalized,
+        afterDedup: engineResult.totals.afterDedup,
+        afterFilters: engineResult.totals.afterFilters,
+        returned: engineResult.totals.returned,
+      },
       results: inserted.map(mapPublicRow),
     };
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
+    try {
+      await releaseFreeSearchHold(client, opts.userId, holdToken);
+      await client.query(
+        `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2
+         WHERE id=$1 AND user_id=$3 AND status='running'`,
+        [searchId, 'persist_failure', opts.userId]
+      );
+    } catch (_) {}
     throw err;
   } finally {
     client.release();
@@ -280,5 +332,8 @@ module.exports = {
   dashboardStats,
   listSavedLeads,
   saveLeadsFromResults,
-  reserveQuota,
+  acquireFreeSearchHold,
+  consumeFreeSearchHold,
+  releaseFreeSearchHold,
+  FREE_SEARCH_HOLD_MINUTES,
 };
