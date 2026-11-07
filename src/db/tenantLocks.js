@@ -1,17 +1,12 @@
 /**
  * Application-level tenant lock helpers (Etapa 5).
  *
- * CONTRACT (mandatory):
- * - Call only inside an explicit transaction (BEGIN … COMMIT/ROLLBACK).
- * - pg_advisory_xact_lock is released at the end of the statement when not
- *   inside a transaction block; a lock followed by a separate UPDATE without
- *   BEGIN does NOT protect the UPDATE.
- * - Acquire locks BEFORE any row-level locks on parent/child tables that could
- *   invert the global advisory order.
- * - COMMIT and ROLLBACK both release transaction-level advisory locks.
+ * CONTRACT: call only inside BEGIN…COMMIT/ROLLBACK.
+ * pg_advisory_xact_lock is released at statement end outside a transaction block.
  *
- * FK change protocol: stabilizeAndLockReferenceChange + optimistic UPDATE
- * (see docs/DOMAIN_MODEL.md). Do not FOR UPDATE before advisory locks.
+ * FK change: stabilizeAndLockReferenceChange — one ordered lock acquisition;
+ * if FK changed underfoot → TENANT_LOCK_RETRY (ROLLBACK + full transaction retry).
+ * Does not accumulate locks across attempts in the same transaction.
  */
 
 const VALID_KINDS = Object.freeze(['sub', 'search', 'result']);
@@ -115,38 +110,35 @@ async function lockReferenceChange(client, kind, observedCurrentId, newId) {
   ]);
 }
 
-async function stabilizeAndLockReferenceChange(client, kind, readCurrent, newId, opts = {}) {
+async function stabilizeAndLockReferenceChange(client, kind, readCurrent, newId) {
   assertKind(kind);
   optionalUuid(newId, kind);
-  const maxAttempts = opts.maxAttempts != null ? opts.maxAttempts : 8;
   if (typeof readCurrent !== 'function') {
     throw new Error('tenantLocks.stabilizeAndLockReferenceChange: readCurrent must be a function');
   }
 
-  let attempt = 0;
   let observed = await readCurrent();
   observed = optionalUuid(observed, kind);
 
-  while (attempt < maxAttempts) {
-    attempt += 1;
-    await lockReferenceChange(client, kind, observed, newId);
-    let again = await readCurrent();
-    again = optionalUuid(again, kind);
-    if (again === observed) {
-      return {
-        observedCurrentId: observed,
-        newId: optionalUuid(newId, kind),
-        attempts: attempt,
-      };
-    }
-    observed = again;
+  await lockReferenceChange(client, kind, observed, newId);
+
+  let again = await readCurrent();
+  again = optionalUuid(again, kind);
+
+  if (again !== observed) {
+    const err = new Error(
+      `tenantLocks: FK reference for kind=${kind} changed underfoot (observed ${observed} → ${again}); ROLLBACK and retry the full transaction`
+    );
+    err.code = 'TENANT_LOCK_RETRY';
+    err.observedBefore = observed;
+    err.observedAfter = again;
+    throw err;
   }
 
-  const err = new Error(
-    `tenantLocks: could not stabilize FK reference for kind=${kind} after ${maxAttempts} attempts`
-  );
-  err.code = 'TENANT_LOCK_UNSTABLE';
-  throw err;
+  return {
+    observedCurrentId: observed,
+    newId: optionalUuid(newId, kind),
+  };
 }
 
 module.exports = {

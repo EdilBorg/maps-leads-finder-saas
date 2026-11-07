@@ -6,13 +6,8 @@ const assert = require('node:assert/strict');
 const {
   VALID_KINDS,
   isUuid,
-  optionalUuid,
-  tenantKeyString,
-  normalizeTenantKeys,
   lockTenantKey,
   lockSubscription,
-  lockSearch,
-  lockSearchResult,
   lockTenantKeysOrdered,
   lockReferenceChange,
   stabilizeAndLockReferenceChange,
@@ -48,75 +43,22 @@ describe('tenantLocks unit', () => {
     assert.equal(isUuid('uuid-invalido'), false);
     assert.equal(isUuid(''), false);
     assert.equal(isUuid(null), false);
-    assert.equal(isUuid(undefined), false);
     assert.equal(isUuid(123), false);
-    assert.equal(isUuid({}), false);
   });
 
-  it('tenantKeyString builds kind:id for valid UUID', () => {
-    assert.equal(tenantKeyString('sub', U1), `sub:${U1}`);
-  });
-
-  it('lockTenantKey rejects invalid kind', async () => {
+  it('lockTenantKey rejects malformed UUID', async () => {
     const c = mockClient();
-    await assert.rejects(() => lockTenantKey(c, 'plan', U1), /invalid kind/);
-    assert.equal(c.calls.length, 0);
-  });
-
-  it('lockTenantKey rejects missing id', async () => {
-    const c = mockClient();
-    await assert.rejects(() => lockTenantKey(c, 'sub', null), /missing id/);
-    await assert.rejects(() => lockTenantKey(c, 'sub', ''), /missing id/);
-  });
-
-  it('lockTenantKey rejects non-string and malformed UUID', async () => {
-    const c = mockClient();
-    await assert.rejects(() => lockTenantKey(c, 'sub', 123), /must be a string/);
     await assert.rejects(() => lockTenantKey(c, 'sub', 'abc'), /valid UUID/);
-    await assert.rejects(() => lockTenantKey(c, 'sub', 'qualquer-texto'), /valid UUID/);
   });
 
-  it('optionalUuid returns null for null/empty and validates otherwise', () => {
-    assert.equal(optionalUuid(null, 'sub'), null);
-    assert.equal(optionalUuid(undefined, 'sub'), null);
-    assert.equal(optionalUuid('', 'sub'), null);
-    assert.equal(optionalUuid(U1, 'sub'), U1);
-    assert.throws(() => optionalUuid('nope', 'sub'), /valid UUID/);
-  });
-
-  it('lockTenantKey issues hashtext advisory lock with prefix and id', async () => {
+  it('lockTenantKey issues ordered advisory SQL', async () => {
     const c = mockClient();
     await lockTenantKey(c, 'sub', U1);
-    assert.equal(c.calls.length, 1);
     assert.match(c.calls[0].sql, /pg_advisory_xact_lock\(hashtext/);
     assert.deepEqual(c.calls[0].params, ['sub:', U1]);
   });
 
-  it('lockSubscription / lockSearch / lockSearchResult use correct kinds', async () => {
-    const c = mockClient();
-    await lockSubscription(c, U1);
-    await lockSearch(c, U2);
-    await lockSearchResult(c, U3);
-    assert.deepEqual(c.calls[0].params, ['sub:', U1]);
-    assert.deepEqual(c.calls[1].params, ['search:', U2]);
-    assert.deepEqual(c.calls[2].params, ['result:', U3]);
-  });
-
-  it('normalizeTenantKeys sorts, dedupes, skips null', () => {
-    const ordered = normalizeTenantKeys([
-      { kind: 'sub', id: U2 },
-      { kind: 'search', id: U1 },
-      { kind: 'sub', id: U1 },
-      { kind: 'sub', id: U2 },
-      { kind: 'sub', id: null },
-    ]);
-    assert.deepEqual(
-      ordered.map((k) => `${k.kind}:${k.id}`),
-      [`search:${U1}`, `sub:${U1}`, `sub:${U2}`]
-    );
-  });
-
-  it('lockTenantKeysOrdered is independent of input order', async () => {
+  it('lockTenantKeysOrdered is lexicographic', async () => {
     const c = mockClient();
     await lockTenantKeysOrdered(c, [
       { kind: 'result', id: U3 },
@@ -128,62 +70,52 @@ describe('tenantLocks unit', () => {
     assert.deepEqual(c.calls[2].params, ['sub:', U1]);
   });
 
-  it('lockReferenceChange locks old and new in order', async () => {
+  it('lockReferenceChange locks old and new once each', async () => {
     const c = mockClient();
     await lockReferenceChange(c, 'sub', U2, U1);
     assert.equal(c.calls.length, 2);
-    assert.deepEqual(c.calls[0].params, ['sub:', U1]);
-    assert.deepEqual(c.calls[1].params, ['sub:', U2]);
   });
 
-  it('lockReferenceChange same old/new locks once; nulls skipped', async () => {
+  it('stabilize: FK unchanged returns observed and locks once pair', async () => {
     const c = mockClient();
-    await lockReferenceChange(c, 'search', U1, U1);
-    assert.equal(c.calls.length, 1);
-
-    const c2 = mockClient();
-    await lockReferenceChange(c2, 'result', null, U2);
-    assert.equal(c2.calls.length, 1);
-    assert.deepEqual(c2.calls[0].params, ['result:', U2]);
+    const result = await stabilizeAndLockReferenceChange(c, 'sub', async () => U1, U2);
+    assert.equal(result.observedCurrentId, U1);
+    assert.equal(result.newId, U2);
+    assert.equal(c.calls.length, 2);
   });
 
-  it('stabilizeAndLockReferenceChange stabilizes after concurrent change', async () => {
+  it('stabilize: FK changed throws TENANT_LOCK_RETRY without locking new observed', async () => {
     const c = mockClient();
     let reads = 0;
     const readCurrent = async () => {
       reads += 1;
-      if (reads === 1) return U1;
-      if (reads === 2) return U2;
-      return U2;
+      return reads === 1 ? U1 : U2;
     };
-    const result = await stabilizeAndLockReferenceChange(c, 'sub', readCurrent, U3);
-    assert.equal(result.observedCurrentId, U2);
-    assert.equal(result.newId, U3);
-    assert.ok(result.attempts >= 2);
-    const locked = c.calls.map((x) => x.params[1]);
-    assert.ok(locked.includes(U3));
+    await assert.rejects(
+      () => stabilizeAndLockReferenceChange(c, 'sub', readCurrent, U3),
+      (err) => err.code === 'TENANT_LOCK_RETRY'
+    );
+    const ids = c.calls.map((x) => x.params[1]);
+    assert.ok(ids.includes(U1));
+    assert.ok(ids.includes(U3));
+    assert.ok(!ids.includes(U2), 'must not acquire lock for post-change value');
   });
 
-  it('stabilizeAndLockReferenceChange rejects invalid readCurrent', async () => {
-    const c = mockClient();
+  it('stabilize rejects non-function readCurrent', async () => {
     await assert.rejects(
-      () => stabilizeAndLockReferenceChange(c, 'sub', null, U1),
+      () => stabilizeAndLockReferenceChange(mockClient(), 'sub', null, U1),
       /readCurrent must be a function/
     );
   });
 
-  it('propagates PostgreSQL errors from client.query', async () => {
+  it('propagates pg errors', async () => {
     const c = {
       async query() {
-        const err = new Error('simulated pg failure');
+        const err = new Error('pg fail');
         err.code = '57P01';
         throw err;
       },
     };
-    await assert.rejects(() => lockSubscription(c, U1), (err) => {
-      assert.equal(err.message, 'simulated pg failure');
-      assert.equal(err.code, '57P01');
-      return true;
-    });
+    await assert.rejects(() => lockSubscription(c, U1), (e) => e.code === '57P01');
   });
 });

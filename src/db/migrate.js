@@ -5,15 +5,8 @@
 const fs = require('fs');
 const path = require('path');
 
-/** Stable lock key for migration serialization across processes. */
 const MIGRATION_LOCK_KEY = 87231405;
 
-/**
- * Release session advisory locks. Returns true only when unlock_all succeeded.
- * @param {import('pg').PoolClient} client
- * @param {{ log?: (msg: string) => void }} [opts]
- * @returns {Promise<boolean>}
- */
 async function releaseMigrationLocks(client, opts = {}) {
   const log = opts.log || (() => {});
   try {
@@ -38,16 +31,20 @@ async function releaseMigrationLocks(client, opts = {}) {
   }
 }
 
-/**
- * Apply pending SQL migrations on an existing client (must stay connected until done).
- * @param {import('pg').PoolClient} client
- * @param {{ log?: (msg: string) => void }} [opts]
- * @returns {Promise<{ lockReleaseOk: boolean }>}
- */
 async function applyMigrationsWithClient(client, opts = {}) {
   const log = opts.log || (() => {});
-  await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+  let lockHeld = false;
   let migrationError = null;
+
+  try {
+    await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+    lockHeld = true;
+  } catch (err) {
+    const e = err instanceof Error ? err : new Error(String(err));
+    e.lockAcquireFailed = true;
+    throw e;
+  }
+
   try {
     await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -80,50 +77,56 @@ async function applyMigrationsWithClient(client, opts = {}) {
     migrationError = err;
   }
 
-  const lockReleaseOk = await releaseMigrationLocks(client, opts);
-
-  if (migrationError) {
-    const wrapped = migrationError;
-    if (!lockReleaseOk) {
-      wrapped.lockReleaseFailed = true;
-    }
-    throw wrapped;
+  let lockReleaseOk = false;
+  if (lockHeld) {
+    lockReleaseOk = await releaseMigrationLocks(client, opts);
   }
 
-  return { lockReleaseOk };
+  if (migrationError) {
+    if (!lockReleaseOk && lockHeld) {
+      migrationError.lockReleaseFailed = true;
+    }
+    throw migrationError;
+  }
+
+  return { lockReleaseOk, lockHeld };
 }
 
-/**
- * @param {import('pg').Pool} pool
- * @param {{ log?: (msg: string) => void }} [opts]
- */
+function releaseClientOnce(client, opts) {
+  const log = opts.log || (() => {});
+  if (opts.destroy) {
+    log('[migrate] destroying client (advisory lock state not confirmed)');
+    client.release(true);
+  } else {
+    client.release();
+  }
+}
+
 async function applyMigrations(pool, opts = {}) {
   const log = opts.log || (() => {});
   const client = await pool.connect();
   let released = false;
+
+  const safeRelease = (destroy) => {
+    if (released) return;
+    released = true;
+    try {
+      releaseClientOnce(client, { destroy, log });
+    } catch (releaseErr) {
+      log(`[migrate] client release failed: ${releaseErr && releaseErr.message ? releaseErr.message : releaseErr}`);
+    }
+  };
+
   try {
     const result = await applyMigrationsWithClient(client, opts);
-    if (result.lockReleaseOk) {
-      client.release();
-      released = true;
-    } else {
-      log('[migrate] destroying client: could not confirm advisory lock release');
-      client.release(true);
-      released = true;
-    }
+    safeRelease(!result.lockReleaseOk);
   } catch (err) {
-    if (!released) {
-      try {
-        if (err && err.lockReleaseFailed) {
-          log('[migrate] destroying client after migration error with unlock failure');
-          client.release(true);
-        } else {
-          client.release();
-        }
-        released = true;
-      } catch (releaseErr) {
-        log(`[migrate] client release failed: ${releaseErr && releaseErr.message ? releaseErr.message : releaseErr}`);
-      }
+    if (err && err.lockAcquireFailed) {
+      safeRelease(true);
+    } else if (err && err.lockReleaseFailed) {
+      safeRelease(true);
+    } else {
+      safeRelease(false);
     }
     throw err;
   }
