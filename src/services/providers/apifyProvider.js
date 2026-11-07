@@ -1,8 +1,8 @@
 /**
- * Apify adapter.
- * APIFY_INPUT_JSON supports {{query}}, {{location}}, {{limit}}
- * or APIFY_INPUT_QUERY_KEY / LOCATION_KEY / LIMIT_KEY
+ * Apify adapter — input shape is actor-specific and env-configurable.
+ * Never log tokens. JSON template substitution escapes string values.
  */
+
 const {
   withTimeout,
   notConfigured,
@@ -21,12 +21,16 @@ function isConfigured() {
   );
 }
 
+function escapeJsonString(s) {
+  return JSON.stringify(String(s)).slice(1, -1);
+}
+
 function buildActorInput(criteria) {
   if (process.env.APIFY_INPUT_JSON) {
     const raw = process.env.APIFY_INPUT_JSON
-      .replace(/\{\{query\}\}/g, criteria.query)
-      .replace(/\{\{location\}\}/g, criteria.location || '')
-      .replace(/\{\{limit\}\}/g, String(criteria.limit || 100));
+      .replace(/\{\{query\}\}/g, escapeJsonString(criteria.query))
+      .replace(/\{\{location\}\}/g, escapeJsonString(criteria.location || ''))
+      .replace(/\{\{limit\}\}/g, String(Number(criteria.limit) || 100));
     return JSON.parse(raw);
   }
   const qKey = process.env.APIFY_INPUT_QUERY_KEY || 'search';
@@ -70,9 +74,8 @@ function mapItem(p, idx, criteria) {
 }
 
 async function search(criteria) {
-  if (!isConfigured()) {
-    return notConfigured(CODE);
-  }
+  if (!isConfigured()) return notConfigured(CODE);
+
   try {
     const actorId = process.env.APIFY_ACTOR_ID;
     const token = process.env.APIFY_TOKEN;
@@ -83,6 +86,7 @@ async function search(criteria) {
     } catch (e) {
       return errorResult('APIFY_INPUT_INVALID', e.message || 'invalid APIFY_INPUT_JSON');
     }
+
     const data = await withTimeout(
       fetch(url, {
         method: 'POST',
@@ -100,6 +104,7 @@ async function search(criteria) {
       Math.max(DEFAULT_TIMEOUT_MS, 90000),
       CODE
     );
+
     const list = Array.isArray(data) ? data : [];
     return okResult(list.map((p, idx) => mapItem(p, idx, criteria)));
   } catch (err) {
@@ -112,4 +117,6 @@ module.exports = {
   isConfigured,
   search,
   buildActorInput,
+  escapeJsonString,
+  mapItem,
 };
