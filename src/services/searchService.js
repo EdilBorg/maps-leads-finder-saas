@@ -133,7 +133,9 @@ async function runAndPersist(opts) {
       );
       inserted.push(row.rows[0]);
     }
-    await markFreeSearchUsed(client, opts.userId);
+    if (inserted.length > 0 && (engineResult.outcome === 'results' || engineResult.searchStatus === 'partial')) {
+      await markFreeSearchUsed(client, opts.userId);
+    }
     await client.query('COMMIT');
     return {
       searchId,
