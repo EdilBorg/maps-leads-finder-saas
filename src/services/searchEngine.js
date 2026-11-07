@@ -1,21 +1,29 @@
 /**
  * Search engine: modality → providers, parallel run, normalize, dedupe, filters, global limit.
+ * For tests, pass { providers } to executeSearch to inject mocks.
  */
+
 const googleMaps = require('./providers/googleMapsProvider');
 const osm = require('./providers/osmProvider');
 const apify = require('./providers/apifyProvider');
 
 const MODALITIES = Object.freeze({
-  standard: { id: 'standard', providers: [googleMaps, osm] },
-  expanded: { id: 'expanded', providers: [googleMaps, apify] },
+  standard: { id: 'standard', providerCodes: ['google_maps', 'osm'] },
+  expanded: { id: 'expanded', providerCodes: ['google_maps', 'apify'] },
 });
+
+const DEFAULT_PROVIDERS = {
+  google_maps: googleMaps,
+  osm,
+  apify,
+};
 
 function resolveModality(modality) {
   return MODALITIES[modality === 'expanded' ? 'expanded' : 'standard'];
 }
 
 function providersForModality(modality) {
-  return resolveModality(modality).providers.map((p) => p.code);
+  return resolveModality(modality).providerCodes.slice();
 }
 
 function normalizeText(s) {
@@ -101,6 +109,7 @@ async function executeSearch(input) {
     filters: input.filters || {},
     limit: perProviderLimit(globalLimit),
   };
+
   if (!criteria.query) {
     const err = new Error('Categoria/query obrigatória.');
     err.code = 'VALIDATION';
@@ -112,9 +121,16 @@ async function executeSearch(input) {
     throw err;
   }
 
+  const registry = { ...DEFAULT_PROVIDERS, ...(input.providers || {}) };
+  const selected = modality.providerCodes.map((code) => {
+    const p = registry[code];
+    if (!p || typeof p.search !== 'function') throw new Error(`Provider missing: ${code}`);
+    return { code, search: p.search.bind(p) };
+  });
+
   const started = Date.now();
   const providerResults = await Promise.all(
-    modality.providers.map(async (provider) => {
+    selected.map(async (provider) => {
       const t0 = Date.now();
       const result = await provider.search(criteria);
       return { code: provider.code, result, durationMs: Date.now() - t0 };
@@ -143,14 +159,12 @@ async function executeSearch(input) {
   const anyResults = limited.length > 0;
   const hardFail = (s) => s === 'error' || s === 'not_configured';
   const softEmpty = (s) => s === 'empty' || s === 'ok';
-  const allHardFailed = statuses.every(hardFail);
-  const allEmptyOrOk = statuses.every((s) => softEmpty(s) || s === 'not_configured');
 
   let outcome;
   if (anyResults) outcome = 'results';
-  else if (allHardFailed) outcome = 'error';
+  else if (statuses.every(hardFail)) outcome = 'error';
   else if (statuses.some(hardFail) && statuses.some((s) => s === 'empty' || s === 'ok')) outcome = 'no_results';
-  else if (allEmptyOrOk) outcome = 'no_results';
+  else if (statuses.every((s) => softEmpty(s) || s === 'not_configured')) outcome = 'no_results';
   else outcome = 'error';
 
   let searchStatus = 'completed';
@@ -194,8 +208,14 @@ function publicLead(lead, index) {
 
 function clientMessageForOutcome(outcome) {
   if (outcome === 'results') return null;
-  if (outcome === 'no_results') return 'Nenhum resultado encontrado.';
-  return 'Não foi possível realizar a pesquisa. Ocorreu um problema. Tenta novamente.';
+  if (outcome === 'no_results') return 'Não foi possível encontrar resultados para esta pesquisa.';
+  return 'Não foi possível realizar a pesquisa.';
+}
+
+function clientHintForOutcome(outcome) {
+  if (outcome === 'no_results') return 'Tenta alterar os termos ou a localização da pesquisa.';
+  if (outcome === 'error') return 'Ocorreu um problema. Tenta novamente.';
+  return null;
 }
 
 module.exports = {
@@ -212,4 +232,5 @@ module.exports = {
   executeSearch,
   publicLead,
   clientMessageForOutcome,
+  clientHintForOutcome,
 };
