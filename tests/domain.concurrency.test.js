@@ -26,7 +26,9 @@ async function waitUntilBlocked(observerPool, waitingPid, blockerPid, timeoutMs 
     if (blockers.includes(Number(blockerPid))) return blockers;
     await new Promise((r) => setTimeout(r, 15));
   }
-  throw new Error(`Timeout waiting for pid ${waitingPid} to be blocked by ${blockerPid}`);
+  throw new Error(
+    `Synchronization failed: pid ${waitingPid} was not blocked by ${blockerPid} within ${timeoutMs}ms (expected lock contention)`
+  );
 }
 
 function isIntegrityReject(err) {
@@ -376,9 +378,7 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
           }
         );
 
-      try {
-        await waitUntilBlocked(pool, pid2, pid1, 3000);
-      } catch (_) {}
+      await waitUntilBlocked(pool, pid2, pid1, 10000);
 
       try {
         await c1.query(`UPDATE subscriptions SET user_id = $1 WHERE id = $2`, [userB, sid]);
@@ -472,9 +472,7 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
           }
         );
 
-      try {
-        await waitUntilBlocked(pool, pid2, pid1, 3000);
-      } catch (_) {}
+      await waitUntilBlocked(pool, pid2, pid1, 10000);
 
       try {
         await c1.query(`UPDATE searches SET user_id = $1 WHERE id = $2`, [userB, s1]);
@@ -567,9 +565,7 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
           }
         );
 
-      try {
-        await waitUntilBlocked(pool, pid2, pid1, 3000);
-      } catch (_) {}
+      await waitUntilBlocked(pool, pid2, pid1, 10000);
 
       try {
         await c1.query(`UPDATE search_results SET search_id = $1 WHERE id = $2`, [sid2, t1]);
