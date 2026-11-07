@@ -1,7 +1,8 @@
 /**
- * OpenStreetMap commercial/place search via Overpass API.
- * Nominatim is only used as a geocoder for the location string.
+ * OSM commercial/place search: Nominatim geocode + Overpass POI query.
+ * Covers node and way for amenity/shop/office/tourism + name match.
  */
+
 const {
   withTimeout,
   okResult,
@@ -12,12 +13,18 @@ const {
 const CODE = 'osm';
 
 function isConfigured() {
-  if (process.env.OSM_DISABLED === '1') return false;
-  return true;
+  return process.env.OSM_DISABLED !== '1';
 }
 
 function userAgent() {
   return process.env.OSM_USER_AGENT || 'MapsLeadsFinderSaaS/0.1 (contact@example.com)';
+}
+
+function escapeOverpassRegex(s) {
+  return String(s)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/[\[\](){}.+*?^$|]/g, '\\$&');
 }
 
 async function geocodeLocation(location) {
@@ -37,8 +44,52 @@ async function geocodeLocation(location) {
   return { lat: Number(data[0].lat), lon: Number(data[0].lon) };
 }
 
-function escapeOverpass(s) {
-  return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+function buildOverpassQuery(qEscaped, radius, lat, lon, limit) {
+  return `
+[out:json][timeout:25];
+(
+  node["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  way["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  node["amenity"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  way["amenity"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  node["shop"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  way["shop"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  node["office"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  way["office"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  node["tourism"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  way["tourism"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+);
+out center ${Math.min(limit, 100)};
+`.trim();
+}
+
+function mapElement(el, criteria) {
+  const tags = el.tags || {};
+  const name = tags.name || tags['name:pt'] || tags['name:en'] || null;
+  if (!name) return null;
+  const lat = el.lat != null ? Number(el.lat) : el.center ? Number(el.center.lat) : null;
+  const lon = el.lon != null ? Number(el.lon) : el.center ? Number(el.center.lon) : null;
+  const addressParts = [
+    tags['addr:street'],
+    tags['addr:housenumber'],
+    tags['addr:city'] || tags['addr:town'],
+    tags['addr:country'],
+  ].filter(Boolean);
+  return {
+    name,
+    address: addressParts.length ? addressParts.join(', ') : tags['addr:full'] || null,
+    phone: tags.phone || tags['contact:phone'] || null,
+    email: tags.email || tags['contact:email'] || null,
+    website: tags.website || tags['contact:website'] || tags.url || null,
+    rating: null,
+    reviewsCount: null,
+    category: tags.amenity || tags.shop || tags.office || tags.tourism || criteria.query,
+    lat: Number.isFinite(lat) ? lat : null,
+    lng: Number.isFinite(lon) ? lon : null,
+    sourceProvider: CODE,
+    externalId: `${el.type || 'n'}/${el.id}`,
+    raw: { osm_type: el.type, osm_id: el.id },
+  };
 }
 
 async function search(criteria) {
@@ -62,21 +113,9 @@ async function search(criteria) {
       25000
     );
     const limit = Math.min(criteria.limit || 50, 100);
-    const q = escapeOverpass(criteria.query);
+    const qEscaped = escapeOverpassRegex(criteria.query);
     const overpassUrl = process.env.OSM_OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
-
-    const ql = `
-[out:json][timeout:25];
-(
-  node["name"~"${q}",i](around:${radius},${center.lat},${center.lon});
-  way["name"~"${q}",i](around:${radius},${center.lat},${center.lon});
-  node["amenity"]["name"](around:${radius},${center.lat},${center.lon});
-  node["shop"]["name"](around:${radius},${center.lat},${center.lon});
-  node["office"]["name"](around:${radius},${center.lat},${center.lon});
-  node["tourism"]["name"](around:${radius},${center.lat},${center.lon});
-);
-out center ${limit};
-`.trim();
+    const ql = buildOverpassQuery(qEscaped, radius, center.lat, center.lon, limit);
 
     const data = await withTimeout(
       fetch(overpassUrl, {
@@ -97,53 +136,16 @@ out center ${limit};
     );
 
     const elements = Array.isArray(data.elements) ? data.elements : [];
-    const qNorm = criteria.query.toLowerCase();
     const mapped = [];
     const seen = new Set();
-
     for (const el of elements) {
-      const tags = el.tags || {};
-      const name = tags.name || tags['name:pt'] || tags['name:en'] || null;
-      if (!name) continue;
-      const nameLower = name.toLowerCase();
-      const relevant =
-        nameLower.includes(qNorm) ||
-        (tags.amenity && String(tags.amenity).includes(qNorm)) ||
-        (tags.shop && String(tags.shop).includes(qNorm)) ||
-        qNorm.split(/\s+/).some((w) => w.length > 2 && nameLower.includes(w));
-      if (!relevant && elements.length > limit) continue;
-
-      const lat = el.lat != null ? Number(el.lat) : el.center ? Number(el.center.lat) : null;
-      const lon = el.lon != null ? Number(el.lon) : el.center ? Number(el.center.lon) : null;
-      const externalId = `${el.type || 'n'}/${el.id}`;
-      if (seen.has(externalId)) continue;
-      seen.add(externalId);
-
-      const addressParts = [
-        tags['addr:street'],
-        tags['addr:housenumber'],
-        tags['addr:city'] || tags['addr:town'],
-        tags['addr:country'],
-      ].filter(Boolean);
-
-      mapped.push({
-        name,
-        address: addressParts.length ? addressParts.join(', ') : tags['addr:full'] || null,
-        phone: tags.phone || tags['contact:phone'] || null,
-        email: tags.email || tags['contact:email'] || null,
-        website: tags.website || tags['contact:website'] || tags.url || null,
-        rating: null,
-        reviewsCount: null,
-        category: tags.amenity || tags.shop || tags.office || tags.tourism || criteria.query,
-        lat,
-        lng: lon,
-        sourceProvider: CODE,
-        externalId,
-        raw: { osm_type: el.type, osm_id: el.id },
-      });
+      const item = mapElement(el, criteria);
+      if (!item) continue;
+      if (seen.has(item.externalId)) continue;
+      seen.add(item.externalId);
+      mapped.push(item);
       if (mapped.length >= limit) break;
     }
-
     return okResult(mapped);
   } catch (err) {
     return errorResult(err.code || 'PROVIDER_ERROR', err.message || 'osm failed');
@@ -154,4 +156,7 @@ module.exports = {
   code: CODE,
   isConfigured,
   search,
+  escapeOverpassRegex,
+  buildOverpassQuery,
+  mapElement,
 };
