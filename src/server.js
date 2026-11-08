@@ -14,7 +14,8 @@ const { performShutdown } = require('./services/shutdownManager');
 const app = createApp();
 
 let server = null;
-const shutdownState = { shuttingDown: false };
+const shutdownState = { shuttingDown: false, poolClosed: false };
+let forceTimer = null;
 
 function start() {
   server = app.listen(config.port, () => {
@@ -28,12 +29,12 @@ function start() {
 async function shutdown(signal, deps = {}) {
   const forceMs = deps.forceTimeoutMs != null ? deps.forceTimeoutMs : 10000;
   const exitFn = deps.exit;
+  const errFn = deps.error || console.error;
 
-  let forceTimer = null;
   const armForce = require.main === module || typeof exitFn === 'function';
-  if (armForce && !shutdownState.shuttingDown) {
+  if (armForce && !forceTimer) {
     forceTimer = setTimeout(() => {
-      (deps.error || console.error)('[server] Forced shutdown');
+      errFn('[server] Forced shutdown');
       if (exitFn) exitFn(1);
       else process.exit(1);
     }, forceMs);
@@ -49,13 +50,16 @@ async function shutdown(signal, deps = {}) {
       closePool: deps.closePool || closePool,
       idleTimeoutMs: deps.idleTimeoutMs != null ? deps.idleTimeoutMs : 7000,
       log: deps.log || console.log,
-      error: deps.error || console.error,
+      error: errFn,
     });
 
     if (result.alreadyShuttingDown) return result;
 
     if (result.poolClosed) {
-      if (forceTimer) clearTimeout(forceTimer);
+      if (forceTimer) {
+        clearTimeout(forceTimer);
+        forceTimer = null;
+      }
       if (exitFn) exitFn(0);
       else if (require.main === module) process.exit(0);
     }
@@ -75,6 +79,11 @@ async function shutdown(signal, deps = {}) {
 
 function _resetShutdownStateForTests() {
   shutdownState.shuttingDown = false;
+  shutdownState.poolClosed = false;
+  if (forceTimer) {
+    clearTimeout(forceTimer);
+    forceTimer = null;
+  }
 }
 
 if (require.main === module) {

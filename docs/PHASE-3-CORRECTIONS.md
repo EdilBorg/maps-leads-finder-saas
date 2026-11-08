@@ -2,28 +2,19 @@
 
 ## Shutdown
 
-- `performShutdown`: se `waitForIdle` devolver false, **não** fecha o pool.
-- Para interval + timeout inicial de 15s.
-- Double-shutdown protegido.
+- `poolClosed: true` apenas se `closePool()` concluir sem erro.
+- Falha de close ou job activo → retryable; estado desbloqueado.
+- `exit(0)` só com `poolClosed: true`.
 
 ## Renovação
 
-- Sem captura silenciosa.
-- Logs sem token; guard `inFlight`.
-- Falha temporária não liberta/consome a reserva.
-
-## Locks
-
-Ordem global: users → searches.
-
-## Testes unitários
-
-35/35 pass neste ambiente.
+- Erros síncronos de `getPoolFn`/`connect` tratados.
+- Logs sem token; `inFlight` no finally.
 
 ## PostgreSQL
 
-Cenários de recuperação em `quotaHold.pg.test.js` — skipped sem BD `*_test`.
+Ver `docs/POSTGRESQL-INTEGRATION-TESTS.md`. Concorrência real: PENDENTE.
 
 ## Produção
 
-Migrations não executadas. Job não activado. Render não alterado.
+Sem migrations, job ou alterações no Render.

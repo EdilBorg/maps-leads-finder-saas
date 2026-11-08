@@ -1,17 +1,26 @@
 /**
  * Graceful shutdown coordination for recovery job + pool.
  * Pure logic; no Express dependency — unit-testable with injected deps.
+ *
+ * State machine (shared `state` object):
+ * - shuttingDown: attempt currently in progress (blocks concurrent attempts)
+ * - poolClosed: pool was closed successfully (terminal success)
+ *
+ * If wait times out (job still running) or close fails, shuttingDown is cleared
+ * so a later SIGTERM/SIGINT can retry once the job is idle.
  */
 
-/**
- * @param {object} deps
- * @returns {Promise<{ poolClosed: boolean, idle: boolean, alreadyShuttingDown?: boolean }>}
- */
 async function performShutdown(deps = {}) {
-  const state = deps.state || { shuttingDown: false };
+  const state = deps.state || { shuttingDown: false, poolClosed: false };
+
+  if (state.poolClosed) {
+    return { alreadyShuttingDown: true, poolClosed: true, idle: true };
+  }
+
   if (state.shuttingDown) {
     return { alreadyShuttingDown: true, poolClosed: false, idle: false };
   }
+
   state.shuttingDown = true;
 
   const logFn = deps.log || console.log;
@@ -41,21 +50,27 @@ async function performShutdown(deps = {}) {
   }
 
   if (!idle) {
+    state.shuttingDown = false;
     errFn(
       '[server] Recovery job still running after wait; pool not closed to avoid interrupting in-flight work'
     );
-    return { poolClosed: false, idle: false };
+    return { poolClosed: false, idle: false, retryable: true };
   }
 
-  if (typeof close === 'function') {
-    try {
-      await close();
-    } catch (err) {
-      errFn('[server] Error closing database pool', err);
-    }
+  if (typeof close !== 'function') {
+    state.poolClosed = true;
+    return { poolClosed: true, idle: true };
   }
 
-  return { poolClosed: true, idle: true };
+  try {
+    await close();
+    state.poolClosed = true;
+    return { poolClosed: true, idle: true };
+  } catch (err) {
+    state.shuttingDown = false;
+    errFn('[server] Error closing database pool', err);
+    return { poolClosed: false, idle: true, closeError: true, retryable: true };
+  }
 }
 
 module.exports = { performShutdown };
