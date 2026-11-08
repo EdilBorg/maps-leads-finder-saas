@@ -1,6 +1,7 @@
 /**
  * Authentication domain service.
  * Passwords: Argon2id. Tokens: random + SHA-256 hash stored only.
+ * Access requires email_verified_at to be set.
  */
 
 const { getPool } = require('../db/pool');
@@ -103,7 +104,11 @@ async function register({ name, email, password, passwordConfirm, appUrl }) {
     const verifyUrl = `${base}/pages/verify-email.html?token=${encodeURIComponent(rawToken)}`;
     let emailSent = false;
     try {
-      const mailResult = await emailService.sendVerificationEmail(user.email, verifyUrl);
+      const mailResult = await emailService.sendVerificationEmail(
+        user.email,
+        verifyUrl,
+        user.name
+      );
       emailSent = Boolean(mailResult && mailResult.sent);
     } catch (mailErr) {
       console.error('[auth] verification email failed after register:', mailErr.message);
@@ -184,6 +189,11 @@ async function login({ email, password, ip }) {
   if (user.status === 'suspended') {
     await recordLoginAttempt(emailNormalized, ip, false);
     return { ok: false, code: 'SUSPENDED' };
+  }
+
+  // Credentials are valid but the account cannot access the app until verified.
+  if (!user.email_verified_at) {
+    return { ok: false, code: 'EMAIL_NOT_VERIFIED' };
   }
 
   await recordLoginAttempt(emailNormalized, ip, true);
@@ -270,7 +280,11 @@ async function resendVerification({ email, appUrl }) {
   const verifyUrl = `${base}/pages/verify-email.html?token=${encodeURIComponent(rawToken)}`;
   let emailSent = false;
   try {
-    const mailResult = await emailService.sendVerificationEmail(user.email, verifyUrl);
+    const mailResult = await emailService.sendVerificationEmail(
+      user.email,
+      verifyUrl,
+      user.name
+    );
     emailSent = Boolean(mailResult && mailResult.sent);
   } catch (mailErr) {
     console.error('[auth] resend verification email failed:', mailErr.message);
@@ -302,7 +316,7 @@ async function requestPasswordReset({ email, appUrl }) {
   const base = appUrl || config.appUrl || 'http://localhost:3000';
   const resetUrl = `${base}/pages/reset-password.html?token=${encodeURIComponent(rawToken)}`;
   try {
-    await emailService.sendPasswordResetEmail(user.email, resetUrl);
+    await emailService.sendPasswordResetEmail(user.email, resetUrl, user.name);
   } catch (mailErr) {
     console.error('[auth] password reset email failed:', mailErr.message);
   }
