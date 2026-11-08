@@ -26,6 +26,7 @@
   margin: 0 0 24px;
   font-size: 13px;
   color: #8a8f98;
+  line-height: 1.5;
 }
 .auth-card .form-group { margin-bottom: 14px; }
 .auth-card .error-box {
@@ -48,7 +49,7 @@
   display: none;
 }
 .auth-card .success-box.visible { display: block; }
-.auth-card .btn-block { width: 100%; margin-top: 8px; }
+.auth-card .btn-block { width: 100%; margin-top: 8px; text-align: center; }
 .auth-card .links {
   margin-top: 20px;
   text-align: center;
@@ -64,4 +65,57 @@
   font-weight: 500;
   color: #fff;
   letter-spacing: -0.015em;
+}
+.auth-icon {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+.masked-email {
+  margin: 0 0 12px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 500;
+  color: #e4f222;
+  letter-spacing: 0.02em;
+}
+.hint {
+  margin: 0 0 20px;
+  font-size: 12px;
+  color: #8a8f98;
+  line-height: 1.5;
+  text-align: center;
+}
+.pending-box {
+  background: rgba(228, 242, 34, 0.08);
+  border: 1px solid rgba(228, 242, 34, 0.2);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 16px;
+}
+.pending-box[hidden] { display: none; }
+.pending-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #fff;
+}
+.pending-text {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #8a8f98;
+}
+.btn-secondary {
+  background: #161718;
+  color: #fff;
+  border: 1px solid #23252a;
+}
+.btn-secondary:hover {
+  background: #1c1d1f;
+}
+a.btn {
+  display: inline-block;
+  box-sizing: border-box;
+  text-decoration: none;
 }
