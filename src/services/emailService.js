@@ -61,10 +61,10 @@ function isTimeoutError(err) {
 /** Escape user-controlled strings for HTML email bodies. */
 function escapeHtml(value) {
   return String(value == null ? '' : value)
-    .replace(/&/g, '&')
-    .replace(/</g, '<')
-    .replace(/>/g, '>')
-    .replace(/"/g, '"')
+    .replace(/&/g, '&' + 'amp;')
+    .replace(/</g, '&' + 'lt;')
+    .replace(/>/g, '&' + 'gt;')
+    .replace(/"/g, '&' + 'quot;')
     .replace(/'/g, '&#39;');
 }
 
