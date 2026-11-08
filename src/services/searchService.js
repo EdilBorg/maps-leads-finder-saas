@@ -2,6 +2,10 @@
  * Persist searches / results / leads with multi-tenant isolation.
  * Free-search: atomic hold + validated consume in the same TX as result inserts.
  * GLOBAL LOCK ORDER: users → searches.
+ *
+ * Test hooks (optional, production unused):
+ * - opts.executeSearchFn — replace external providers
+ * - opts.afterUserLock — runs in phase-3 TX after users FOR UPDATE (concurrency tests)
  */
 function getPool() {
   return require('../db/pool').getPool();
@@ -34,11 +38,6 @@ function mapPublicRow(r, i) {
   }, i);
 }
 
-/**
- * Periodically renew the free-search hold while providers run.
- * Catches sync throws from getPoolFn()/connect() and async rejections.
- * Never logs the hold token; temporary failures do not free/consume the hold.
- */
 function startHoldRenewal(userId, holdToken, opts = {}) {
   let stopped = false;
   let inFlight = false;
@@ -53,35 +52,21 @@ function startHoldRenewal(userId, holdToken, opts = {}) {
   const timer = setInterval(() => {
     if (stopped || !holdToken || inFlight) return;
     inFlight = true;
-
     (async () => {
       let client = null;
       try {
         let pool;
-        try {
-          pool = getPoolFn();
-        } catch (err) {
-          logFn('connect_error', {
-            userId,
-            searchId,
-            message: err && err.message ? err.message : String(err),
-          });
+        try { pool = getPoolFn(); }
+        catch (err) {
+          logFn('connect_error', { userId, searchId, message: err && err.message ? err.message : String(err) });
           return;
         }
-
-        try {
-          client = await pool.connect();
-        } catch (err) {
-          logFn('connect_error', {
-            userId,
-            searchId,
-            message: err && err.message ? err.message : String(err),
-          });
+        try { client = await pool.connect(); }
+        catch (err) {
+          logFn('connect_error', { userId, searchId, message: err && err.message ? err.message : String(err) });
           return;
         }
-
         if (stopped) return;
-
         try {
           const r = await renewFn(client, userId, holdToken);
           if (!r || !r.renewed) {
@@ -90,32 +75,18 @@ function startHoldRenewal(userId, holdToken, opts = {}) {
             logFn('not_renewable', { userId, searchId });
           }
         } catch (err) {
-          logFn('renew_error', {
-            userId,
-            searchId,
-            message: err && err.message ? err.message : String(err),
-          });
+          logFn('renew_error', { userId, searchId, message: err && err.message ? err.message : String(err) });
         }
       } catch (err) {
-        logFn('unexpected_error', {
-          userId,
-          searchId,
-          message: err && err.message ? err.message : String(err),
-        });
+        logFn('unexpected_error', { userId, searchId, message: err && err.message ? err.message : String(err) });
       } finally {
-        if (client) {
-          try { client.release(); } catch (_) {}
-        }
+        if (client) { try { client.release(); } catch (_) {} }
         inFlight = false;
       }
     })();
   }, intervalMs);
   if (typeof timer.unref === 'function') timer.unref();
-
-  return () => {
-    stopped = true;
-    clearInterval(timer);
-  };
+  return () => { stopped = true; clearInterval(timer); };
 }
 
 async function markSearchFailed(pool, searchId, userId, summary) {
@@ -190,7 +161,8 @@ async function runAndPersist(opts) {
   stopRenewal = startHoldRenewal(opts.userId, holdToken, { searchId });
   let engineResult;
   try {
-    engineResult = await executeSearch({
+    const runEngine = opts.executeSearchFn || executeSearch;
+    engineResult = await runEngine({
       modality: opts.modality, query: opts.query, location: opts.location,
       filters: opts.filters, limit: opts.limit, providers: opts.providers,
     });
@@ -219,6 +191,11 @@ async function runAndPersist(opts) {
   try {
     await client.query('BEGIN');
     await lockUserForUpdate(client, opts.userId);
+
+    if (typeof opts.afterUserLock === 'function') {
+      await opts.afterUserLock({ client, searchId, holdToken, userId: opts.userId });
+    }
+
     await client.query(
       `UPDATE searches SET
          status=$2, providers_used=$3::jsonb,
