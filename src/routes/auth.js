@@ -64,6 +64,7 @@ router.post('/register', limitRegister, requireCsrf, async (req, res, next) => {
       });
     }
 
+    // Never create a session on register — email must be verified first.
     const payload = {
       user: result.user,
       emailSent: result.emailSent,
@@ -93,7 +94,13 @@ router.post('/login', limitLogin, requireCsrf, async (req, res, next) => {
         return res.status(429).json({ error: 'Demasiadas tentativas. Tente mais tarde.' });
       }
       if (result.code === 'SUSPENDED') {
-        return res.status(403).json({ error: 'Conta suspensa.' });
+        return res.status(403).json({ error: 'Conta suspensa.', code: 'SUSPENDED' });
+      }
+      if (result.code === 'EMAIL_NOT_VERIFIED') {
+        return res.status(403).json({
+          error: 'Este endereço de email ainda não foi confirmado.',
+          code: 'EMAIL_NOT_VERIFIED',
+        });
       }
       return res.status(401).json({ error: 'Credenciais inválidas.' });
     }
