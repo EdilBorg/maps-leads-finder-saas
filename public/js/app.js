@@ -337,69 +337,61 @@
     if (verEl) verEl.textContent = currentUser.emailVerified ? 'Confirmado' : 'Por confirmar';
   }
 
-  function initChangePassword() {
-    const showBtn = document.getElementById('btn-show-change-password');
-    const form = document.getElementById('change-password-form');
-    const cancelBtn = document.getElementById('btn-cancel-change-password');
-    const err = document.getElementById('change-password-error');
-    const ok = document.getElementById('change-password-ok');
-    const submitBtn = document.getElementById('btn-change-password');
+  function initPasswordResetRequest() {
+    const showBtn = document.getElementById('btn-show-reset-password');
+    const panel = document.getElementById('reset-password-panel');
+    const cancelBtn = document.getElementById('btn-cancel-reset-password');
+    const sendBtn = document.getElementById('btn-send-reset-link');
+    const err = document.getElementById('reset-password-error');
+    const ok = document.getElementById('reset-password-ok');
+    const emailEl = document.getElementById('reset-password-email');
 
     function hideMessages() {
       if (err) { err.classList.remove('visible'); err.textContent = ''; }
       if (ok) { ok.classList.remove('visible'); ok.textContent = ''; }
     }
 
-    if (showBtn && form) {
+    if (showBtn && panel) {
       showBtn.addEventListener('click', () => {
-        form.hidden = false;
+        panel.hidden = false;
         showBtn.hidden = true;
         hideMessages();
-      });
-    }
-    if (cancelBtn && form && showBtn) {
-      cancelBtn.addEventListener('click', () => {
-        form.hidden = true;
-        showBtn.hidden = false;
-        form.reset();
-        hideMessages();
-      });
-    }
-    document.querySelectorAll('.toggle-password').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const id = btn.getAttribute('data-target');
-        const input = document.getElementById(id);
-        if (!input) return;
-        const show = input.type === 'password';
-        input.type = show ? 'text' : 'password';
-        btn.textContent = show ? 'Ocultar' : 'Mostrar';
-      });
-    });
-    if (form) {
-      form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        hideMessages();
-        if (submitBtn) {
-          submitBtn.disabled = true;
-          submitBtn.textContent = 'A guardar…';
+        if (emailEl) {
+          emailEl.textContent = (currentUser && currentUser.email) ? currentUser.email : '—';
         }
+      });
+    }
+    if (cancelBtn && panel && showBtn) {
+      cancelBtn.addEventListener('click', () => {
+        panel.hidden = true;
+        showBtn.hidden = false;
+        hideMessages();
+      });
+    }
+    if (sendBtn) {
+      sendBtn.addEventListener('click', async () => {
+        hideMessages();
+        if (!currentUser || !currentUser.email) {
+          if (err) {
+            err.textContent = 'Inicie sessão para solicitar a recuperação.';
+            err.classList.add('visible');
+          }
+          return;
+        }
+        sendBtn.disabled = true;
+        sendBtn.textContent = 'A enviar…';
         try {
           const token = await ensureCsrf();
-          const { res, data } = await api('/api/auth/change-password', {
+          const { res, data } = await api('/api/auth/forgot-password', {
             method: 'POST',
             headers: { 'X-CSRF-Token': token },
-            body: {
-              currentPassword: (document.getElementById('current-password') || {}).value || '',
-              newPassword: (document.getElementById('new-password') || {}).value || '',
-              newPasswordConfirm: (document.getElementById('new-password-confirm') || {}).value || '',
-            },
+            body: { email: currentUser.email },
           });
           if (res.status === 401) {
             if (err) {
               err.textContent = 'Sessão expirada. Inicie sessão novamente.';
               err.classList.add('visible');
             }
-            setTimeout(() => { window.location.href = '/pages/login.html'; }, 1000);
             return;
           }
           if (res.status === 403) {
@@ -411,30 +403,29 @@
           }
           if (!res.ok) {
             if (err) {
-              err.textContent = (data && data.error) || 'Não foi possível alterar a palavra-passe.';
+              err.textContent = (data && data.error) || 'Não foi possível enviar o pedido.';
               err.classList.add('visible');
             }
             return;
           }
           if (ok) {
-            ok.textContent = (data && data.message) || 'Palavra-passe atualizada.';
+            ok.textContent = (data && data.message)
+              || 'Se o email estiver associado a uma conta, enviámos instruções de recuperação.';
             ok.classList.add('visible');
           }
-          setTimeout(() => { window.location.href = '/pages/login.html'; }, 1200);
         } catch (_) {
           if (err) {
             err.textContent = 'Erro de rede. Tente novamente.';
             err.classList.add('visible');
           }
         } finally {
-          if (submitBtn) {
-            submitBtn.disabled = false;
-            submitBtn.textContent = 'Guardar alterações';
-          }
+          sendBtn.disabled = false;
+          sendBtn.textContent = 'Enviar link de recuperação';
         }
       });
     }
   }
+
   function init() {
     $all('.nav-item').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -474,7 +465,7 @@
     if (selectAll) selectAll.addEventListener('change', () => { $all('.result-check').forEach((c) => { c.checked = selectAll.checked; }); });
     const saveBtn = $('#btn-save-leads');
     if (saveBtn) saveBtn.addEventListener('click', saveSelectedLeads);
-    initChangePassword();
+    initPasswordResetRequest();
     const hash = (location.hash || '#dashboard').replace('#', '');
     navigate(titles[hash] ? hash : 'dashboard');
   }
