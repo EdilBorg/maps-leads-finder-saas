@@ -4,14 +4,25 @@
  *
  * Env:
  *   BREVO_API_KEY   — required in production
- *   MAIL_FROM       — verified sender address in Brevo
+ *   MAIL_FROM       — verified sender address in Brevo (required in production)
  *   MAIL_FROM_NAME  — display name (default: Maps Leads Finder)
+ *
+ * Security: never log recipients, message bodies, verification/reset links,
+ * tokens, or API keys.
  */
 
 const { config } = require('../config/env');
 
 const BREVO_ENDPOINT = 'https://api.brevo.com/v3/smtp/email';
 const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Minimal email shape check (does not replace provider-side validation). */
+function isPlausibleEmail(value) {
+  if (!value || typeof value !== 'string') return false;
+  const s = value.trim();
+  // Basic RFC-ish check: local@domain with a dot in domain, no spaces.
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s) && s.length <= 254;
+}
 
 function getApiKey() {
   const key = process.env.BREVO_API_KEY;
@@ -24,6 +35,34 @@ function getSender() {
     (process.env.MAIL_FROM_NAME && String(process.env.MAIL_FROM_NAME).trim()) ||
     'Maps Leads Finder';
   return { email: email || '', name };
+}
+
+/**
+ * Map Brevo/HTTP status to a short technical category for logs only.
+ * Never include request body, tokens, or API keys.
+ */
+function classifyProviderStatus(status) {
+  if (status === 401 || status === 403) return 'auth';
+  if (status === 400 || status === 422) return 'validation';
+  if (status === 429) return 'rate_limit';
+  if (status >= 500) return 'provider_unavailable';
+  return 'rejected';
+}
+
+/**
+ * Extract only safe fields from a Brevo error body for logging.
+ * Drops message text that may echo back addresses or content.
+ */
+function safeBrevoErrorMeta(errBody) {
+  if (!errBody || typeof errBody !== 'object') return {};
+  const code = errBody.code || errBody.error || undefined;
+  // Prefer short machine codes; do not forward free-form message strings
+  // (Brevo sometimes echoes request fields into message).
+  const meta = {};
+  if (code && typeof code === 'string' && code.length <= 64) {
+    meta.providerCode = code.replace(/[^a-zA-Z0-9_.-]/g, '');
+  }
+  return meta;
 }
 
 /**
@@ -43,25 +82,24 @@ async function sendMail({ to, subject, text, html }) {
       console.error('[email] BREVO_API_KEY is not configured; message not sent');
       throw new Error('Email service is not configured');
     }
-    console.info('[email:dev]', {
-      to,
-      subject,
-      textPreview: String(text || '').slice(0, 200),
+    // Dev simulation: no recipient, body, links, or tokens in logs.
+    console.info('[email:dev] Email not sent: BREVO_API_KEY absent', {
+      subject: String(subject),
+      mode: 'log',
     });
     return { sent: false, mode: 'log' };
   }
 
-  if (!sender.email) {
-    const msg = 'MAIL_FROM is not configured';
+  if (!sender.email || !isPlausibleEmail(sender.email)) {
+    const msg = 'MAIL_FROM is not configured or is invalid';
     if (config.isProduction) {
       console.error(`[email] ${msg}; message not sent`);
       throw new Error(msg);
     }
     console.warn(`[email] ${msg}; falling back to log mode`);
-    console.info('[email:dev]', {
-      to,
-      subject,
-      textPreview: String(text || '').slice(0, 200),
+    console.info('[email:dev] Email not sent: MAIL_FROM missing or invalid', {
+      subject: String(subject),
+      mode: 'log',
     });
     return { sent: false, mode: 'log' };
   }
@@ -92,25 +130,25 @@ async function sendMail({ to, subject, text, html }) {
       err && (err.name === 'TimeoutError' || err.name === 'AbortError');
     console.error(
       `[email] Brevo request ${isTimeout ? 'timed out' : 'failed'}:`,
-      err && err.message ? err.message : err
+      err && err.name ? err.name : 'Error'
     );
     throw new Error(isTimeout ? 'Email provider timeout' : 'Email provider request failed');
   }
 
   if (!response.ok) {
-    let detail = `status=${response.status}`;
+    let errBody = null;
     try {
-      const errBody = await response.json();
-      // Brevo error shape: { code, message } — never log headers or api-key.
-      if (errBody && typeof errBody === 'object') {
-        const code = errBody.code || errBody.error || '';
-        const message = errBody.message || '';
-        detail = `status=${response.status} code=${code} message=${message}`;
-      }
+      errBody = await response.json();
     } catch (_) {
       /* ignore parse errors */
     }
-    console.error(`[email] Brevo API rejected request: ${detail}`);
+    const category = classifyProviderStatus(response.status);
+    const meta = safeBrevoErrorMeta(errBody);
+    console.error('[email] Brevo API rejected request', {
+      status: response.status,
+      category,
+      ...meta,
+    });
     throw new Error(`Email provider rejected request (${response.status})`);
   }
 
