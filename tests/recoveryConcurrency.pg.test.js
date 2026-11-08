@@ -43,9 +43,7 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
     const email = `rcv_${Date.now()}_${Math.random().toString(16).slice(2)}@test.local`;
     const { rows } = await pool.query(
       `INSERT INTO users (email, password_hash, name, email_verified, free_search_used)
-       VALUES ($1, 'x', 'Recovery Test', TRUE, FALSE)
-       RETURNING id`,
-      [email]
+       VALUES ($1, 'x', 'Recovery Test', TRUE, FALSE) RETURNING id`, [email]
     );
     return rows[0].id;
   }
@@ -54,6 +52,11 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
     await pool.query('DELETE FROM search_results WHERE user_id = $1', [id]).catch(() => {});
     await pool.query('DELETE FROM searches WHERE user_id = $1', [id]).catch(() => {});
     await pool.query('DELETE FROM users WHERE id = $1', [id]).catch(() => {});
+  }
+
+  async function settle(promise) {
+    if (!promise) return;
+    try { await promise; } catch (_) {}
   }
 
   it('C [official]: renew × recover — valid lease protects running search', async () => {
@@ -67,8 +70,7 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
         const ins = await setup.query(
           `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
            VALUES ($1, 'c-query', 'loc', $2::jsonb, 'running', '[]'::jsonb,
-                   NOW() - interval '2 hours', NOW() + interval '30 days')
-           RETURNING id`,
+                   NOW() - interval '2 hours', NOW() + interval '30 days') RETURNING id`,
           [userId, JSON.stringify({ holdToken: hold.holdToken })]
         );
         searchId = ins.rows[0].id;
@@ -84,9 +86,7 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
         await lockUserForUpdate(c1, userId);
         const recoverPromise = recoverAbandonedSearches(c2, { graceMinutes: 30 });
         await waitUntilBlockedBy(pool, pid2, pid1, 8000);
-        const { rows: tok } = await c1.query(
-          'SELECT free_search_hold_token FROM users WHERE id=$1', [userId]
-        );
+        const { rows: tok } = await c1.query('SELECT free_search_hold_token FROM users WHERE id=$1', [userId]);
         const renewed = await renewFreeSearchHold(c1, userId, tok[0].free_search_hold_token);
         assert.equal(renewed.renewed, true);
         await c1.query('COMMIT');
@@ -95,8 +95,7 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
         assert.equal(s[0].status, 'running');
         const { rows: u } = await pool.query(
           `SELECT free_search_hold_token IS NOT NULL AS has_token,
-                  free_search_hold_until > NOW() AS lease_ok, free_search_used
-           FROM users WHERE id=$1`, [userId]
+                  free_search_hold_until > NOW() AS lease_ok, free_search_used FROM users WHERE id=$1`, [userId]
         );
         assert.equal(u[0].has_token, true);
         assert.equal(u[0].lease_ok, true);
@@ -112,73 +111,145 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
   it('D [official]: runAndPersist × recover — no deadlock; results + quota consistent', async () => {
     const userId = await createUser();
     let cRecover = null;
+    const recoverPromiseRef = { p: null };
     try {
       cRecover = await pool.connect();
       const pidRecover = await backendPid(cRecover);
       let blockedOk = false;
-      const recoverPromiseRef = { p: null };
       const mockEngine = async () => ({
-        searchStatus: 'completed',
-        outcome: 'results',
-        results: [{
-          name: 'Lead D', address: 'Rua 1', phone: null, email: null, website: null,
+        searchStatus: 'completed', outcome: 'results',
+        results: [{ name: 'Lead D', address: 'Rua 1', phone: null, email: null, website: null,
           rating: 4.5, reviewsCount: 1, category: 'test', lat: null, lng: null,
-          sourceProvider: 'test', externalId: 'd-1', raw: {},
-        }],
+          sourceProvider: 'test', externalId: 'd-1', raw: {} }],
         totals: { raw: 1, normalized: 1, afterDedup: 1, afterFilters: 1, returned: 1 },
         _providers: ['test'],
       });
-
       const out = await runAndPersist({
         userId, query: 'd-query', location: 'loc', modality: 'standard', limit: 10,
         executeSearchFn: mockEngine,
         afterUserLock: async ({ client, searchId }) => {
-          await client.query(
-            `UPDATE searches SET started_at = NOW() - interval '2 hours' WHERE id = $1`, [searchId]
-          );
+          await client.query(`UPDATE searches SET started_at = NOW() - interval '2 hours' WHERE id = $1`, [searchId]);
           const pidPersist = await backendPid(client);
           recoverPromiseRef.p = recoverAbandonedSearches(cRecover, { graceMinutes: 30 });
           await waitUntilBlockedBy(pool, pidRecover, pidPersist, 8000);
           blockedOk = true;
         },
       });
-
       assert.equal(blockedOk, true, 'recover must have blocked on persist user lock');
       assert.ok(out.searchId);
       assert.equal(out.totals.results, 1);
-      if (recoverPromiseRef.p) await recoverPromiseRef.p;
-
-      const { rows: s } = await pool.query(
-        'SELECT status, total_after_filters FROM searches WHERE id=$1', [out.searchId]
-      );
+      const { rows: s } = await pool.query('SELECT status, total_after_filters FROM searches WHERE id=$1', [out.searchId]);
       assert.notEqual(s[0].status, 'failed');
       assert.equal(Number(s[0].total_after_filters), 1);
       const { rows: results } = await pool.query(
-        'SELECT COUNT(*)::int AS c FROM search_results WHERE search_id=$1 AND user_id=$2',
-        [out.searchId, userId]
+        'SELECT COUNT(*)::int AS c FROM search_results WHERE search_id=$1 AND user_id=$2', [out.searchId, userId]
       );
       assert.equal(results[0].c, 1);
-      const { rows: u } = await pool.query(
-        'SELECT free_search_used, free_search_hold_token FROM users WHERE id=$1', [userId]
-      );
+      const { rows: u } = await pool.query('SELECT free_search_used, free_search_hold_token FROM users WHERE id=$1', [userId]);
       assert.equal(u[0].free_search_used, true);
       assert.equal(u[0].free_search_hold_token, null);
     } finally {
+      await settle(recoverPromiseRef.p);
       if (cRecover) { try { cRecover.release(); } catch (_) {} }
       await cleanupUser(userId);
     }
   });
 
-  it('E [official]: concurrent recovery jobs — only one holds advisory lock', async () => {
+  it('D [official] failure path: persist aborts after recover started — await recover, no hang', async () => {
+    const userId = await createUser();
+    let cRecover = null;
+    const recoverPromiseRef = { p: null };
+    let blockedOk = false;
+    let searchId = null;
+    try {
+      cRecover = await pool.connect();
+      const pidRecover = await backendPid(cRecover);
+      await assert.rejects(
+        async () => {
+          await runAndPersist({
+            userId, query: 'd-fail', location: 'loc', modality: 'standard', limit: 10,
+            executeSearchFn: async () => ({
+              searchStatus: 'completed', outcome: 'results',
+              results: [{ name: 'X', address: null, phone: null, email: null, website: null,
+                rating: null, reviewsCount: null, category: null, lat: null, lng: null,
+                sourceProvider: 'test', externalId: 'df-1', raw: {} }],
+              totals: { raw: 1, normalized: 1, afterDedup: 1, afterFilters: 1, returned: 1 },
+              _providers: ['test'],
+            }),
+            afterUserLock: async ({ client, searchId: sid }) => {
+              searchId = sid;
+              await client.query(`UPDATE searches SET started_at = NOW() - interval '2 hours' WHERE id = $1`, [sid]);
+              const pidPersist = await backendPid(client);
+              recoverPromiseRef.p = recoverAbandonedSearches(cRecover, { graceMinutes: 30 });
+              await waitUntilBlockedBy(pool, pidRecover, pidPersist, 8000);
+              blockedOk = true;
+              const err = new Error('TEST_PERSIST_ABORT');
+              err.code = 'TEST_PERSIST_ABORT';
+              throw err;
+            },
+          });
+        },
+        (err) => err && err.message === 'TEST_PERSIST_ABORT'
+      );
+      assert.equal(blockedOk, true);
+      assert.ok(searchId);
+      await settle(recoverPromiseRef.p);
+      const { rows: s } = await pool.query('SELECT status FROM searches WHERE id=$1', [searchId]);
+      assert.notEqual(s[0].status, 'completed');
+      const { rows: results } = await pool.query(
+        'SELECT COUNT(*)::int AS c FROM search_results WHERE search_id=$1', [searchId]
+      );
+      assert.equal(results[0].c, 0);
+    } finally {
+      await settle(recoverPromiseRef.p);
+      if (cRecover) { try { cRecover.release(); } catch (_) {} }
+      await cleanupUser(userId);
+    }
+  });
+
+  it('E [official]: concurrent runOnce — second skipped while first holds advisory lock', async () => {
+    let releaseFirst;
+    const holdFirst = new Promise((resolve) => { releaseFirst = resolve; });
+    let signalEntered;
+    const firstEntered = new Promise((resolve) => { signalEntered = resolve; });
+
+    const firstP = runOnce({
+      getPool: () => pool,
+      recoverAbandonedSearches: async () => {
+        signalEntered();
+        await holdFirst;
+        return { abandoned: 0, holdsReleased: 0 };
+      },
+    });
+    await firstEntered;
+
+    const second = await runOnce({
+      getPool: () => pool,
+      recoverAbandonedSearches: async () => {
+        throw new Error('second job must not run recover while first holds lock');
+      },
+    });
+    assert.equal(second.skipped, true);
+    assert.equal(second.reason, 'lock_held');
+
+    releaseFirst();
+    const first = await firstP;
+    assert.equal(first.skipped, false);
+
+    const third = await runOnce({
+      getPool: () => pool,
+      recoverAbandonedSearches: async () => ({ abandoned: 0, holdsReleased: 0 }),
+    });
+    assert.equal(third.skipped, false);
+  });
+
+  it('E [extra]: manual advisory lock causes runOnce skipped', async () => {
     const c1 = await pool.connect();
-    const c2 = await pool.connect();
     try {
       const lock1 = await c1.query('SELECT pg_try_advisory_lock($1) AS ok', [ADVISORY_KEY]);
       assert.equal(lock1.rows[0].ok, true);
-      const lock2 = await c2.query('SELECT pg_try_advisory_lock($1) AS ok', [ADVISORY_KEY]);
-      assert.equal(lock2.rows[0].ok, false);
       const result = await runOnce({
-        getPool: () => ({ connect: async () => pool.connect() }),
+        getPool: () => pool,
         recoverAbandonedSearches: async () => {
           throw new Error('should_not_run_recover_while_lock_held');
         },
@@ -186,16 +257,14 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
       assert.equal(result.skipped, true);
       assert.equal(result.reason, 'lock_held');
       await c1.query('SELECT pg_advisory_unlock($1)', [ADVISORY_KEY]);
-      const c3 = await pool.connect();
-      try {
-        const lock3 = await c3.query('SELECT pg_try_advisory_lock($1) AS ok', [ADVISORY_KEY]);
-        assert.equal(lock3.rows[0].ok, true);
-        await c3.query('SELECT pg_advisory_unlock($1)', [ADVISORY_KEY]);
-      } finally { c3.release(); }
+      const after = await runOnce({
+        getPool: () => pool,
+        recoverAbandonedSearches: async () => ({ abandoned: 0, holdsReleased: 0 }),
+      });
+      assert.equal(after.skipped, false);
     } finally {
       try { await c1.query('SELECT pg_advisory_unlock($1)', [ADVISORY_KEY]); } catch (_) {}
       c1.release();
-      c2.release();
     }
   });
 
@@ -206,21 +275,15 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
       const client = await pool.connect();
       try {
         await client.query(
-          `UPDATE users SET
-             free_search_hold_token = gen_random_uuid(),
+          `UPDATE users SET free_search_hold_token = gen_random_uuid(),
              free_search_hold_until = NOW() - interval '1 hour',
-             free_search_hold_search_id = NULL,
-             free_search_used = FALSE
-           WHERE id = $1`, [userId]
+             free_search_hold_search_id = NULL, free_search_used = FALSE WHERE id = $1`, [userId]
         );
-        const { rows: tok } = await client.query(
-          'SELECT free_search_hold_token FROM users WHERE id=$1', [userId]
-        );
+        const { rows: tok } = await client.query('SELECT free_search_hold_token FROM users WHERE id=$1', [userId]);
         const ins = await client.query(
           `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
            VALUES ($1, 'h-query', 'loc', $2::jsonb, 'running', '[]'::jsonb,
-                   NOW() - interval '3 hours', NOW() + interval '30 days')
-           RETURNING id`,
+                   NOW() - interval '3 hours', NOW() + interval '30 days') RETURNING id`,
           [userId, JSON.stringify({ holdToken: tok[0].free_search_hold_token })]
         );
         searchId = ins.rows[0].id;
@@ -238,8 +301,7 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
                   free_search_hold_search_id FROM users WHERE id=$1`, [userId]
         );
         return {
-          id: s[0].id,
-          status: s[0].status,
+          id: s[0].id, status: s[0].status,
           completed_at: s[0].completed_at ? new Date(s[0].completed_at).toISOString() : null,
           error_summary: s[0].error_summary,
           free_search_used: u[0].free_search_used,
@@ -261,14 +323,12 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
       assert.equal(before.free_search_used, false);
 
       const { rows: elig } = await pool.query(
-        `SELECT COUNT(*)::int AS c FROM searches
-         WHERE id = $1 AND status = 'running' AND completed_at IS NULL`, [searchId]
+        `SELECT COUNT(*)::int AS c FROM searches WHERE id = $1 AND status = 'running' AND completed_at IS NULL`, [searchId]
       );
       assert.equal(elig[0].c, 0, 'recovered search must not remain eligible');
 
       await recoverAbandonedSearches(pool, { graceMinutes: 30 });
       const after = await snap();
-
       assert.equal(after.status, before.status);
       assert.equal(after.completed_at, before.completed_at);
       assert.equal(after.error_summary, before.error_summary);
@@ -278,8 +338,7 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
       assert.equal(after.free_search_hold_search_id, before.free_search_hold_search_id);
 
       const { rows: elig2 } = await pool.query(
-        `SELECT COUNT(*)::int AS c FROM searches
-         WHERE id = $1 AND status = 'running' AND completed_at IS NULL`, [searchId]
+        `SELECT COUNT(*)::int AS c FROM searches WHERE id = $1 AND status = 'running' AND completed_at IS NULL`, [searchId]
       );
       assert.equal(elig2[0].c, 0);
     } finally { await cleanupUser(userId); }
