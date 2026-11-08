@@ -507,7 +507,6 @@ table.data {
   width: 100%;
   border-collapse: collapse;
 }
-/* Keep columns readable; scroll horizontally inside the wrap instead of crushing text */
 table.data th,
 table.data td {
   white-space: nowrap;
@@ -521,6 +520,8 @@ table.table-results { min-width: 920px; }
 table.table-history { min-width: 720px; }
 .table-wrap-leads table.data,
 table.table-leads { min-width: 720px; }
+.table-wrap-dashboard table.data,
+table.table-dashboard { min-width: 720px; }
 table.data td.cell-wrap {
   white-space: normal;
   overflow-wrap: anywhere;
