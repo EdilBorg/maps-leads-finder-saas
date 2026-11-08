@@ -489,3 +489,184 @@ describe('security — production requires MAIL_FROM', () => {
     assert.equal(fetchMock.mock.callCount(), 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Refinement: subject omitted from logs; network errors use fixed categories
+// ---------------------------------------------------------------------------
+
+describe('security refinement — subject never logged in development', () => {
+  it('sendMail with sensitive subject does not log subject, recipient, or body', async () => {
+    process.env.NODE_ENV = 'development';
+    delete process.env.BREVO_API_KEY;
+
+    const secretSubject = 'PRIVATE_USER_DATA_987654';
+    const email = 'subject.leak@example.com';
+    const bodyText = 'BODY_MUST_NOT_APPEAR_XYZ';
+
+    const fetchMock = mockFetch(async () => {
+      throw new Error('fetch should not be called');
+    });
+    const cap = captureConsole();
+    try {
+      const { sendMail } = loadService();
+      const result = await sendMail({
+        to: email,
+        subject: secretSubject,
+        text: bodyText,
+      });
+      assert.equal(result.sent, false);
+      assert.equal(result.mode, 'log');
+      assert.equal(fetchMock.mock.callCount(), 0);
+
+      const joined = cap.joined();
+      assert.doesNotMatch(joined, new RegExp(secretSubject));
+      assert.doesNotMatch(joined, new RegExp(email.replace(/\./g, '\\.')));
+      assert.doesNotMatch(joined, new RegExp(bodyText));
+      assert.match(joined, /mode/);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it('sendPasswordResetEmail without key does not log template subject or link', async () => {
+    process.env.NODE_ENV = 'development';
+    delete process.env.BREVO_API_KEY;
+
+    const token = 'RESET_REFINE_TOKEN_55aa';
+    const email = 'reset.refine@example.com';
+    const resetUrl = `https://app.example/pages/reset-password.html?token=${token}`;
+
+    const cap = captureConsole();
+    try {
+      const { sendPasswordResetEmail } = loadService();
+      const result = await sendPasswordResetEmail(email, resetUrl);
+      assert.equal(result.sent, false);
+      assert.equal(result.mode, 'log');
+
+      const joined = cap.joined();
+      assert.doesNotMatch(joined, /Redefinição de palavra-passe/);
+      assert.doesNotMatch(joined, /Maps Leads Finder/);
+      assert.doesNotMatch(joined, new RegExp(email.replace(/\./g, '\\.')));
+      assert.doesNotMatch(joined, new RegExp(token));
+      assert.doesNotMatch(joined, /reset-password\.html/);
+    } finally {
+      cap.restore();
+    }
+  });
+});
+
+describe('security refinement — network errors use fixed categories only', () => {
+  it('arbitrary err.name and message are not logged or propagated', async () => {
+    process.env.BREVO_API_KEY = 'BREVO_TEST_SECRET_123456';
+    process.env.MAIL_FROM = 'noreply@example.com';
+
+    mockFetch(async () => {
+      const err = new Error('SENSITIVE_ERROR_MESSAGE_123');
+      err.name = 'PRIVATE_DATA_SHOULD_NOT_BE_LOGGED';
+      throw err;
+    });
+
+    const cap = captureConsole();
+    let caught;
+    try {
+      const { sendMail } = loadService();
+      try {
+        await sendMail({ to: 'victim@example.com', subject: 'S', text: 't' });
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught);
+      assert.match(String(caught.message), /Email provider request failed/);
+      assert.doesNotMatch(String(caught.message), /SENSITIVE_ERROR_MESSAGE_123/);
+      assert.doesNotMatch(String(caught.message), /PRIVATE_DATA_SHOULD_NOT_BE_LOGGED/);
+
+      const joined = cap.joined();
+      assert.match(joined, /\[email\] Brevo request failed/);
+      assert.doesNotMatch(joined, /SENSITIVE_ERROR_MESSAGE_123/);
+      assert.doesNotMatch(joined, /PRIVATE_DATA_SHOULD_NOT_BE_LOGGED/);
+      assert.doesNotMatch(joined, /BREVO_TEST_SECRET_123456/);
+      assert.doesNotMatch(joined, /victim@example\.com/);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it('TimeoutError logs fixed timeout category only', async () => {
+    process.env.BREVO_API_KEY = 'BREVO_TEST_SECRET_123456';
+    process.env.MAIL_FROM = 'noreply@example.com';
+
+    mockFetch(async () => {
+      const err = new Error('Sensitive timeout details');
+      err.name = 'TimeoutError';
+      throw err;
+    });
+
+    const cap = captureConsole();
+    try {
+      const { sendMail } = loadService();
+      await assert.rejects(
+        () => sendMail({ to: 'a@b.co', subject: 'S', text: 't' }),
+        /Email provider timeout/
+      );
+      const joined = cap.joined();
+      assert.match(joined, /\[email\] Brevo request timed out/);
+      assert.doesNotMatch(joined, /Sensitive timeout details/);
+      assert.doesNotMatch(joined, /TimeoutError/);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it('AbortError is classified as timeout with fixed log only', async () => {
+    process.env.BREVO_API_KEY = 'BREVO_TEST_SECRET_123456';
+    process.env.MAIL_FROM = 'noreply@example.com';
+
+    mockFetch(async () => {
+      const err = new Error('Aborted with secrets');
+      err.name = 'AbortError';
+      throw err;
+    });
+
+    const cap = captureConsole();
+    try {
+      const { sendMail } = loadService();
+      await assert.rejects(
+        () => sendMail({ to: 'a@b.co', subject: 'S', text: 't' }),
+        /Email provider timeout/
+      );
+      const joined = cap.joined();
+      assert.match(joined, /\[email\] Brevo request timed out/);
+      assert.doesNotMatch(joined, /Aborted with secrets/);
+      assert.doesNotMatch(joined, /AbortError/);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it('generic network failure logs only fixed failed category', async () => {
+    process.env.BREVO_API_KEY = 'BREVO_TEST_SECRET_123456';
+    process.env.MAIL_FROM = 'noreply@example.com';
+
+    mockFetch(async () => {
+      const err = new Error('ECONNREFUSED secrets-here');
+      err.name = 'UnexpectedNetworkName';
+      throw err;
+    });
+
+    const cap = captureConsole();
+    try {
+      const { sendMail } = loadService();
+      await assert.rejects(
+        () => sendMail({ to: 'a@b.co', subject: 'S', text: 't' }),
+        /Email provider request failed/
+      );
+      const joined = cap.joined();
+      assert.match(joined, /\[email\] Brevo request failed/);
+      assert.doesNotMatch(joined, /ECONNREFUSED/);
+      assert.doesNotMatch(joined, /UnexpectedNetworkName/);
+      assert.doesNotMatch(joined, /secrets-here/);
+    } finally {
+      cap.restore();
+    }
+  });
+});
