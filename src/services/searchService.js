@@ -1,6 +1,8 @@
 /**
  * Persist searches / results / leads with multi-tenant isolation.
  * Free-search: atomic hold + validated consume in the same TX as result inserts.
+ *
+ * GLOBAL LOCK ORDER: users → searches (matches recoverAbandonedSearches).
  */
 const { getPool } = require('../db/pool');
 const {
@@ -15,6 +17,7 @@ const {
   renewFreeSearchHold,
   consumeFreeSearchHold,
   releaseFreeSearchHold,
+  lockUserForUpdate,
   recoverAbandonedSearches,
   FREE_SEARCH_HOLD_MINUTES,
   FREE_SEARCH_RENEW_INTERVAL_MS,
@@ -59,6 +62,7 @@ async function runAndPersist(opts) {
   let holdToken = null;
   let stopRenewal = null;
 
+  // Phase 1: acquire hold + create search + bind (same TX)
   {
     const client = await pool.connect();
     try {
@@ -94,11 +98,18 @@ async function runAndPersist(opts) {
         ]
       );
       searchId = ins.rows[0].id;
-      await bindHoldToSearch(client, opts.userId, holdToken, searchId);
+      const bound = await bindHoldToSearch(client, opts.userId, holdToken, searchId);
+      if (!bound) {
+        await client.query('ROLLBACK');
+        try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
+        const err = new Error('Não foi possível associar a reserva à pesquisa. Tenta novamente.');
+        err.code = 'HOLD_BIND_FAILED';
+        throw err;
+      }
       await client.query('COMMIT');
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch (_) {}
-      if (holdToken && err.code !== 'QUOTA') {
+      if (holdToken && err.code !== 'QUOTA' && err.code !== 'HOLD_BIND_FAILED') {
         try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
       }
       client.release();
@@ -107,6 +118,7 @@ async function runAndPersist(opts) {
     client.release();
   }
 
+  // Phase 2: external providers (no long-lived DB TX)
   stopRenewal = startHoldRenewal(opts.userId, holdToken);
   let engineResult;
   try {
@@ -119,6 +131,8 @@ async function runAndPersist(opts) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // Global lock order: users → searches
+      await lockUserForUpdate(client, opts.userId);
       await client.query(
         `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2 WHERE id=$1 AND user_id=$3`,
         [searchId, err.message || 'engine error', opts.userId]
@@ -134,9 +148,12 @@ async function runAndPersist(opts) {
     if (stopRenewal) stopRenewal();
   }
 
+  // Phase 3: persist + consume/release in ONE TX; lock users first
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockUserForUpdate(client, opts.userId);
+
     await client.query(
       `UPDATE searches SET
          status=$2, providers_used=$3::jsonb,
