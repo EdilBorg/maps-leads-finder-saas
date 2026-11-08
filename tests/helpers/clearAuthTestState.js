@@ -13,7 +13,13 @@ function rateKeysForIp(ip) {
 
 /**
  * Clear in-memory + PostgreSQL rate-limit buckets for loopback test IPs,
- * and optionally login_attempts rows for those IPs / emails.
+ * and login_attempts rows scoped to the suite when possible.
+ *
+ * When `emails` is provided, only those emails are deleted from login_attempts
+ * (avoids wiping unrelated attempts for the same loopback IPs).
+ * When only IPs are given (or neither), falls back to IP-based cleanup.
+ *
+ * Rate-limit buckets remain IP-scoped because the middleware keys on IP.
  *
  * @param {{ emails?: string[], ips?: string[] }} [opts]
  */
@@ -38,14 +44,14 @@ async function clearAuthTestState(opts = {}) {
   try {
     const { getPool } = require('../../src/db/pool');
     const pool = getPool();
-    if (ips.length) {
-      await pool.query(`DELETE FROM login_attempts WHERE ip = ANY($1::text[])`, [ips]);
-    }
     if (emails.length) {
+      // Prefer email-scoped delete so concurrent/other suites' IP-shared attempts are not wiped.
       await pool.query(
         `DELETE FROM login_attempts WHERE email_normalized = ANY($1::text[])`,
         [emails]
       );
+    } else if (ips.length) {
+      await pool.query(`DELETE FROM login_attempts WHERE ip = ANY($1::text[])`, [ips]);
     }
   } catch (_) {
     /* ignore when DB unavailable in unit-only runs */
