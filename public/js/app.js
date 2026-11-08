@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const titles = { dashboard: 'Dashboard', search: 'Nova pesquisa', results: 'Resultados', history: 'Histórico', leads: 'Leads guardados' };
+  const titles = { dashboard: 'Dashboard', search: 'Nova pesquisa', results: 'Resultados', history: 'Histórico', leads: 'Leads guardados', settings: 'Configurações' };
   let currentResults = [], currentSearchMeta = null, csrfToken = null;
   const $ = (s, r) => (r || document).querySelector(s);
   const $all = (s, r) => Array.from((r || document).querySelectorAll(s));
@@ -44,6 +44,7 @@
     if (view === 'history') loadHistory();
     if (view === 'leads') loadLeads();
     if (view === 'results') renderResultsState();
+    if (view === 'settings') loadSettings();
   }
   function initModalities() {
     const grid = $('#modality-grid');
@@ -238,30 +239,201 @@
       setStatus(((data.saved || []).length) + ' lead(s) guardado(s).');
     } catch (_) { setStatus('Falha ao guardar leads.', true); }
   }
-  async function refreshAuthUi() {
-    const login = document.getElementById('link-login');
-    const reg = document.getElementById('link-register');
-    const logout = document.getElementById('btn-logout');
+  let currentUser = null;
+  let authState = 'loading';
+
+  function setAuthState(state) {
+    authState = state;
+    const actions = document.querySelector('.topbar-actions');
+    if (actions) actions.setAttribute('data-auth-state', state);
+  }
+
+  function setGuestUi() {
+    currentUser = null;
+    setAuthState('guest');
+    const guest = document.getElementById('guest-actions');
+    const user = document.getElementById('user-actions');
+    if (guest) guest.hidden = false;
+    if (user) user.hidden = true;
     const badge = document.getElementById('auth-badge');
+    if (badge) { badge.textContent = ''; badge.removeAttribute('title'); }
+  }
+
+  function setAuthedUi(user) {
+    currentUser = user;
+    setAuthState('authenticated');
+    const guest = document.getElementById('guest-actions');
+    const userBox = document.getElementById('user-actions');
+    if (guest) guest.hidden = true;
+    if (userBox) userBox.hidden = false;
+    const badge = document.getElementById('auth-badge');
+    if (badge && user) {
+      badge.textContent = user.emailVerified ? user.name : user.name + ' (email por verificar)';
+      badge.title = user.email || '';
+    }
+    const logout = document.getElementById('btn-logout');
+    if (logout) {
+      logout.onclick = async () => {
+        try {
+          const token = await ensureCsrf();
+          await fetch('/api/auth/logout', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'X-CSRF-Token': token, 'Content-Type': 'application/json' },
+            body: '{}',
+          });
+        } catch (_) {}
+        window.location.href = '/pages/login.html';
+      };
+    }
+  }
+
+  function setAuthErrorUi() {
+    setAuthState('error');
+    const guest = document.getElementById('guest-actions');
+    const user = document.getElementById('user-actions');
+    if (guest) guest.hidden = true;
+    if (user) user.hidden = true;
+  }
+
+  async function refreshAuthUi() {
+    setAuthState('loading');
+    const guest = document.getElementById('guest-actions');
+    const user = document.getElementById('user-actions');
+    if (guest) guest.hidden = true;
+    if (user) user.hidden = true;
     try {
       const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
-      if (res.ok) {
-        const data = await res.json();
-        if (login) login.hidden = true;
-        if (reg) reg.hidden = true;
-        if (logout) {
-          logout.hidden = false;
-          logout.onclick = async () => {
-            try {
-              const token = await ensureCsrf();
-              await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': token, 'Content-Type': 'application/json' }, body: '{}' });
-            } catch (_) {}
-            window.location.reload();
-          };
-        }
-        if (badge && data.user) badge.textContent = data.user.emailVerified ? data.user.name : data.user.name + ' (email por verificar)';
+      if (res.status === 401) {
+        setGuestUi();
+        return;
       }
-    } catch (_) {}
+      if (!res.ok) {
+        setAuthErrorUi();
+        return;
+      }
+      const data = await res.json();
+      if (data && data.user) setAuthedUi(data.user);
+      else setGuestUi();
+    } catch (_) {
+      setAuthErrorUi();
+    }
+  }
+
+  function loadSettings() {
+    const nameEl = document.getElementById('settings-name');
+    const emailEl = document.getElementById('settings-email');
+    const verEl = document.getElementById('settings-verified');
+    if (!currentUser) {
+      if (nameEl) nameEl.textContent = '—';
+      if (emailEl) emailEl.textContent = '—';
+      if (verEl) verEl.textContent = authState === 'error'
+        ? 'Não foi possível verificar a sessão.'
+        : 'Inicie sessão para ver os dados da conta.';
+      return;
+    }
+    if (nameEl) nameEl.textContent = currentUser.name || '—';
+    if (emailEl) emailEl.textContent = currentUser.email || '—';
+    if (verEl) verEl.textContent = currentUser.emailVerified ? 'Confirmado' : 'Por confirmar';
+  }
+
+  function initChangePassword() {
+    const showBtn = document.getElementById('btn-show-change-password');
+    const form = document.getElementById('change-password-form');
+    const cancelBtn = document.getElementById('btn-cancel-change-password');
+    const err = document.getElementById('change-password-error');
+    const ok = document.getElementById('change-password-ok');
+    const submitBtn = document.getElementById('btn-change-password');
+
+    function hideMessages() {
+      if (err) { err.classList.remove('visible'); err.textContent = ''; }
+      if (ok) { ok.classList.remove('visible'); ok.textContent = ''; }
+    }
+
+    if (showBtn && form) {
+      showBtn.addEventListener('click', () => {
+        form.hidden = false;
+        showBtn.hidden = true;
+        hideMessages();
+      });
+    }
+    if (cancelBtn && form && showBtn) {
+      cancelBtn.addEventListener('click', () => {
+        form.hidden = true;
+        showBtn.hidden = false;
+        form.reset();
+        hideMessages();
+      });
+    }
+    document.querySelectorAll('.toggle-password').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-target');
+        const input = document.getElementById(id);
+        if (!input) return;
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        btn.textContent = show ? 'Ocultar' : 'Mostrar';
+      });
+    });
+    if (form) {
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hideMessages();
+        if (submitBtn) {
+          submitBtn.disabled = true;
+          submitBtn.textContent = 'A guardar…';
+        }
+        try {
+          const token = await ensureCsrf();
+          const { res, data } = await api('/api/auth/change-password', {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': token },
+            body: {
+              currentPassword: (document.getElementById('current-password') || {}).value || '',
+              newPassword: (document.getElementById('new-password') || {}).value || '',
+              newPasswordConfirm: (document.getElementById('new-password-confirm') || {}).value || '',
+            },
+          });
+          if (res.status === 401) {
+            if (err) {
+              err.textContent = 'Sessão expirada. Inicie sessão novamente.';
+              err.classList.add('visible');
+            }
+            setTimeout(() => { window.location.href = '/pages/login.html'; }, 1000);
+            return;
+          }
+          if (res.status === 403) {
+            if (err) {
+              err.textContent = (data && data.error) || 'Pedido rejeitado (CSRF ou permissões).';
+              err.classList.add('visible');
+            }
+            return;
+          }
+          if (!res.ok) {
+            if (err) {
+              err.textContent = (data && data.error) || 'Não foi possível alterar a palavra-passe.';
+              err.classList.add('visible');
+            }
+            return;
+          }
+          if (ok) {
+            ok.textContent = (data && data.message) || 'Palavra-passe atualizada.';
+            ok.classList.add('visible');
+          }
+          setTimeout(() => { window.location.href = '/pages/login.html'; }, 1200);
+        } catch (_) {
+          if (err) {
+            err.textContent = 'Erro de rede. Tente novamente.';
+            err.classList.add('visible');
+          }
+        } finally {
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Guardar alterações';
+          }
+        }
+      });
+    }
   }
   function init() {
     $all('.nav-item').forEach((btn) => {
@@ -302,6 +474,7 @@
     if (selectAll) selectAll.addEventListener('change', () => { $all('.result-check').forEach((c) => { c.checked = selectAll.checked; }); });
     const saveBtn = $('#btn-save-leads');
     if (saveBtn) saveBtn.addEventListener('click', saveSelectedLeads);
+    initChangePassword();
     const hash = (location.hash || '#dashboard').replace('#', '');
     navigate(titles[hash] ? hash : 'dashboard');
   }
