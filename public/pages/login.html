@@ -13,7 +13,13 @@
       <div class="auth-brand">Maps Leads Finder</div>
       <h1>Iniciar sessão</h1>
       <p class="sub">Aceda à sua conta</p>
-      <div class="error-box" id="err"></div>
+      <div class="error-box" id="err" role="alert"></div>
+      <div class="success-box" id="ok" role="status"></div>
+      <div class="pending-box" id="pending" hidden>
+        <p class="pending-title">Este endereço de email ainda não foi confirmado.</p>
+        <p class="pending-text">Confirme o seu endereço de email para aceder à sua conta. Se não recebeu a mensagem, pode solicitar um novo envio.</p>
+        <button type="button" class="btn btn-secondary btn-block" id="resend">Reenviar email de confirmação</button>
+      </div>
       <form id="form">
         <div class="form-group">
           <label class="form-label" for="email">Email</label>
@@ -27,7 +33,7 @@
       </form>
       <div class="links">
         <a href="/pages/forgot-password.html">Esqueceu a palavra-passe?</a><br>
-        <a href="/pages/register.html">Criar conta</a> · <a href="/">Voltar</a>
+        <a href="/pages/register.html">Criar conta</a>
       </div>
     </div>
   </div>
@@ -51,23 +57,59 @@
     const data = await res.json().catch(() => ({}));
     return { res, data };
   }
+
+  const pending = document.getElementById('pending');
+  const err = document.getElementById('err');
+  const ok = document.getElementById('ok');
+
   document.getElementById('form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const err = document.getElementById('err');
     err.classList.remove('visible');
+    ok.classList.remove('visible');
+    pending.hidden = true;
     const btn = document.getElementById('btn');
     btn.disabled = true;
+    const email = document.getElementById('email').value.trim();
     const { res, data } = await postJson('/api/auth/login', {
-      email: document.getElementById('email').value,
+      email,
       password: document.getElementById('password').value,
     });
     btn.disabled = false;
     if (!res.ok) {
+      if (data.code === 'EMAIL_NOT_VERIFIED') {
+        try { sessionStorage.setItem('mlf_pending_email', email); } catch (_) {}
+        pending.hidden = false;
+        return;
+      }
       err.textContent = data.error || 'Falha no login.';
       err.classList.add('visible');
       return;
     }
     window.location.href = '/';
+  });
+
+  document.getElementById('resend').addEventListener('click', async () => {
+    const email = document.getElementById('email').value.trim();
+    err.classList.remove('visible');
+    ok.classList.remove('visible');
+    const btn = document.getElementById('resend');
+    btn.disabled = true;
+    btn.textContent = 'A enviar…';
+    try {
+      const { res, data } = await postJson('/api/auth/resend-verification', { email });
+      if (!res.ok) {
+        err.textContent = data.error || 'Não foi possível reenviar o email.';
+        err.classList.add('visible');
+      } else {
+        ok.textContent = data.message || 'Se a conta existir, enviámos um novo email de confirmação.';
+        ok.classList.add('visible');
+      }
+    } catch (e) {
+      err.textContent = 'Erro de rede. Tente novamente.';
+      err.classList.add('visible');
+    }
+    btn.disabled = false;
+    btn.textContent = 'Reenviar email de confirmação';
   });
   </script>
 </body>
