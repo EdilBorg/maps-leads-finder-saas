@@ -1,8 +1,7 @@
 /**
  * Persist searches / results / leads with multi-tenant isolation.
- * Free-search quota uses an atomic hold token on users (no long TX during providers).
+ * Free-search: atomic hold + validated consume in the same TX as result inserts.
  */
-
 const { getPool } = require('../db/pool');
 const {
   executeSearch,
@@ -12,29 +11,45 @@ const {
 } = require('./searchEngine');
 const {
   acquireFreeSearchHold,
+  bindHoldToSearch,
+  renewFreeSearchHold,
   consumeFreeSearchHold,
   releaseFreeSearchHold,
+  recoverAbandonedSearches,
   FREE_SEARCH_HOLD_MINUTES,
+  FREE_SEARCH_RENEW_INTERVAL_MS,
 } = require('./freeSearchHold');
 
 const RETENTION_DAYS = 30;
 
 function mapPublicRow(r, i) {
-  return publicLead(
-    {
-      id: r.id,
-      name: r.name,
-      address: r.address,
-      phone: r.phone,
-      email: r.email,
-      website: r.website,
-      rating: r.rating != null ? Number(r.rating) : null,
-      reviewsCount: r.reviews_count,
-      category: r.category,
-      lat: r.lat,
-      lng: r.lng,
-    },
-    i
+  return publicLead({
+    id: r.id, name: r.name, address: r.address, phone: r.phone, email: r.email, website: r.website,
+    rating: r.rating != null ? Number(r.rating) : null, reviewsCount: r.reviews_count,
+    category: r.category, lat: r.lat, lng: r.lng,
+  }, i);
+}
+
+function startHoldRenewal(userId, holdToken) {
+  let stopped = false;
+  const timer = setInterval(() => {
+    if (stopped || !holdToken) return;
+    getPool().connect().then(async (client) => {
+      try {
+        const r = await renewFreeSearchHold(client, userId, holdToken);
+        if (!r.renewed) { stopped = true; clearInterval(timer); }
+      } finally { client.release(); }
+    }).catch(() => {});
+  }, FREE_SEARCH_RENEW_INTERVAL_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  return () => { stopped = true; clearInterval(timer); };
+}
+
+async function markSearchFailed(pool, searchId, userId, summary) {
+  await pool.query(
+    `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2
+     WHERE id=$1 AND user_id=$3 AND status IN ('running','failed')`,
+    [searchId, summary, userId]
   );
 }
 
@@ -42,12 +57,13 @@ async function runAndPersist(opts) {
   const pool = getPool();
   let searchId = null;
   let holdToken = null;
+  let stopRenewal = null;
 
   {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const hold = await acquireFreeSearchHold(client, opts.userId);
+      const hold = await acquireFreeSearchHold(client, opts.userId, null);
       if (!hold.allowed) {
         await client.query('ROLLBACK');
         const err = new Error(
@@ -60,16 +76,13 @@ async function runAndPersist(opts) {
         throw err;
       }
       holdToken = hold.holdToken;
-
       const ins = await client.query(
         `INSERT INTO searches (
            user_id, query, location, filters, status, providers_used, started_at, expires_at
          ) VALUES ($1,$2,$3,$4::jsonb,'running',$5::jsonb,NOW(), NOW() + ($6 || ' days')::interval)
          RETURNING id`,
         [
-          opts.userId,
-          opts.query,
-          opts.location,
+          opts.userId, opts.query, opts.location,
           JSON.stringify({
             modality: opts.modality === 'expanded' ? 'expanded' : 'standard',
             ...(opts.filters || {}),
@@ -81,6 +94,7 @@ async function runAndPersist(opts) {
         ]
       );
       searchId = ins.rows[0].id;
+      await bindHoldToSearch(client, opts.userId, holdToken, searchId);
       await client.query('COMMIT');
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch (_) {}
@@ -93,23 +107,20 @@ async function runAndPersist(opts) {
     client.release();
   }
 
+  stopRenewal = startHoldRenewal(opts.userId, holdToken);
   let engineResult;
   try {
     engineResult = await executeSearch({
-      modality: opts.modality,
-      query: opts.query,
-      location: opts.location,
-      filters: opts.filters,
-      limit: opts.limit,
-      providers: opts.providers,
+      modality: opts.modality, query: opts.query, location: opts.location,
+      filters: opts.filters, limit: opts.limit, providers: opts.providers,
     });
   } catch (err) {
+    if (stopRenewal) stopRenewal();
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await client.query(
-        `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2
-         WHERE id=$1 AND user_id=$3`,
+        `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2 WHERE id=$1 AND user_id=$3`,
         [searchId, err.message || 'engine error', opts.userId]
       );
       await releaseFreeSearchHold(client, opts.userId, holdToken);
@@ -117,10 +128,10 @@ async function runAndPersist(opts) {
     } catch (e2) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       throw e2;
-    } finally {
-      client.release();
-    }
+    } finally { client.release(); }
     throw err;
+  } finally {
+    if (stopRenewal) stopRenewal();
   }
 
   const client = await pool.connect();
@@ -133,12 +144,8 @@ async function runAndPersist(opts) {
          error_summary=$8, completed_at=NOW()
        WHERE id=$1 AND user_id=$9`,
       [
-        searchId,
-        engineResult.searchStatus,
-        JSON.stringify(engineResult._providers || []),
-        engineResult.totals.raw,
-        engineResult.totals.normalized,
-        engineResult.totals.afterDedup,
+        searchId, engineResult.searchStatus, JSON.stringify(engineResult._providers || []),
+        engineResult.totals.raw, engineResult.totals.normalized, engineResult.totals.afterDedup,
         engineResult.totals.afterFilters,
         engineResult.outcome === 'error' ? 'provider_failure' : null,
         opts.userId,
@@ -162,12 +169,19 @@ async function runAndPersist(opts) {
       inserted.push(row.rows[0]);
     }
 
-    const shouldConsume =
+    const needConsume =
       inserted.length > 0 &&
       (engineResult.outcome === 'results' || engineResult.searchStatus === 'partial');
 
-    if (shouldConsume) {
-      await consumeFreeSearchHold(client, opts.userId, holdToken);
+    if (needConsume) {
+      const consumed = await consumeFreeSearchHold(client, opts.userId, holdToken);
+      if (!consumed) {
+        await client.query('ROLLBACK');
+        await markSearchFailed(pool, searchId, opts.userId, 'hold_lost');
+        const err = new Error('A reserva da pesquisa gratuita expirou ou foi substituída. Tenta novamente.');
+        err.code = 'QUOTA_HOLD_LOST';
+        throw err;
+      }
     } else {
       await releaseFreeSearchHold(client, opts.userId, holdToken);
     }
@@ -190,15 +204,13 @@ async function runAndPersist(opts) {
       results: inserted.map(mapPublicRow),
     };
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    try {
-      await releaseFreeSearchHold(client, opts.userId, holdToken);
-      await client.query(
-        `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2
-         WHERE id=$1 AND user_id=$3 AND status='running'`,
-        [searchId, 'persist_failure', opts.userId]
-      );
-    } catch (_) {}
+    if (err.code !== 'QUOTA_HOLD_LOST') {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      try {
+        await releaseFreeSearchHold(client, opts.userId, holdToken);
+        await markSearchFailed(pool, searchId, opts.userId, 'persist_failure');
+      } catch (_) {}
+    }
     throw err;
   } finally {
     client.release();
@@ -212,14 +224,10 @@ async function listSearches(userId, { limit = 20, offset = 0 } = {}) {
     [userId, limit, offset]
   );
   return rows.map((r) => ({
-    id: r.id,
-    query: r.query,
-    location: r.location,
+    id: r.id, query: r.query, location: r.location,
     modality: r.filters && r.filters.modality === 'expanded' ? 'expanded' : 'standard',
-    status: r.status,
-    resultsCount: r.total_after_filters,
-    createdAt: r.created_at,
-    completedAt: r.completed_at,
+    status: r.status, resultsCount: r.total_after_filters,
+    createdAt: r.created_at, completedAt: r.completed_at,
   }));
 }
 
@@ -227,8 +235,7 @@ async function getSearchResults(userId, searchId) {
   const pool = getPool();
   const search = await pool.query(
     `SELECT id, query, location, filters, status, total_after_filters, created_at
-     FROM searches WHERE id=$1 AND user_id=$2`,
-    [searchId, userId]
+     FROM searches WHERE id=$1 AND user_id=$2`, [searchId, userId]
   );
   if (!search.rows[0]) return null;
   const { rows } = await pool.query(
@@ -239,13 +246,9 @@ async function getSearchResults(userId, searchId) {
   const s = search.rows[0];
   return {
     search: {
-      id: s.id,
-      query: s.query,
-      location: s.location,
+      id: s.id, query: s.query, location: s.location,
       modality: s.filters && s.filters.modality === 'expanded' ? 'expanded' : 'standard',
-      status: s.status,
-      resultsCount: s.total_after_filters,
-      createdAt: s.created_at,
+      status: s.status, resultsCount: s.total_after_filters, createdAt: s.created_at,
     },
     results: rows.map(mapPublicRow),
   };
@@ -273,19 +276,9 @@ async function listSavedLeads(userId, { limit = 50, offset = 0 } = {}) {
     [userId, limit, offset]
   );
   return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    address: r.address,
-    phone: r.phone,
-    email: r.email,
-    website: r.website,
-    rating: r.rating != null ? Number(r.rating) : null,
-    reviewsCount: r.reviews_count,
-    category: r.category,
-    lat: r.lat,
-    lng: r.lng,
-    notes: r.notes,
-    createdAt: r.created_at,
+    id: r.id, name: r.name, address: r.address, phone: r.phone, email: r.email, website: r.website,
+    rating: r.rating != null ? Number(r.rating) : null, reviewsCount: r.reviews_count,
+    category: r.category, lat: r.lat, lng: r.lng, notes: r.notes, createdAt: r.created_at,
   }));
 }
 
@@ -296,8 +289,7 @@ async function saveLeadsFromResults(userId, resultIds) {
     const saved = [];
     for (const rid of resultIds) {
       const { rows } = await client.query(
-        'SELECT * FROM search_results WHERE id=$1 AND user_id=$2',
-        [rid, userId]
+        'SELECT * FROM search_results WHERE id=$1 AND user_id=$2', [rid, userId]
       );
       if (!rows[0]) continue;
       const r = rows[0];
@@ -326,14 +318,6 @@ async function saveLeadsFromResults(userId, resultIds) {
 }
 
 module.exports = {
-  runAndPersist,
-  listSearches,
-  getSearchResults,
-  dashboardStats,
-  listSavedLeads,
-  saveLeadsFromResults,
-  acquireFreeSearchHold,
-  consumeFreeSearchHold,
-  releaseFreeSearchHold,
-  FREE_SEARCH_HOLD_MINUTES,
+  runAndPersist, listSearches, getSearchResults, dashboardStats,
+  listSavedLeads, saveLeadsFromResults, recoverAbandonedSearches, FREE_SEARCH_HOLD_MINUTES,
 };
