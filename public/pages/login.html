@@ -38,6 +38,17 @@
     </div>
   </div>
   <script>
+  (async function redirectIfAuthed() {
+    try {
+      const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data && data.user) {
+          window.location.replace('/');
+        }
+      }
+    } catch (_) {}
+  })();
   async function getCsrf() {
     const res = await fetch('/api/auth/csrf', { credentials: 'same-origin' });
     const data = await res.json();
