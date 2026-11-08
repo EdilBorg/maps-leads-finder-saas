@@ -1,13 +1,27 @@
 /**
  * Multi-tenant concurrency (Etapa 5) — deterministic lock tests with explicit outcomes.
  * Requires ALLOW_DB_TESTS=1 and a dedicated *_test database.
+ *
+ * Strategy: acquire tenant advisory locks (src/db/tenantLocks.js) BEFORE row locks,
+ * in a global deterministic order, matching docs/DOMAIN_MODEL.md and migration 007.
+ * Triggers still enforce integrity; 40P01 is a hard failure for these scenarios.
+ *
+ * Migration 005: owner/scope changes are rejected when dependents already exist.
  */
-try { require('dotenv').config(); } catch (_) {}
+
+try {
+  require('dotenv').config();
+} catch (_) {}
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const { shouldRunDbIntegration, assertSafeTestDatabase } = require('./helpers/testDbGuard');
 const { applyMigrationsOnce } = require('./helpers/applyMigrationsOnce');
+const {
+  lockSubscription,
+  lockSearch,
+  lockSearchResult,
+} = require('../src/db/tenantLocks');
 
 const hasDb = shouldRunDbIntegration();
 
@@ -34,6 +48,11 @@ async function waitUntilBlocked(observerPool, waitingPid, blockerPid, timeoutMs 
 function isIntegrityReject(err) {
   const code = err && (err.code || err.sqlState);
   return typeof code === 'string' && /^23/.test(code);
+}
+
+function isRejectOutcome(out) {
+  if (!out || out.ok) return false;
+  return isIntegrityReject(out) || /multi-tenant|must match|cannot change/i.test(out.message || '');
 }
 
 describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
@@ -99,23 +118,23 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
       const pid2 = (await c2.query('SELECT pg_backend_pid() AS p')).rows[0].p;
 
       await c1.query('BEGIN');
+      await lockSubscription(c1, sid);
       await c1.query(`SELECT id FROM subscriptions WHERE id = $1 FOR UPDATE`, [sid]);
 
       await c2.query('BEGIN');
-      const insertPromise = c2
-        .query(
-          `INSERT INTO payments (user_id, subscription_id, plan_id, amount_cents, status, idempotency_key)
-           VALUES ($1, $2, $3, 1, 'pending', $4) RETURNING id`,
-          [userA, sid, planId, `race-pay-${uuid()}`]
-        )
-        .then(
-          (res) => {
-            insertOutcome = { ok: true, id: res.rows[0].id };
-          },
-          (err) => {
-            insertOutcome = { ok: false, code: err.code, message: err.message };
-          }
-        );
+      const insertPromise = (async () => {
+        try {
+          await lockSubscription(c2, sid);
+          const res = await c2.query(
+            `INSERT INTO payments (user_id, subscription_id, plan_id, amount_cents, status, idempotency_key)
+             VALUES ($1, $2, $3, 1, 'pending', $4) RETURNING id`,
+            [userA, sid, planId, `race-pay-${uuid()}`]
+          );
+          insertOutcome = { ok: true, id: res.rows[0].id };
+        } catch (err) {
+          insertOutcome = { ok: false, code: err.code, message: err.message };
+        }
+      })();
 
       await waitUntilBlocked(pool, pid2, pid1);
 
@@ -140,23 +159,26 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
         await c2.query('ROLLBACK').catch(() => {});
       }
 
-      assert.equal(updateOutcome.ok, true, `subscription owner UPDATE must succeed: ${updateOutcome.message || ''}`);
+      assert.notEqual(updateOutcome?.code, '40P01', 'deadlock on subscription update');
+      assert.notEqual(insertOutcome?.code, '40P01', 'deadlock on payment insert');
+      assert.equal(
+        updateOutcome.ok,
+        true,
+        `subscription owner UPDATE must succeed with no dependents: ${updateOutcome.message || ''}`
+      );
       assert.equal(insertOutcome.ok, false, 'payment INSERT for old owner must be rejected');
       assert.ok(
-        isIntegrityReject(insertOutcome) || /multi-tenant|must match/i.test(insertOutcome.message || ''),
+        isRejectOutcome(insertOutcome),
         `expected integrity reject, got code=${insertOutcome.code} msg=${insertOutcome.message}`
       );
 
       const { rows: sub } = await pool.query(`SELECT user_id FROM subscriptions WHERE id = $1`, [sid]);
       assert.equal(sub[0].user_id, userB);
-      const { rows: pays } = await pool.query(`SELECT id FROM payments WHERE subscription_id = $1`, [sid]);
-      assert.equal(pays.length, 0);
-      const { rows: bad } = await pool.query(
-        `SELECT COUNT(*)::int AS n FROM payments p
-         JOIN subscriptions s ON s.id = p.subscription_id
-         WHERE p.user_id IS DISTINCT FROM s.user_id`
+      const { rows: pays } = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM payments WHERE subscription_id = $1 AND user_id = $2`,
+        [sid, userA]
       );
-      assert.equal(bad[0].n, 0);
+      assert.equal(pays[0].n, 0);
     } finally {
       try { await c1.query('ROLLBACK'); } catch (_) {}
       try { await c2.query('ROLLBACK'); } catch (_) {}
@@ -168,37 +190,42 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
   it('saved_lead INSERT vs search owner UPDATE: owner change wins, lead rejected', async () => {
     const sid = (
       await pool.query(
-        `INSERT INTO searches (user_id, query, status) VALUES ($1, 'race-s', 'completed') RETURNING id`,
+        `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
+         VALUES ($1, 'q', 'loc', '{}'::jsonb, 'completed', '[]'::jsonb, NOW(), NOW() + interval '30 days')
+         RETURNING id`,
         [userA]
       )
     ).rows[0].id;
 
     const c1 = await pool.connect();
     const c2 = await pool.connect();
-    let leadOutcome = null;
+    let insertOutcome = null;
     let updateOutcome = null;
     try {
       const pid1 = (await c1.query('SELECT pg_backend_pid() AS p')).rows[0].p;
       const pid2 = (await c2.query('SELECT pg_backend_pid() AS p')).rows[0].p;
 
       await c1.query('BEGIN');
+      await lockSearch(c1, sid);
       await c1.query(`SELECT id FROM searches WHERE id = $1 FOR UPDATE`, [sid]);
 
       await c2.query('BEGIN');
-      const leadPromise = c2
-        .query(
-          `INSERT INTO saved_leads (user_id, origin_search_id, name, snapshot)
-           VALUES ($1, $2, 'RaceLead', '{}'::jsonb) RETURNING id`,
-          [userA, sid]
-        )
-        .then(
-          (res) => {
-            leadOutcome = { ok: true, id: res.rows[0].id };
-          },
-          (err) => {
-            leadOutcome = { ok: false, code: err.code, message: err.message };
-          }
-        );
+      const insertPromise = (async () => {
+        try {
+          await lockSearch(c2, sid);
+          const res = await c2.query(
+            `INSERT INTO saved_leads (
+               user_id, origin_search_id, name, address, phone, email, website,
+               rating, reviews_count, category, lat, lng, source_provider, external_id, snapshot
+             ) VALUES ($1, $2, 'Lead', null, null, null, null, null, null, null, null, null, 't', 'x', '{}'::jsonb)
+             RETURNING id`,
+            [userA, sid]
+          );
+          insertOutcome = { ok: true, id: res.rows[0].id };
+        } catch (err) {
+          insertOutcome = { ok: false, code: err.code, message: err.message };
+        }
+      })();
 
       await waitUntilBlocked(pool, pid2, pid1);
 
@@ -211,33 +238,31 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
         updateOutcome = { ok: false, code: err.code, message: err.message };
       }
 
-      await leadPromise;
-      if (leadOutcome?.ok) {
+      await insertPromise;
+      if (insertOutcome?.ok) {
         try {
           await c2.query('COMMIT');
         } catch (err) {
-          leadOutcome = { ok: false, code: err.code, message: err.message };
+          insertOutcome = { ok: false, code: err.code, message: err.message };
           await c2.query('ROLLBACK').catch(() => {});
         }
       } else {
         await c2.query('ROLLBACK').catch(() => {});
       }
 
-      assert.equal(updateOutcome.ok, true, `search owner UPDATE must succeed: ${updateOutcome.message || ''}`);
-      assert.equal(leadOutcome.ok, false, 'saved_lead INSERT for old owner must be rejected');
-      assert.ok(
-        isIntegrityReject(leadOutcome) || /multi-tenant|must match/i.test(leadOutcome.message || ''),
-        `expected integrity reject, got code=${leadOutcome.code} msg=${leadOutcome.message}`
-      );
+      assert.notEqual(updateOutcome?.code, '40P01');
+      assert.notEqual(insertOutcome?.code, '40P01');
+      assert.equal(updateOutcome.ok, true, `search owner UPDATE: ${updateOutcome.message || ''}`);
+      assert.equal(insertOutcome.ok, false, 'saved_lead INSERT for old owner must be rejected');
+      assert.ok(isRejectOutcome(insertOutcome));
 
       const { rows: s } = await pool.query(`SELECT user_id FROM searches WHERE id = $1`, [sid]);
       assert.equal(s[0].user_id, userB);
-      const { rows: bad } = await pool.query(
-        `SELECT COUNT(*)::int AS n FROM saved_leads sl
-         JOIN searches se ON se.id = sl.origin_search_id
-         WHERE sl.user_id IS DISTINCT FROM se.user_id`
+      const { rows: leads } = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM saved_leads WHERE origin_search_id = $1 AND user_id = $2`,
+        [sid, userA]
       );
-      assert.equal(bad[0].n, 0);
+      assert.equal(leads[0].n, 0);
     } finally {
       try { await c1.query('ROLLBACK'); } catch (_) {}
       try { await c2.query('ROLLBACK'); } catch (_) {}
@@ -247,57 +272,61 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
   });
 
   it('is_duplicate_of INSERT vs target scope UPDATE: move wins, duplicate rejected', async () => {
-    const sid = (
+    const s1 = (
       await pool.query(
-        `INSERT INTO searches (user_id, query, status) VALUES ($1, 'dup-race', 'completed') RETURNING id`,
+        `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
+         VALUES ($1, 'q1', 'loc', '{}'::jsonb, 'completed', '[]'::jsonb, NOW(), NOW() + interval '30 days')
+         RETURNING id`,
+        [userA]
+      )
+    ).rows[0].id;
+    const s2 = (
+      await pool.query(
+        `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
+         VALUES ($1, 'q2', 'loc', '{}'::jsonb, 'completed', '[]'::jsonb, NOW(), NOW() + interval '30 days')
+         RETURNING id`,
         [userA]
       )
     ).rows[0].id;
     const tid = (
       await pool.query(
-        `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id)
-         VALUES ($1, $2, 'Target', 'demo', $3) RETURNING id`,
-        [sid, userA, `tgt-${uuid()}`]
-      )
-    ).rows[0].id;
-    const sid2 = (
-      await pool.query(
-        `INSERT INTO searches (user_id, query, status) VALUES ($1, 'dup-race-2', 'completed') RETURNING id`,
-        [userA]
+        `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id, raw_payload)
+         VALUES ($1, $2, 'Target', 't', 't1', '{}'::jsonb) RETURNING id`,
+        [s1, userA]
       )
     ).rows[0].id;
 
     const c1 = await pool.connect();
     const c2 = await pool.connect();
-    let dupOutcome = null;
+    let insertOutcome = null;
     let moveOutcome = null;
     try {
       const pid1 = (await c1.query('SELECT pg_backend_pid() AS p')).rows[0].p;
       const pid2 = (await c2.query('SELECT pg_backend_pid() AS p')).rows[0].p;
 
       await c1.query('BEGIN');
+      await lockSearchResult(c1, tid);
       await c1.query(`SELECT id FROM search_results WHERE id = $1 FOR UPDATE`, [tid]);
 
       await c2.query('BEGIN');
-      const dupPromise = c2
-        .query(
-          `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id, is_duplicate_of)
-           VALUES ($1, $2, 'DupRace', 'demo', $3, $4) RETURNING id`,
-          [sid, userA, `dup-${uuid()}`, tid]
-        )
-        .then(
-          (res) => {
-            dupOutcome = { ok: true, id: res.rows[0].id };
-          },
-          (err) => {
-            dupOutcome = { ok: false, code: err.code, message: err.message };
-          }
-        );
+      const insertPromise = (async () => {
+        try {
+          await lockSearchResult(c2, tid);
+          const res = await c2.query(
+            `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id, raw_payload, is_duplicate_of)
+             VALUES ($1, $2, 'Dup', 't', 'd1', '{}'::jsonb, $3) RETURNING id`,
+            [s1, userA, tid]
+          );
+          insertOutcome = { ok: true, id: res.rows[0].id };
+        } catch (err) {
+          insertOutcome = { ok: false, code: err.code, message: err.message };
+        }
+      })();
 
       await waitUntilBlocked(pool, pid2, pid1);
 
       try {
-        await c1.query(`UPDATE search_results SET search_id = $1 WHERE id = $2`, [sid2, tid]);
+        await c1.query(`UPDATE search_results SET search_id = $1 WHERE id = $2`, [s2, tid]);
         await c1.query('COMMIT');
         moveOutcome = { ok: true };
       } catch (err) {
@@ -305,33 +334,26 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
         moveOutcome = { ok: false, code: err.code, message: err.message };
       }
 
-      await dupPromise;
-      if (dupOutcome?.ok) {
+      await insertPromise;
+      if (insertOutcome?.ok) {
         try {
           await c2.query('COMMIT');
         } catch (err) {
-          dupOutcome = { ok: false, code: err.code, message: err.message };
+          insertOutcome = { ok: false, code: err.code, message: err.message };
           await c2.query('ROLLBACK').catch(() => {});
         }
       } else {
         await c2.query('ROLLBACK').catch(() => {});
       }
 
-      assert.equal(moveOutcome.ok, true, `target scope UPDATE must succeed: ${moveOutcome.message || ''}`);
-      assert.equal(dupOutcome.ok, false, 'duplicate INSERT must be rejected after target moved');
-      assert.ok(
-        isIntegrityReject(dupOutcome) || /multi-tenant|same search/i.test(dupOutcome.message || ''),
-        `expected integrity reject, got code=${dupOutcome.code} msg=${dupOutcome.message}`
-      );
+      assert.notEqual(moveOutcome?.code, '40P01');
+      assert.notEqual(insertOutcome?.code, '40P01');
+      assert.equal(moveOutcome.ok, true, `target move: ${moveOutcome.message || ''}`);
+      assert.equal(insertOutcome.ok, false, 'duplicate INSERT after target moved must fail');
+      assert.ok(isRejectOutcome(insertOutcome));
 
-      const { rows: bad } = await pool.query(
-        `SELECT COUNT(*)::int AS n
-         FROM search_results r
-         JOIN search_results d ON d.id = r.is_duplicate_of
-         WHERE r.is_duplicate_of IS NOT NULL
-           AND (r.search_id IS DISTINCT FROM d.search_id OR r.user_id IS DISTINCT FROM d.user_id)`
-      );
-      assert.equal(bad[0].n, 0);
+      const { rows: t } = await pool.query(`SELECT search_id FROM search_results WHERE id = $1`, [tid]);
+      assert.equal(t[0].search_id, s2);
     } finally {
       try { await c1.query('ROLLBACK'); } catch (_) {}
       try { await c2.query('ROLLBACK'); } catch (_) {}
@@ -364,19 +386,19 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
       const pid2 = (await c2.query('SELECT pg_backend_pid() AS p')).rows[0].p;
 
       await c1.query('BEGIN');
+      await lockSubscription(c1, sid);
       await c1.query(`SELECT id FROM subscriptions WHERE id = $1 FOR UPDATE`, [sid]);
 
       await c2.query('BEGIN');
-      const payPromise = c2
-        .query(`UPDATE payments SET user_id = $1 WHERE id = $2`, [userB, payId])
-        .then(
-          () => {
-            payUpd = { ok: true };
-          },
-          (err) => {
-            payUpd = { ok: false, code: err.code, message: err.message };
-          }
-        );
+      const payPromise = (async () => {
+        try {
+          await lockSubscription(c2, sid);
+          await c2.query(`UPDATE payments SET user_id = $1 WHERE id = $2`, [userB, payId]);
+          payUpd = { ok: true };
+        } catch (err) {
+          payUpd = { ok: false, code: err.code, message: err.message };
+        }
+      })();
 
       await waitUntilBlocked(pool, pid2, pid1, 10000);
 
@@ -401,25 +423,22 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
         await c2.query('ROLLBACK').catch(() => {});
       }
 
-      if (subUpd && subUpd.code === '40P01') {
-        assert.fail(`deadlock 40P01 on subscription update: ${subUpd.message}`);
-      }
-      if (payUpd && payUpd.code === '40P01') {
-        assert.fail(`deadlock 40P01 on payment update: ${payUpd.message}`);
-      }
+      assert.notEqual(subUpd?.code, '40P01', 'deadlock on subscription update');
+      assert.notEqual(payUpd?.code, '40P01', 'deadlock on payment update');
 
-      const { rows: bad } = await pool.query(
-        `SELECT COUNT(*)::int AS n FROM payments p
-         JOIN subscriptions s ON s.id = p.subscription_id
-         WHERE p.subscription_id IS NOT NULL AND p.user_id IS DISTINCT FROM s.user_id`
+      assert.equal(subUpd.ok, false, 'owner change must be rejected when payment exists');
+      assert.ok(isRejectOutcome(subUpd), `expected integrity reject on sub: ${subUpd.message}`);
+      assert.equal(payUpd.ok, false, 'payment user_id change must be rejected');
+      assert.ok(isRejectOutcome(payUpd), `expected integrity reject on pay: ${payUpd.message}`);
+
+      const { rows: joined } = await pool.query(
+        `SELECT p.user_id AS pu, s.user_id AS su
+         FROM payments p JOIN subscriptions s ON s.id = p.subscription_id
+         WHERE p.id = $1`,
+        [payId]
       );
-      assert.equal(bad[0].n, 0, 'cross-tenant payment/subscription after UPDATE race');
-      assert.ok(subUpd && payUpd, 'both outcomes recorded');
-      const { rows: pay } = await pool.query(`SELECT user_id, subscription_id FROM payments WHERE id = $1`, [payId]);
-      const { rows: sub } = await pool.query(`SELECT user_id FROM subscriptions WHERE id = $1`, [sid]);
-      if (pay[0].subscription_id) {
-        assert.equal(pay[0].user_id, sub[0].user_id);
-      }
+      assert.equal(joined[0].pu, joined[0].su);
+      assert.equal(joined[0].pu, userA);
     } finally {
       try { await c1.query('ROLLBACK'); } catch (_) {}
       try { await c2.query('ROLLBACK'); } catch (_) {}
@@ -431,20 +450,27 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
   it('saved_lead origin UPDATE vs search owner UPDATE preserves invariant', async () => {
     const s1 = (
       await pool.query(
-        `INSERT INTO searches (user_id, query, status) VALUES ($1, 's1', 'completed') RETURNING id`,
+        `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
+         VALUES ($1, 'q1', 'loc', '{}'::jsonb, 'completed', '[]'::jsonb, NOW(), NOW() + interval '30 days')
+         RETURNING id`,
         [userA]
       )
     ).rows[0].id;
     const s2 = (
       await pool.query(
-        `INSERT INTO searches (user_id, query, status) VALUES ($1, 's2', 'completed') RETURNING id`,
+        `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
+         VALUES ($1, 'q2', 'loc', '{}'::jsonb, 'completed', '[]'::jsonb, NOW(), NOW() + interval '30 days')
+         RETURNING id`,
         [userB]
       )
     ).rows[0].id;
     const leadId = (
       await pool.query(
-        `INSERT INTO saved_leads (user_id, origin_search_id, name, snapshot)
-         VALUES ($1, $2, 'L', '{}'::jsonb) RETURNING id`,
+        `INSERT INTO saved_leads (
+           user_id, origin_search_id, name, address, phone, email, website,
+           rating, reviews_count, category, lat, lng, source_provider, external_id, snapshot
+         ) VALUES ($1, $2, 'L', null, null, null, null, null, null, null, null, null, 't', 'e', '{}'::jsonb)
+         RETURNING id`,
         [userA, s1]
       )
     ).rows[0].id;
@@ -458,19 +484,19 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
       const pid2 = (await c2.query('SELECT pg_backend_pid() AS p')).rows[0].p;
 
       await c1.query('BEGIN');
+      await lockSearch(c1, s1);
       await c1.query(`SELECT id FROM searches WHERE id = $1 FOR UPDATE`, [s1]);
 
       await c2.query('BEGIN');
-      const leadPromise = c2
-        .query(`UPDATE saved_leads SET origin_search_id = $1 WHERE id = $2`, [s2, leadId])
-        .then(
-          () => {
-            leadUpd = { ok: true };
-          },
-          (err) => {
-            leadUpd = { ok: false, code: err.code, message: err.message };
-          }
-        );
+      const leadPromise = (async () => {
+        try {
+          await lockSearch(c2, s1);
+          await c2.query(`UPDATE saved_leads SET origin_search_id = $1 WHERE id = $2`, [s2, leadId]);
+          leadUpd = { ok: true };
+        } catch (err) {
+          leadUpd = { ok: false, code: err.code, message: err.message };
+        }
+      })();
 
       await waitUntilBlocked(pool, pid2, pid1, 10000);
 
@@ -495,17 +521,22 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
         await c2.query('ROLLBACK').catch(() => {});
       }
 
-      if (searchUpd?.code === '40P01' || leadUpd?.code === '40P01') {
-        assert.fail('unexpected deadlock 40P01');
-      }
+      assert.notEqual(searchUpd?.code, '40P01');
+      assert.notEqual(leadUpd?.code, '40P01');
 
-      const { rows: bad } = await pool.query(
-        `SELECT COUNT(*)::int AS n FROM saved_leads sl
-         JOIN searches se ON se.id = sl.origin_search_id
-         WHERE sl.origin_search_id IS NOT NULL AND sl.user_id IS DISTINCT FROM se.user_id`
+      assert.equal(searchUpd.ok, false, 'search owner change blocked by dependent lead');
+      assert.ok(isRejectOutcome(searchUpd));
+      assert.equal(leadUpd.ok, false, 'cross-tenant origin_search_id must be rejected');
+      assert.ok(isRejectOutcome(leadUpd));
+
+      const { rows: row } = await pool.query(
+        `SELECT l.user_id AS lu, s.user_id AS su
+         FROM saved_leads l JOIN searches s ON s.id = l.origin_search_id
+         WHERE l.id = $1`,
+        [leadId]
       );
-      assert.equal(bad[0].n, 0);
-      assert.equal(leadUpd.ok, false, 'cross-tenant origin_search_id UPDATE must be rejected');
+      assert.equal(row[0].lu, row[0].su);
+      assert.equal(row[0].lu, userA);
     } finally {
       try { await c1.query('ROLLBACK'); } catch (_) {}
       try { await c2.query('ROLLBACK'); } catch (_) {}
@@ -515,30 +546,34 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
   });
 
   it('is_duplicate_of UPDATE vs target scope UPDATE preserves invariant', async () => {
-    const sid = (
+    const s1 = (
       await pool.query(
-        `INSERT INTO searches (user_id, query, status) VALUES ($1, 'd1', 'completed') RETURNING id`,
+        `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
+         VALUES ($1, 'q1', 'loc', '{}'::jsonb, 'completed', '[]'::jsonb, NOW(), NOW() + interval '30 days')
+         RETURNING id`,
         [userA]
       )
     ).rows[0].id;
-    const sid2 = (
+    const s2 = (
       await pool.query(
-        `INSERT INTO searches (user_id, query, status) VALUES ($1, 'd2', 'completed') RETURNING id`,
+        `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
+         VALUES ($1, 'q2', 'loc', '{}'::jsonb, 'completed', '[]'::jsonb, NOW(), NOW() + interval '30 days')
+         RETURNING id`,
         [userA]
       )
     ).rows[0].id;
     const t1 = (
       await pool.query(
-        `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id)
-         VALUES ($1, $2, 'T1', 'demo', $3) RETURNING id`,
-        [sid, userA, `t1-${uuid()}`]
+        `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id, raw_payload)
+         VALUES ($1, $2, 'T1', 't', 't1', '{}'::jsonb) RETURNING id`,
+        [s1, userA]
       )
     ).rows[0].id;
-    const t2 = (
+    const d1 = (
       await pool.query(
-        `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id)
-         VALUES ($1, $2, 'T2', 'demo', $3) RETURNING id`,
-        [sid, userA, `t2-${uuid()}`]
+        `INSERT INTO search_results (search_id, user_id, name, source_provider, external_id, raw_payload, is_duplicate_of)
+         VALUES ($1, $2, 'D1', 't', 'd1', '{}'::jsonb, $3) RETURNING id`,
+        [s1, userA, t1]
       )
     ).rows[0].id;
 
@@ -551,24 +586,24 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
       const pid2 = (await c2.query('SELECT pg_backend_pid() AS p')).rows[0].p;
 
       await c1.query('BEGIN');
+      await lockSearchResult(c1, t1);
       await c1.query(`SELECT id FROM search_results WHERE id = $1 FOR UPDATE`, [t1]);
 
       await c2.query('BEGIN');
-      const dupPromise = c2
-        .query(`UPDATE search_results SET is_duplicate_of = $1 WHERE id = $2`, [t1, t2])
-        .then(
-          () => {
-            dupOut = { ok: true };
-          },
-          (err) => {
-            dupOut = { ok: false, code: err.code, message: err.message };
-          }
-        );
+      const dupPromise = (async () => {
+        try {
+          await lockSearchResult(c2, t1);
+          await c2.query(`UPDATE search_results SET is_duplicate_of = $1 WHERE id = $2`, [t1, d1]);
+          dupOut = { ok: true };
+        } catch (err) {
+          dupOut = { ok: false, code: err.code, message: err.message };
+        }
+      })();
 
       await waitUntilBlocked(pool, pid2, pid1, 10000);
 
       try {
-        await c1.query(`UPDATE search_results SET search_id = $1 WHERE id = $2`, [sid2, t1]);
+        await c1.query(`UPDATE search_results SET search_id = $1 WHERE id = $2`, [s2, t1]);
         await c1.query('COMMIT');
         moveOut = { ok: true };
       } catch (err) {
@@ -588,9 +623,11 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
         await c2.query('ROLLBACK').catch(() => {});
       }
 
-      if (moveOut?.code === '40P01' || dupOut?.code === '40P01') {
-        assert.fail('unexpected deadlock 40P01');
-      }
+      assert.notEqual(moveOut?.code, '40P01');
+      assert.notEqual(dupOut?.code, '40P01');
+
+      assert.equal(moveOut.ok, false, 'target scope change blocked while duplicates reference it');
+      assert.ok(isRejectOutcome(moveOut));
 
       const { rows: bad } = await pool.query(
         `SELECT COUNT(*)::int AS n
@@ -600,9 +637,9 @@ describe('domain concurrency multi-tenant', { skip: !hasDb }, () => {
            AND (r.search_id IS DISTINCT FROM d.search_id OR r.user_id IS DISTINCT FROM d.user_id)`
       );
       assert.equal(bad[0].n, 0);
-      if (moveOut.ok) {
-        assert.equal(dupOut.ok, false, 'is_duplicate_of to moved target must be rejected');
-      }
+
+      const { rows: t } = await pool.query(`SELECT search_id FROM search_results WHERE id = $1`, [t1]);
+      assert.equal(t[0].search_id, s1);
     } finally {
       try { await c1.query('ROLLBACK'); } catch (_) {}
       try { await c2.query('ROLLBACK'); } catch (_) {}
