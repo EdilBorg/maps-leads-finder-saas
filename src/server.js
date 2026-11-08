@@ -1,18 +1,19 @@
 /**
  * Maps Leads Finder SaaS — Server entry point
- *
- * Starts the HTTP server only when this file is executed directly
- * (node src/server.js / npm start / npm run dev).
- * Tests import createApp from ./app.js and never trigger listen here.
  */
 
 const { createApp, config } = require('./app');
 const { closePool } = require('./db/pool');
-const { startAbandonedSearchRecovery } = require('./services/abandonedSearchRecovery');
+const {
+  startAbandonedSearchRecovery,
+  stopAbandonedSearchRecovery,
+  waitForIdle,
+} = require('./services/abandonedSearchRecovery');
 
 const app = createApp();
 
 let server = null;
+let shuttingDown = false;
 
 function start() {
   server = app.listen(config.port, () => {
@@ -24,32 +25,49 @@ function start() {
 }
 
 async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`[server] Received ${signal}, shutting down...`);
-  if (!server) {
-    process.exit(0);
-    return;
+
+  try {
+    stopAbandonedSearchRecovery();
+  } catch (err) {
+    console.error('[server] Error stopping recovery job', err && err.message);
   }
-  server.close(async () => {
+
+  const forceTimer = setTimeout(() => {
+    console.error('[server] Forced shutdown');
+    process.exit(1);
+  }, 10000);
+  if (typeof forceTimer.unref === 'function') forceTimer.unref();
+
+  const finish = async () => {
+    try {
+      await waitForIdle(7000);
+    } catch (_) {}
     try {
       await closePool();
     } catch (err) {
       console.error('[server] Error closing database pool', err);
     }
     process.exit(0);
-  });
+  };
 
-  setTimeout(() => {
-    console.error('[server] Forced shutdown');
-    process.exit(1);
-  }, 10000).unref();
+  if (!server) {
+    await finish();
+    return;
+  }
+
+  server.close(() => {
+    finish();
+  });
 }
 
-// Only bind to a port when executed as the main module
 if (require.main === module) {
   start();
   startAbandonedSearchRecovery();
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => { shutdown('SIGTERM'); });
+  process.on('SIGINT', () => { shutdown('SIGINT'); });
 }
 
 module.exports = { app, start, shutdown };
