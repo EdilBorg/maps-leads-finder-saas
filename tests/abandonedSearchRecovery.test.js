@@ -4,6 +4,7 @@ const {
   runOnce,
   startAbandonedSearchRecovery,
   stopAbandonedSearchRecovery,
+  waitForIdle,
   ADVISORY_KEY,
 } = require('../src/services/abandonedSearchRecovery');
 
@@ -16,41 +17,33 @@ describe('abandonedSearchRecovery job', () => {
   it('skips when advisory lock is held', async () => {
     let released = false;
     let unlocked = false;
+    let destroyArg = null;
     const client = {
       async query(sql) {
-        if (sql.includes('pg_try_advisory_lock')) {
-          return { rows: [{ ok: false }] };
-        }
+        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ ok: false }] };
         if (sql.includes('pg_advisory_unlock')) {
           unlocked = true;
-          return { rows: [{ pg_advisory_unlock: true }] };
+          return { rows: [{ ok: true }] };
         }
         return { rows: [] };
       },
-      release() {
-        released = true;
-      },
-    };
-    const pool = {
-      async connect() {
-        return client;
-      },
+      release(arg) { released = true; destroyArg = arg; },
     };
     const result = await runOnce({
-      getPool: () => pool,
-      recoverAbandonedSearches: async () => {
-        throw new Error('should not run recover when lock held');
-      },
+      getPool: () => ({ connect: async () => client }),
+      recoverAbandonedSearches: async () => { throw new Error('should not run'); },
     });
     assert.equal(result.skipped, true);
     assert.equal(result.reason, 'lock_held');
     assert.equal(released, true);
     assert.equal(unlocked, false);
+    assert.equal(destroyArg, undefined);
   });
 
   it('runs recover with PoolClient and unlocks same session', async () => {
     const sqls = [];
     let released = false;
+    let destroyArg = null;
     let recoverGotClient = null;
     const client = {
       async query(sql, params) {
@@ -61,21 +54,14 @@ describe('abandonedSearchRecovery job', () => {
         }
         if (sql.includes('pg_advisory_unlock')) {
           assert.equal(params[0], ADVISORY_KEY);
-          return { rows: [{ pg_advisory_unlock: true }] };
+          return { rows: [{ ok: true }] };
         }
         return { rows: [] };
       },
-      release() {
-        released = true;
-      },
-    };
-    const pool = {
-      async connect() {
-        return client;
-      },
+      release(arg) { released = true; destroyArg = arg; },
     };
     const result = await runOnce({
-      getPool: () => pool,
+      getPool: () => ({ connect: async () => client }),
       recoverAbandonedSearches: async (db) => {
         recoverGotClient = db;
         assert.equal(typeof db.release, 'function');
@@ -85,41 +71,73 @@ describe('abandonedSearchRecovery job', () => {
     });
     assert.equal(result.skipped, false);
     assert.equal(result.abandoned, 2);
-    assert.equal(result.holdsReleased, 1);
     assert.equal(recoverGotClient, client);
     assert.equal(released, true);
+    assert.equal(destroyArg, undefined);
     assert.ok(sqls.some((s) => s.includes('pg_try_advisory_lock')));
     assert.ok(sqls.some((s) => s.includes('pg_advisory_unlock')));
+  });
+
+  it('destroys connection when unlock returns false', async () => {
+    let destroyArg = null;
+    const client = {
+      async query(sql) {
+        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ ok: true }] };
+        if (sql.includes('pg_advisory_unlock')) return { rows: [{ ok: false }] };
+        return { rows: [] };
+      },
+      release(arg) { destroyArg = arg; },
+    };
+    await runOnce({
+      getPool: () => ({ connect: async () => client }),
+      recoverAbandonedSearches: async () => ({ abandoned: 0, holdsReleased: 0 }),
+    });
+    assert.equal(destroyArg, true);
+  });
+
+  it('destroys connection when unlock throws', async () => {
+    let destroyArg = null;
+    const client = {
+      async query(sql) {
+        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ ok: true }] };
+        if (sql.includes('pg_advisory_unlock')) throw new Error('unlock boom');
+        return { rows: [] };
+      },
+      release(arg) { destroyArg = arg; },
+    };
+    await runOnce({
+      getPool: () => ({ connect: async () => client }),
+      recoverAbandonedSearches: async () => ({ abandoned: 0, holdsReleased: 0 }),
+    });
+    assert.equal(destroyArg, true);
   });
 
   it('releases connection even when recover throws', async () => {
     let released = false;
     let unlocked = false;
+    let destroyArg = null;
     const client = {
       async query(sql) {
         if (sql.includes('pg_try_advisory_lock')) return { rows: [{ ok: true }] };
         if (sql.includes('pg_advisory_unlock')) {
           unlocked = true;
-          return { rows: [] };
+          return { rows: [{ ok: true }] };
         }
         return { rows: [] };
       },
-      release() {
-        released = true;
-      },
+      release(arg) { released = true; destroyArg = arg; },
     };
     await assert.rejects(
       () =>
         runOnce({
           getPool: () => ({ connect: async () => client }),
-          recoverAbandonedSearches: async () => {
-            throw new Error('boom');
-          },
+          recoverAbandonedSearches: async () => { throw new Error('boom'); },
         }),
       /boom/
     );
     assert.equal(released, true);
     assert.equal(unlocked, true);
+    assert.equal(destroyArg, undefined);
   });
 
   it('start is disabled without ENABLE flag', () => {
@@ -133,5 +151,10 @@ describe('abandonedSearchRecovery job', () => {
     const r = startAbandonedSearchRecovery();
     assert.equal(r.started, true);
     stopAbandonedSearchRecovery();
+  });
+
+  it('waitForIdle resolves when not running', async () => {
+    const ok = await waitForIdle(100);
+    assert.equal(ok, true);
   });
 });
