@@ -313,7 +313,7 @@ button { cursor: pointer; border: none; background: none; }
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: var(--spacing-12);
 }
 .stat-card {
@@ -563,6 +563,52 @@ table.data td.cell-wrap {
   .brand-text p { display: none; }
 }
 
-@media (min-width: 1441px) {
+@media (min-width: 1200px) {
+  /* Dashboard — balanced desktop composition */
+  #view-dashboard .stat-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--spacing-16);
+  }
+  #view-dashboard .stat-card {
+    padding: var(--spacing-20) var(--spacing-24);
+    min-width: 0;
+  }
+  #view-dashboard .stat-value {
+    font-size: 26px;
+  }
+  #view-dashboard .page-sub {
+    margin-bottom: var(--spacing-28, 28px);
+  }
+  #view-dashboard > .card {
+    margin-top: var(--spacing-32);
+    padding: var(--spacing-24);
+  }
+  #view-dashboard > .card .card-header {
+    margin-bottom: var(--spacing-20);
+  }
+  #view-dashboard .table-wrap-dashboard {
+    margin: 0;
+  }
+}
+
+@media (min-width: 1440px) {
   .content { padding: var(--spacing-32) var(--spacing-24); }
+  #view-dashboard .stat-grid {
+    gap: var(--spacing-20);
+  }
+  #view-dashboard .stat-value {
+    font-size: 28px;
+  }
+  #view-dashboard > .card {
+    margin-top: var(--spacing-32);
+  }
+}
+
+@media (min-width: 1920px) {
+  #view-dashboard .stat-grid {
+    gap: var(--spacing-24);
+  }
+  #view-dashboard .stat-card {
+    padding: var(--spacing-24) var(--spacing-28, 28px);
+  }
 }
