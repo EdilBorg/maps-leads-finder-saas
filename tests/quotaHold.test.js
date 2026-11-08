@@ -5,6 +5,7 @@ const {
   consumeFreeSearchHold,
   releaseFreeSearchHold,
   renewFreeSearchHold,
+  recoverAbandonedSearches,
 } = require('../src/services/freeSearchHold');
 
 function createMockClient(userState) {
@@ -54,8 +55,7 @@ function createMockClient(userState) {
 describe('free search hold (service logic)', () => {
   it('A: first acquire succeeds', async () => {
     const user = { id: 'u1', free_search_used: false, free_search_hold_token: null, free_search_hold_until: null };
-    const r = await acquireFreeSearchHold(createMockClient(user), 'u1');
-    assert.equal(r.allowed, true);
+    assert.equal((await acquireFreeSearchHold(createMockClient(user), 'u1')).allowed, true);
   });
   it('E: concurrent second acquire fails while hold active', async () => {
     const user = { id: 'u1', free_search_used: false, free_search_hold_token: null, free_search_hold_until: null };
@@ -106,5 +106,26 @@ describe('free search hold (service logic)', () => {
     const b = await acquireFreeSearchHold(createMockClient(u2), 'u2');
     assert.equal(a.allowed && b.allowed, true);
     assert.notEqual(a.holdToken, b.holdToken);
+  });
+});
+
+describe('recoverAbandonedSearches (mock SQL contract)', () => {
+  it('does not mark search failed when lease is still valid and bound', async () => {
+    const client = {
+      async query(sql) {
+        const s = sql.replace(/\s+/g, ' ');
+        if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (s.includes('UPDATE searches AS s') || s.includes('UPDATE searches as s')) {
+          assert.ok(s.includes('free_search_hold_until > NOW()') || s.includes('free_search_hold_until > now()'));
+          assert.ok(s.includes('NOT (') || s.includes('not ('));
+          return { rows: [], rowCount: 0 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    };
+    const r = await recoverAbandonedSearches({ query: client.query.bind(client) });
+    assert.equal(r.abandoned, 0);
   });
 });
