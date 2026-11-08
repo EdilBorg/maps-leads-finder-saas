@@ -121,6 +121,7 @@ button { cursor: pointer; border: none; background: none; }
 }
 .nav-item:hover { background: rgba(255,255,255,0.03); color: var(--color-mist); }
 .nav-item.active { background: rgba(228,242,34,0.08); color: var(--color-acid-lime); }
+.nav-item.svg { width: 16px; height: 16px; flex-shrink: 0; opacity: 0.85; }
 .nav-item svg { width: 16px; height: 16px; flex-shrink: 0; opacity: 0.85; }
 
 .sidebar-footer {
@@ -313,7 +314,7 @@ button { cursor: pointer; border: none; background: none; }
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: var(--spacing-12);
 }
 .stat-card {
