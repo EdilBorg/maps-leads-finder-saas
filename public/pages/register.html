@@ -13,8 +13,7 @@
       <div class="auth-brand">Maps Leads Finder</div>
       <h1>Criar conta</h1>
       <p class="sub">Registo gratuito · verificação de email obrigatória</p>
-      <div class="error-box" id="err"></div>
-      <div class="success-box" id="ok"></div>
+      <div class="error-box" id="err" role="alert"></div>
       <form id="form">
         <div class="form-group">
           <label class="form-label" for="name">Nome</label>
@@ -35,7 +34,7 @@
         <button type="submit" class="btn btn-primary btn-block" id="btn">Registar</button>
       </form>
       <div class="links">
-        <a href="/pages/login.html">Já tem conta? Entrar</a> · <a href="/">Voltar</a>
+        <a href="/pages/login.html">Já tem conta? Entrar</a>
       </div>
     </div>
   </div>
@@ -62,14 +61,13 @@
   document.getElementById('form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const err = document.getElementById('err');
-    const ok = document.getElementById('ok');
     err.classList.remove('visible');
-    ok.classList.remove('visible');
     const btn = document.getElementById('btn');
     btn.disabled = true;
+    const email = document.getElementById('email').value.trim();
     const { res, data } = await postJson('/api/auth/register', {
       name: document.getElementById('name').value,
-      email: document.getElementById('email').value,
+      email,
       password: document.getElementById('password').value,
       passwordConfirm: document.getElementById('passwordConfirm').value,
     });
@@ -79,9 +77,11 @@
       err.classList.add('visible');
       return;
     }
-    ok.textContent = data.message || 'Conta criada. Verifique o seu email.';
-    ok.classList.add('visible');
-    document.getElementById('form').reset();
+    try {
+      sessionStorage.setItem('mlf_pending_email', email);
+    } catch (_) {}
+    const q = encodeURIComponent(email);
+    window.location.href = '/pages/check-email.html?email=' + q;
   });
   </script>
 </body>
