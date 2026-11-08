@@ -9,11 +9,12 @@ const {
   stopAbandonedSearchRecovery,
   waitForIdle,
 } = require('./services/abandonedSearchRecovery');
+const { performShutdown } = require('./services/shutdownManager');
 
 const app = createApp();
 
 let server = null;
-let shuttingDown = false;
+const shutdownState = { shuttingDown: false };
 
 function start() {
   server = app.listen(config.port, () => {
@@ -24,43 +25,56 @@ function start() {
   return server;
 }
 
-async function shutdown(signal) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`[server] Received ${signal}, shutting down...`);
+async function shutdown(signal, deps = {}) {
+  const forceMs = deps.forceTimeoutMs != null ? deps.forceTimeoutMs : 10000;
+  const exitFn = deps.exit;
 
-  try {
-    stopAbandonedSearchRecovery();
-  } catch (err) {
-    console.error('[server] Error stopping recovery job', err && err.message);
+  let forceTimer = null;
+  const armForce = require.main === module || typeof exitFn === 'function';
+  if (armForce && !shutdownState.shuttingDown) {
+    forceTimer = setTimeout(() => {
+      (deps.error || console.error)('[server] Forced shutdown');
+      if (exitFn) exitFn(1);
+      else process.exit(1);
+    }, forceMs);
+    if (typeof forceTimer.unref === 'function') forceTimer.unref();
   }
 
-  const forceTimer = setTimeout(() => {
-    console.error('[server] Forced shutdown');
-    process.exit(1);
-  }, 10000);
-  if (typeof forceTimer.unref === 'function') forceTimer.unref();
+  const run = async () => {
+    const result = await performShutdown({
+      state: shutdownState,
+      signal,
+      stopAbandonedSearchRecovery: deps.stopAbandonedSearchRecovery || stopAbandonedSearchRecovery,
+      waitForIdle: deps.waitForIdle || waitForIdle,
+      closePool: deps.closePool || closePool,
+      idleTimeoutMs: deps.idleTimeoutMs != null ? deps.idleTimeoutMs : 7000,
+      log: deps.log || console.log,
+      error: deps.error || console.error,
+    });
 
-  const finish = async () => {
-    try {
-      await waitForIdle(7000);
-    } catch (_) {}
-    try {
-      await closePool();
-    } catch (err) {
-      console.error('[server] Error closing database pool', err);
+    if (result.alreadyShuttingDown) return result;
+
+    if (result.poolClosed) {
+      if (forceTimer) clearTimeout(forceTimer);
+      if (exitFn) exitFn(0);
+      else if (require.main === module) process.exit(0);
     }
-    process.exit(0);
+    return result;
   };
 
-  if (!server) {
-    await finish();
-    return;
+  if (!server || deps.skipServerClose) {
+    return run();
   }
 
-  server.close(() => {
-    finish();
+  return new Promise((resolve) => {
+    server.close(() => {
+      run().then(resolve);
+    });
   });
+}
+
+function _resetShutdownStateForTests() {
+  shutdownState.shuttingDown = false;
 }
 
 if (require.main === module) {
@@ -70,4 +84,4 @@ if (require.main === module) {
   process.on('SIGINT', () => { shutdown('SIGINT'); });
 }
 
-module.exports = { app, start, shutdown };
+module.exports = { app, start, shutdown, _resetShutdownStateForTests };

@@ -18,6 +18,7 @@ const INTERVAL_MS =
   parseInt(process.env.ABANDONED_SEARCH_RECOVERY_INTERVAL_MS || '300000', 10) || 300000;
 
 let timer = null;
+let startupTimeout = null;
 let running = false;
 let stopRequested = false;
 
@@ -39,7 +40,6 @@ function safeRelease(client, destroy) {
 }
 
 async function runOnce(deps = {}) {
-  // Manual runOnce always executes; stopRequested only gates the scheduler tick().
   const getPoolFn = deps.getPool || defaultGetPool;
   const recoverFn = deps.recoverAbandonedSearches || recoverAbandonedSearches;
   const startedAt = Date.now();
@@ -109,11 +109,17 @@ function startAbandonedSearchRecovery() {
     return { started: false, reason: 'disabled' };
   }
   if (timer) return { started: true, reason: 'already_running' };
+
   stopRequested = false;
   timer = setInterval(() => { tick(); }, INTERVAL_MS);
   if (typeof timer.unref === 'function') timer.unref();
-  const t = setTimeout(() => { tick(); }, 15000);
-  if (typeof t.unref === 'function') t.unref();
+
+  startupTimeout = setTimeout(() => {
+    startupTimeout = null;
+    tick();
+  }, 15000);
+  if (typeof startupTimeout.unref === 'function') startupTimeout.unref();
+
   log('info', 'scheduler_started', { intervalMs: INTERVAL_MS });
   return { started: true, intervalMs: INTERVAL_MS };
 }
@@ -123,6 +129,10 @@ function stopAbandonedSearchRecovery() {
   if (timer) {
     clearInterval(timer);
     timer = null;
+  }
+  if (startupTimeout) {
+    clearTimeout(startupTimeout);
+    startupTimeout = null;
   }
   log('info', 'scheduler_stopped');
 }
@@ -135,6 +145,10 @@ async function waitForIdle(timeoutMs = 8000) {
   return !running;
 }
 
+function _setRunningForTests(value) {
+  running = Boolean(value);
+}
+
 function isRunning() {
   return running;
 }
@@ -145,6 +159,7 @@ module.exports = {
   stopAbandonedSearchRecovery,
   waitForIdle,
   isRunning,
+  _setRunningForTests,
   ADVISORY_KEY,
   INTERVAL_MS,
 };
