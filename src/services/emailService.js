@@ -7,8 +7,8 @@
  *   MAIL_FROM       — verified sender address in Brevo (required in production)
  *   MAIL_FROM_NAME  — display name (default: Maps Leads Finder)
  *
- * Security: never log recipients, message bodies, verification/reset links,
- * tokens, or API keys.
+ * Security: never log recipients, subjects, message bodies, verification/reset
+ * links, tokens, API keys, or arbitrary error properties.
  */
 
 const { config } = require('../config/env');
@@ -66,6 +66,14 @@ function safeBrevoErrorMeta(errBody) {
 }
 
 /**
+ * Classify fetch failures into fixed operational categories only.
+ * Does not log err.message, err.stack, or arbitrary err.name values.
+ */
+function isTimeoutError(err) {
+  return Boolean(err && (err.name === 'TimeoutError' || err.name === 'AbortError'));
+}
+
+/**
  * @param {{ to: string, subject: string, text?: string, html?: string }}
  * @returns {Promise<{ sent: boolean, mode: string, messageId?: string }>
  */
@@ -82,9 +90,8 @@ async function sendMail({ to, subject, text, html }) {
       console.error('[email] BREVO_API_KEY is not configured; message not sent');
       throw new Error('Email service is not configured');
     }
-    // Dev simulation: no recipient, body, links, or tokens in logs.
+    // Dev simulation: operational flag only — no subject, recipient, body, or tokens.
     console.info('[email:dev] Email not sent: BREVO_API_KEY absent', {
-      subject: String(subject),
       mode: 'log',
     });
     return { sent: false, mode: 'log' };
@@ -98,7 +105,6 @@ async function sendMail({ to, subject, text, html }) {
     }
     console.warn(`[email] ${msg}; falling back to log mode`);
     console.info('[email:dev] Email not sent: MAIL_FROM missing or invalid', {
-      subject: String(subject),
       mode: 'log',
     });
     return { sent: false, mode: 'log' };
@@ -126,13 +132,13 @@ async function sendMail({ to, subject, text, html }) {
     });
   } catch (err) {
     // Network / timeout — do not retry (request may already have been accepted).
-    const isTimeout =
-      err && (err.name === 'TimeoutError' || err.name === 'AbortError');
-    console.error(
-      `[email] Brevo request ${isTimeout ? 'timed out' : 'failed'}:`,
-      err && err.name ? err.name : 'Error'
-    );
-    throw new Error(isTimeout ? 'Email provider timeout' : 'Email provider request failed');
+    // Log only a fixed category string; never err.name, err.message, or stack.
+    if (isTimeoutError(err)) {
+      console.error('[email] Brevo request timed out');
+      throw new Error('Email provider timeout');
+    }
+    console.error('[email] Brevo request failed');
+    throw new Error('Email provider request failed');
   }
 
   if (!response.ok) {
