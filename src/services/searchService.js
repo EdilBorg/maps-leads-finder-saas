@@ -1,10 +1,11 @@
 /**
  * Persist searches / results / leads with multi-tenant isolation.
  * Free-search: atomic hold + validated consume in the same TX as result inserts.
- *
- * GLOBAL LOCK ORDER: users → searches (matches recoverAbandonedSearches).
+ * GLOBAL LOCK ORDER: users → searches.
  */
-const { getPool } = require('../db/pool');
+function getPool() {
+  return require('../db/pool').getPool();
+}
 const {
   executeSearch,
   publicLead,
@@ -33,17 +34,55 @@ function mapPublicRow(r, i) {
   }, i);
 }
 
-function startHoldRenewal(userId, holdToken) {
+/**
+ * Periodically renew the free-search hold while providers run.
+ * Never swallows errors; never logs the hold token; temporary DB failures do not free/consume.
+ */
+function startHoldRenewal(userId, holdToken, opts = {}) {
   let stopped = false;
+  let inFlight = false;
+  const searchId = opts.searchId || null;
+  const getPoolFn = opts.getPool || getPool;
+  const renewFn = opts.renewFn || renewFreeSearchHold;
+  const logFn = opts.log || ((msg, extra) => {
+    console.error(`[hold-renewal] ${msg}`, extra ? JSON.stringify(extra) : '');
+  });
+  const intervalMs = opts.intervalMs != null ? opts.intervalMs : FREE_SEARCH_RENEW_INTERVAL_MS;
+
   const timer = setInterval(() => {
-    if (stopped || !holdToken) return;
-    getPool().connect().then(async (client) => {
-      try {
-        const r = await renewFreeSearchHold(client, userId, holdToken);
-        if (!r.renewed) { stopped = true; clearInterval(timer); }
-      } finally { client.release(); }
-    }).catch(() => {});
-  }, FREE_SEARCH_RENEW_INTERVAL_MS);
+    if (stopped || !holdToken || inFlight) return;
+    inFlight = true;
+    getPoolFn()
+      .connect()
+      .then(async (client) => {
+        try {
+          if (stopped) return;
+          const r = await renewFn(client, userId, holdToken);
+          if (!r || !r.renewed) {
+            stopped = true;
+            clearInterval(timer);
+            logFn('not_renewable', { userId, searchId });
+          }
+        } catch (err) {
+          logFn('renew_error', {
+            userId,
+            searchId,
+            message: err && err.message ? err.message : String(err),
+          });
+        } finally {
+          try { client.release(); } catch (_) {}
+          inFlight = false;
+        }
+      })
+      .catch((err) => {
+        inFlight = false;
+        logFn('connect_error', {
+          userId,
+          searchId,
+          message: err && err.message ? err.message : String(err),
+        });
+      });
+  }, intervalMs);
   if (typeof timer.unref === 'function') timer.unref();
   return () => { stopped = true; clearInterval(timer); };
 }
@@ -62,7 +101,6 @@ async function runAndPersist(opts) {
   let holdToken = null;
   let stopRenewal = null;
 
-  // Phase 1: acquire hold + create search + bind (same TX)
   {
     const client = await pool.connect();
     try {
@@ -118,8 +156,7 @@ async function runAndPersist(opts) {
     client.release();
   }
 
-  // Phase 2: external providers (no long-lived DB TX)
-  stopRenewal = startHoldRenewal(opts.userId, holdToken);
+  stopRenewal = startHoldRenewal(opts.userId, holdToken, { searchId });
   let engineResult;
   try {
     engineResult = await executeSearch({
@@ -131,7 +168,6 @@ async function runAndPersist(opts) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      // Global lock order: users → searches
       await lockUserForUpdate(client, opts.userId);
       await client.query(
         `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2 WHERE id=$1 AND user_id=$3`,
@@ -148,12 +184,10 @@ async function runAndPersist(opts) {
     if (stopRenewal) stopRenewal();
   }
 
-  // Phase 3: persist + consume/release in ONE TX; lock users first
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await lockUserForUpdate(client, opts.userId);
-
     await client.query(
       `UPDATE searches SET
          status=$2, providers_used=$3::jsonb,
@@ -335,6 +369,7 @@ async function saveLeadsFromResults(userId, resultIds) {
 }
 
 module.exports = {
+  startHoldRenewal,
   runAndPersist, listSearches, getSearchResults, dashboardStats,
   listSavedLeads, saveLeadsFromResults, recoverAbandonedSearches, FREE_SEARCH_HOLD_MINUTES,
 };
