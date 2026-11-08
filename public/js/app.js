@@ -5,7 +5,7 @@
   const $ = (s, r) => (r || document).querySelector(s);
   const $all = (s, r) => Array.from((r || document).querySelectorAll(s));
   function esc(s) { return s == null ? '' : String(s); }
-  function maskEmail(Email(email) {
+  function maskEmail(email) {
     const value = String(email == null ? '' : email).trim();
     const at = value.indexOf('@');
     if (at <= 0 || at === value.length - 1) return '—';
