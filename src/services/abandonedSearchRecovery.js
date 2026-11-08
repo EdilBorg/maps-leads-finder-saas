@@ -1,36 +1,99 @@
 /**
  * Periodic recovery of abandoned running searches.
- * pg_try_advisory_lock so multiple Render instances do not race.
- * Enable: ENABLE_ABANDONED_SEARCH_RECOVERY=1
+ *
+ * - pg_try_advisory_lock on the SAME session that runs recovery and unlock
+ * - In-process guard prevents overlapping ticks on one instance
+ * - Structured logs without secrets/tokens
+ * - Enable: ENABLE_ABANDONED_SEARCH_RECOVERY=1
  */
-const { getPool } = require('../db/pool');
+
 const {
   recoverAbandonedSearches,
   FREE_SEARCH_HOLD_MINUTES,
 } = require('./freeSearchHold');
+
+function defaultGetPool() {
+  return require('../db/pool').getPool();
+}
 
 const ADVISORY_KEY = 87003145;
 const INTERVAL_MS =
   parseInt(process.env.ABANDONED_SEARCH_RECOVERY_INTERVAL_MS || '300000', 10) || 300000;
 
 let timer = null;
+let running = false;
 
-async function runOnce() {
-  const pool = getPool();
+function log(level, msg, extra) {
+  const payload = extra ? ` ${JSON.stringify(extra)}` : '';
+  const line = `[abandoned-recovery] ${msg}${payload}`;
+  if (level === 'error') console.error(line);
+  else console.log(line);
+}
+
+async function runOnce(deps = {}) {
+  const getPoolFn = deps.getPool || defaultGetPool;
+  const recoverFn = deps.recoverAbandonedSearches || recoverAbandonedSearches;
+  const startedAt = Date.now();
+
+  log('info', 'start');
+
+  const pool = getPoolFn();
   const client = await pool.connect();
+  let lockHeld = false;
+
   try {
-    const { rows } = await client.query('SELECT pg_try_advisory_lock($1) AS ok', [ADVISORY_KEY]);
-    if (!rows[0] || !rows[0].ok) return { skipped: true, reason: 'lock_held' };
-    try {
-      const result = await recoverAbandonedSearches(client, {
-        graceMinutes: FREE_SEARCH_HOLD_MINUTES + 5,
-      });
-      return { skipped: false, ...result };
-    } finally {
-      await client.query('SELECT pg_advisory_unlock($1)', [ADVISORY_KEY]).catch(() => {});
+    const { rows } = await client.query(
+      'SELECT pg_try_advisory_lock($1) AS ok',
+      [ADVISORY_KEY]
+    );
+    if (!rows[0] || !rows[0].ok) {
+      log('info', 'skip', { reason: 'lock_held', ms: Date.now() - startedAt });
+      return { skipped: true, reason: 'lock_held' };
     }
+    lockHeld = true;
+
+    const result = await recoverFn(client, {
+      graceMinutes: FREE_SEARCH_HOLD_MINUTES + 5,
+    });
+
+    log('info', 'done', {
+      abandoned: result.abandoned,
+      holdsReleased: result.holdsReleased,
+      ms: Date.now() - startedAt,
+    });
+    return { skipped: false, ...result };
+  } catch (err) {
+    log('error', 'failed', {
+      message: err && err.message ? err.message : String(err),
+      ms: Date.now() - startedAt,
+    });
+    throw err;
   } finally {
+    if (lockHeld) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1)', [ADVISORY_KEY]);
+      } catch (unlockErr) {
+        log('error', 'unlock_failed', {
+          message: unlockErr && unlockErr.message ? unlockErr.message : String(unlockErr),
+        });
+      }
+    }
     client.release();
+  }
+}
+
+async function tick() {
+  if (running) {
+    log('info', 'skip', { reason: 'already_running_in_process' });
+    return;
+  }
+  running = true;
+  try {
+    await runOnce();
+  } catch (_) {
+    // already logged in runOnce
+  } finally {
+    running = false;
   }
 }
 
@@ -39,22 +102,38 @@ function startAbandonedSearchRecovery() {
     return { started: false, reason: 'disabled' };
   }
   if (timer) return { started: true, reason: 'already_running' };
-  const tick = () => { runOnce().catch(() => {}); };
-  timer = setInterval(tick, INTERVAL_MS);
+
+  timer = setInterval(() => {
+    tick();
+  }, INTERVAL_MS);
   if (typeof timer.unref === 'function') timer.unref();
-  const t = setTimeout(tick, 15000);
+
+  const t = setTimeout(() => {
+    tick();
+  }, 15000);
   if (typeof t.unref === 'function') t.unref();
+
+  log('info', 'scheduler_started', { intervalMs: INTERVAL_MS });
   return { started: true, intervalMs: INTERVAL_MS };
 }
 
 function stopAbandonedSearchRecovery() {
-  if (timer) { clearInterval(timer); timer = null; }
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+  log('info', 'scheduler_stopped');
+}
+
+function isRunning() {
+  return running;
 }
 
 module.exports = {
   runOnce,
   startAbandonedSearchRecovery,
   stopAbandonedSearchRecovery,
+  isRunning,
   ADVISORY_KEY,
   INTERVAL_MS,
 };
