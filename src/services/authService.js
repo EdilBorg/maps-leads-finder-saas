@@ -191,7 +191,6 @@ async function login({ email, password, ip }) {
     return { ok: false, code: 'SUSPENDED' };
   }
 
-  // Credentials are valid but the account cannot access the app until verified.
   if (!user.email_verified_at) {
     return { ok: false, code: 'EMAIL_NOT_VERIFIED' };
   }
@@ -387,6 +386,42 @@ async function revokeUserSessions(userId) {
   );
 }
 
+async function changePassword({ userId, currentPassword, newPassword, newPasswordConfirm }) {
+  if (!userId) {
+    return { ok: false, code: 'UNAUTHORIZED' };
+  }
+  if (typeof currentPassword !== 'string' || !currentPassword) {
+    return { ok: false, code: 'VALIDATION', errors: ['Indique a palavra-passe atual.'] };
+  }
+  if (!isValidPassword(newPassword)) {
+    return { ok: false, code: 'VALIDATION', errors: ['A nova palavra-passe deve ter entre 8 e 128 caracteres.'] };
+  }
+  if (newPassword !== newPasswordConfirm) {
+    return { ok: false, code: 'VALIDATION', errors: ['A confirmação da nova palavra-passe não coincide.'] };
+  }
+  if (newPassword === currentPassword) {
+    return { ok: false, code: 'VALIDATION', errors: ['A nova palavra-passe deve ser diferente da atual.'] };
+  }
+
+  const user = await findUserById(userId);
+  if (!user || user.status !== 'active') {
+    return { ok: false, code: 'UNAUTHORIZED' };
+  }
+
+  const match = await verifyPassword(user.password_hash, currentPassword);
+  if (!match) {
+    return { ok: false, code: 'INVALID_CURRENT', errors: ['A palavra-passe atual está incorrecta.'] };
+  }
+
+  const passwordHash = await hashPassword(newPassword);
+  await getPool().query(
+    `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+    [passwordHash, userId]
+  );
+  await revokeUserSessions(userId);
+  return { ok: true };
+}
+
 module.exports = {
   publicUser,
   findUserById,
@@ -397,6 +432,7 @@ module.exports = {
   resendVerification,
   requestPasswordReset,
   resetPassword,
+  changePassword,
   revokeUserSessions,
   MAX_LOGIN_ATTEMPTS,
 };
