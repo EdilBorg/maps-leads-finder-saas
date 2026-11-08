@@ -81,8 +81,18 @@ describe('session PostgreSQL persistence', { skip: !RUN }, () => {
 
   async function getCsrf(cookie) {
     const res = await request(app, { path: '/api/auth/csrf', cookie });
-    assert.equal(res.statusCode, 200);
-    return { token: res.json().csrfToken, cookie: res.cookie };
+    assert.equal(
+      res.statusCode,
+      200,
+      `CSRF endpoint status ${res.statusCode} body=${res.raw}`
+    );
+    assert.ok(res.json && typeof res.json === 'object', `CSRF response JSON missing or invalid: ${res.raw}`);
+    const token = res.json.csrfToken;
+    assert.ok(
+      token && typeof token === 'string' && token.length > 10,
+      `CSRF token missing or too short: ${JSON.stringify(res.json)}`
+    );
+    return { token, cookie: res.cookie };
   }
 
   async function post(p, body, cookie) {
