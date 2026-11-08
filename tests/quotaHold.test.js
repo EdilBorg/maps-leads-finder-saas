@@ -7,6 +7,7 @@ const {
   renewFreeSearchHold,
   recoverAbandonedSearches,
   resolveDbClient,
+  lockUserForUpdate,
 } = require('../src/services/freeSearchHold');
 
 function createMockClient(userState) {
@@ -121,25 +122,19 @@ describe('resolveDbClient Pool vs PoolClient', () => {
     assert.equal(r.shouldRelease, true);
     assert.equal(r.client, null);
   });
-
   it('classifies PoolClient (release, no connect)', () => {
-    const client = {
-      query: async () => ({ rows: [] }),
-      release() {},
-    };
+    const client = { query: async () => ({ rows: [] }), release() {} };
     const r = resolveDbClient(client);
     assert.equal(r.source, 'client');
     assert.equal(r.shouldRelease, false);
     assert.equal(r.client, client);
   });
-
   it('classifies query-only mock as query-object', () => {
     const mock = { query: async () => ({ rows: [] }) };
     const r = resolveDbClient(mock);
     assert.equal(r.source, 'query-object');
     assert.equal(r.shouldRelease, false);
   });
-
   it('throws without query', () => {
     assert.throws(() => resolveDbClient({}), /requires a pg/);
   });
@@ -151,9 +146,7 @@ describe('recoverAbandonedSearches connection handling', () => {
     const client = {
       async query(sql) {
         const s = sql.replace(/\s+/g, ' ');
-        if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) {
-          return { rows: [], rowCount: 0 };
-        }
+        if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) return { rows: [], rowCount: 0 };
         if (s.includes('FOR UPDATE')) return { rows: [], rowCount: 0 };
         if (s.includes('UPDATE searches')) {
           assert.ok(s.includes('free_search_hold_until > NOW()') || s.includes('free_search_hold_until > now()'));
@@ -162,51 +155,34 @@ describe('recoverAbandonedSearches connection handling', () => {
         }
         return { rows: [], rowCount: 0 };
       },
-      release() {
-        releaseCalled = true;
-      },
+      release() { releaseCalled = true; },
     };
     const r = await recoverAbandonedSearches(client);
     assert.equal(r.abandoned, 0);
     assert.equal(releaseCalled, false);
   });
-
   it('acquires and releases when given a Pool', async () => {
     let released = 0;
     const poolClient = {
       async query(sql) {
         const s = sql.replace(/\s+/g, ' ');
-        if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) {
-          return { rows: [], rowCount: 0 };
-        }
+        if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) return { rows: [], rowCount: 0 };
         if (s.includes('FOR UPDATE')) return { rows: [], rowCount: 0 };
         if (s.includes('UPDATE searches')) return { rows: [], rowCount: 0 };
         return { rows: [], rowCount: 0 };
       },
-      release() {
-        released += 1;
-      },
+      release() { released += 1; },
     };
-    const pool = {
-      async query() {
-        return { rows: [] };
-      },
-      async connect() {
-        return poolClient;
-      },
-    };
+    const pool = { async query() { return { rows: [] }; }, async connect() { return poolClient; } };
     const r = await recoverAbandonedSearches(pool);
     assert.equal(r.abandoned, 0);
     assert.equal(released, 1);
   });
-
   it('does not mark search failed when lease valid (SQL contract)', async () => {
     const client = {
       async query(sql) {
         const s = sql.replace(/\s+/g, ' ');
-        if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) {
-          return { rows: [], rowCount: 0 };
-        }
+        if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) return { rows: [], rowCount: 0 };
         if (s.includes('FOR UPDATE')) return { rows: [], rowCount: 0 };
         if (s.includes('UPDATE searches AS s') || s.includes('UPDATE searches as s')) {
           assert.ok(s.includes('free_search_hold_until > NOW()') || s.includes('free_search_hold_until > now()'));
@@ -218,5 +194,31 @@ describe('recoverAbandonedSearches connection handling', () => {
     };
     const r = await recoverAbandonedSearches(client);
     assert.equal(r.abandoned, 0);
+  });
+});
+
+describe('lockUserForUpdate', () => {
+  it('returns true and issues SELECT ... FOR UPDATE when user exists', async () => {
+    const sqls = [];
+    const client = {
+      async query(sql, params) {
+        sqls.push(sql.replace(/\s+/g, ' '));
+        assert.equal(params[0], 'user-1');
+        return { rows: [{ id: 'user-1' }], rowCount: 1 };
+      },
+    };
+    const ok = await lockUserForUpdate(client, 'user-1');
+    assert.equal(ok, true);
+    assert.ok(sqls[0].includes('FOR UPDATE'));
+    assert.ok(sqls[0].includes('FROM users'));
+  });
+  it('returns false when user does not exist', async () => {
+    const client = { async query() { return { rows: [], rowCount: 0 }; } };
+    const ok = await lockUserForUpdate(client, 'missing');
+    assert.equal(ok, false);
+  });
+  it('propagates client query errors', async () => {
+    const client = { async query() { throw new Error('db down'); } };
+    await assert.rejects(() => lockUserForUpdate(client, 'user-1'), /db down/);
   });
 });
