@@ -11,6 +11,7 @@ const http = require('node:http');
 const session = require('express-session');
 
 const { shouldRunDbIntegration, assertSafeTestDatabase } = require('./helpers/testDbGuard');
+const { clearAuthTestState } = require('./helpers/clearAuthTestState');
 const hasDb = shouldRunDbIntegration();
 
 function request(app, { method = 'GET', path, body, cookie, headers = {} } = {}) {
@@ -120,16 +121,25 @@ describe('auth integration', { skip: !hasDb }, () => {
     const sql = fs.readFileSync(path.join(__dirname, '..', 'migrations', '001_auth.sql'), 'utf8');
     await getPool().query(sql);
     app = createApp({ sessionStore: new session.MemoryStore() });
+    await clearAuthTestState({ emails: [email] });
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     if (resetRateLimits) resetRateLimits();
+    try {
+      await clearAuthTestState({ emails: [email, `ratelimit_${suffix}@example.com`, `short_${suffix}@example.com`] });
+    } catch (_) {
+      /* unit path without DB */
+    }
   });
 
   after(async () => {
     try {
+      await clearAuthTestState({ emails: [email, `ratelimit_${suffix}@example.com`] });
+    } catch (_) {}
+    try {
       await getPool().query('DELETE FROM users WHERE email_normalized LIKE $1', [
-        `audit_${suffix}@example.com`,
+        `%${suffix}@example.com`,
       ]);
     } catch (_) {}
     try { await closePool(); } catch (_) {}
