@@ -1,15 +1,8 @@
 /**
  * OSM commercial/place search: Nominatim geocode + Overpass POI query.
- * Covers node and way for amenity/shop/office/tourism + name match.
+ * Covers node, way and relation for amenity/shop/office/tourism + name match.
  */
-
-const {
-  withTimeout,
-  okResult,
-  errorResult,
-  DEFAULT_TIMEOUT_MS,
-} = require('./baseProvider');
-
+const { withTimeout, okResult, errorResult, DEFAULT_TIMEOUT_MS } = require('./baseProvider');
 const CODE = 'osm';
 
 function isConfigured() {
@@ -58,6 +51,9 @@ function buildOverpassQuery(qEscaped, radius, lat, lon, limit) {
   way["office"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
   node["tourism"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
   way["tourism"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  relation["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  relation["amenity"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
+  relation["shop"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
 );
 out center ${Math.min(limit, 100)};
 `.trim();
@@ -94,47 +90,28 @@ function mapElement(el, criteria) {
 
 async function search(criteria) {
   if (!isConfigured()) {
-    return {
-      status: 'not_configured',
-      results: [],
-      errorCode: 'NOT_CONFIGURED',
-      errorMessage: 'OSM disabled',
-    };
+    return { status: 'not_configured', results: [], errorCode: 'NOT_CONFIGURED', errorMessage: 'OSM disabled' };
   }
-
   try {
     const center = await geocodeLocation(criteria.location);
-    if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lon)) {
-      return okResult([]);
-    }
-
-    const radius = Math.min(
-      Math.max(parseInt(process.env.OSM_SEARCH_RADIUS_M || '5000', 10) || 5000, 500),
-      25000
-    );
+    if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lon)) return okResult([]);
+    const radius = Math.min(Math.max(parseInt(process.env.OSM_SEARCH_RADIUS_M || '5000', 10) || 5000, 500), 25000);
     const limit = Math.min(criteria.limit || 50, 100);
     const qEscaped = escapeOverpassRegex(criteria.query);
     const overpassUrl = process.env.OSM_OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
     const ql = buildOverpassQuery(qEscaped, radius, center.lat, center.lon, limit);
-
     const data = await withTimeout(
       fetch(overpassUrl, {
         method: 'POST',
-        headers: {
-          'User-Agent': userAgent(),
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
+        headers: { 'User-Agent': userAgent(), 'Content-Type': 'application/x-www-form-urlencoded' },
         body: `data=${encodeURIComponent(ql)}`,
       }).then(async (res) => {
-        if (!res.ok) {
-          throw Object.assign(new Error(`overpass HTTP ${res.status}`), { code: 'HTTP_ERROR' });
-        }
+        if (!res.ok) throw Object.assign(new Error(`overpass HTTP ${res.status}`), { code: 'HTTP_ERROR' });
         return res.json();
       }),
       Math.max(DEFAULT_TIMEOUT_MS, 35000),
       CODE
     );
-
     const elements = Array.isArray(data.elements) ? data.elements : [];
     const mapped = [];
     const seen = new Set();
