@@ -5,6 +5,10 @@
  * Always lock/touch users BEFORE searches when both tables are involved
  * in the same transaction. Counterpart: searchService.runAndPersist locks
  * the user row FOR UPDATE before updating searches.
+ *
+ * recoverAbandonedSearches accepts either a pg.Pool or a pg.PoolClient:
+ * - Pool  → acquires a client, owns BEGIN/COMMIT and release
+ * - Client → uses the given connection; caller owns lifecycle
  */
 
 const crypto = require('crypto');
@@ -13,22 +17,22 @@ const FREE_SEARCH_HOLD_MINUTES = parseInt(process.env.FREE_SEARCH_HOLD_MINUTES |
 const FREE_SEARCH_RENEW_INTERVAL_MS =
   parseInt(process.env.FREE_SEARCH_RENEW_INTERVAL_MS || '300000', 10) || 300000;
 
+/**
+ * Resolve whether `db` is a PoolClient, Pool, or query object.
+ * pg.PoolClient has BOTH connect() and release(); check release FIRST so we
+ * never call connect() again on an already-connected client.
+ */
 function resolveDbClient(db) {
   if (!db || typeof db.query !== 'function') {
     throw new Error('recoverAbandonedSearches requires a pg.Pool or pg.PoolClient');
   }
-  const hasConnect = typeof db.connect === 'function';
-  const hasRelease = typeof db.release === 'function';
-  if (hasRelease && !hasConnect) {
+  if (typeof db.release === 'function') {
     return { client: db, shouldRelease: false, source: 'client' };
   }
-  if (hasConnect && !hasRelease) {
+  if (typeof db.connect === 'function') {
     return { client: null, shouldRelease: true, source: 'pool', pool: db };
   }
-  if (!hasConnect) {
-    return { client: db, shouldRelease: false, source: 'query-object' };
-  }
-  return { client: null, shouldRelease: true, source: 'pool', pool: db };
+  return { client: db, shouldRelease: false, source: 'query-object' };
 }
 
 async function acquireFreeSearchHold(client, userId, searchId = null) {
