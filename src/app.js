@@ -64,7 +64,35 @@ function createApp(options = {}) {
 
   app.use(loadUser);
 
-  app.use(express.static(path.join(__dirname, '..', 'public')));
+  /**
+   * Dashboard is only for authenticated + email-verified users.
+   * Disable static index auto-serve so / and /index.html are controlled here.
+   * Auth pages under /pages/* and CSS/JS remain publicly available.
+   */
+  function gateDashboard(req, res, next) {
+    if (!req.session || !req.session.userId) {
+      return res.redirect(302, '/pages/login.html');
+    }
+    // loadUser refreshes emailVerified from the database on each request.
+    if (!req.session.emailVerified) {
+      return res.redirect(302, '/pages/check-email.html');
+    }
+    return next();
+  }
+
+  app.get('/', gateDashboard, (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+  });
+
+  app.get('/index.html', gateDashboard, (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+  });
+
+  app.use(
+    express.static(path.join(__dirname, '..', 'public'), {
+      index: false,
+    })
+  );
 
   app.use('/api', healthRouter);
   app.use('/api/auth', authRouter);
@@ -78,10 +106,6 @@ function createApp(options = {}) {
       res.json({ ip: clientIp(req), rateKey: loginRateKey(req) });
     });
   }
-
-  app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
-  });
 
   app.use(notFoundHandler);
   app.use(errorHandler);
