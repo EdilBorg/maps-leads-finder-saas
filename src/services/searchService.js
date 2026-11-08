@@ -36,7 +36,8 @@ function mapPublicRow(r, i) {
 
 /**
  * Periodically renew the free-search hold while providers run.
- * Never swallows errors; never logs the hold token; temporary DB failures do not free/consume.
+ * Catches sync throws from getPoolFn()/connect() and async rejections.
+ * Never logs the hold token; temporary failures do not free/consume the hold.
  */
 function startHoldRenewal(userId, holdToken, opts = {}) {
   let stopped = false;
@@ -52,11 +53,36 @@ function startHoldRenewal(userId, holdToken, opts = {}) {
   const timer = setInterval(() => {
     if (stopped || !holdToken || inFlight) return;
     inFlight = true;
-    getPoolFn()
-      .connect()
-      .then(async (client) => {
+
+    (async () => {
+      let client = null;
+      try {
+        let pool;
         try {
-          if (stopped) return;
+          pool = getPoolFn();
+        } catch (err) {
+          logFn('connect_error', {
+            userId,
+            searchId,
+            message: err && err.message ? err.message : String(err),
+          });
+          return;
+        }
+
+        try {
+          client = await pool.connect();
+        } catch (err) {
+          logFn('connect_error', {
+            userId,
+            searchId,
+            message: err && err.message ? err.message : String(err),
+          });
+          return;
+        }
+
+        if (stopped) return;
+
+        try {
           const r = await renewFn(client, userId, holdToken);
           if (!r || !r.renewed) {
             stopped = true;
@@ -69,22 +95,27 @@ function startHoldRenewal(userId, holdToken, opts = {}) {
             searchId,
             message: err && err.message ? err.message : String(err),
           });
-        } finally {
-          try { client.release(); } catch (_) {}
-          inFlight = false;
         }
-      })
-      .catch((err) => {
-        inFlight = false;
-        logFn('connect_error', {
+      } catch (err) {
+        logFn('unexpected_error', {
           userId,
           searchId,
           message: err && err.message ? err.message : String(err),
         });
-      });
+      } finally {
+        if (client) {
+          try { client.release(); } catch (_) {}
+        }
+        inFlight = false;
+      }
+    })();
   }, intervalMs);
   if (typeof timer.unref === 'function') timer.unref();
-  return () => { stopped = true; clearInterval(timer); };
+
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }
 
 async function markSearchFailed(pool, searchId, userId, summary) {
