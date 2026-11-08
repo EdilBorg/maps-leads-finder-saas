@@ -1,28 +1,36 @@
 {
   "name": "maps-leads-finder-saas",
-  "version": "1.0.0",
-  "private": true,
-  "description": "Maps Leads Finder SaaS",
+  "version": "0.1.0",
+  "description": "Maps Leads Finder SaaS — plataforma comercial de pesquisa e gestão de leads a partir de múltiplos fornecedores de dados geográficos e comerciais.",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
     "test": "node --test --test-concurrency=1 tests/",
     "migrate": "node scripts/migrate.js"
   },
   "engines": {
     "node": ">=20.0.0"
   },
+  "keywords": [
+    "saas",
+    "leads",
+    "maps",
+    "prospection"
+  ],
+  "author": "EdilBorg",
+  "license": "UNLICENSED",
+  "private": true,
   "dependencies": {
     "argon2": "^0.41.1",
-    "connect-pg-simple": "^10.0.0",
-    "cookie-parser": "^1.4.7",
-    "csurf": "^1.11.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
-    "nodemailer": "^6.9.16",
     "pg": "^8.13.1",
-    "uuid": "^11.0.3"
-  }
+    "connect-pg-simple": "^10.0.0",
+    "helmet": "^8.0.0",
+    "morgan": "^1.10.0",
+    "nodemailer": "^6.9.16"
+  },
+  "devDependencies": {}
 }
