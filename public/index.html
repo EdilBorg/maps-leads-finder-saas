@@ -49,7 +49,7 @@
       </header>
       <div class="demo-banner" id="app-banner" hidden></div>
       <main class="content">
-        <section class="view active" id="view-dashboard" aria-label="Dashboard">
+        <section class="view active" id="view-dashboard" aria-label="DashboardDashboard">
           <h2 class="page-heading">Dashboard</h2>
           <p class="page-sub">Visão geral da conta</p>
           <div class="stat-grid">
@@ -124,8 +124,8 @@
             <h3>Sem resultados</h3>
             <p>Executa uma pesquisa a partir de Nova pesquisa.</p>
           </div>
-          <div id="results-table-wrap" class="table-wrap">
-            <table class="data" id="results-table">
+          <div id="results-table-wrap" class="table-wrap table-wrap-results">
+            <table class="data table-results" id="results-table">
               <thead>
                 <tr>
                   <th><input type="checkbox" id="select-all" aria-label="Selecionar todos"></th>
@@ -140,8 +140,8 @@
           <h2 class="page-heading">Histórico de pesquisas</h2>
           <p class="page-sub">Pesquisas anteriores da tua conta</p>
           <div class="card">
-            <div class="table-wrap">
-              <table class="data">
+            <div class="table-wrap table-wrap-history">
+              <table class="data table-history">
                 <thead><tr><th>Consulta</th><th>Localização</th><th>Resultados</th><th>Estado</th><th>Data</th></tr></thead>
                 <tbody id="history-body"></tbody>
               </table>
@@ -152,8 +152,8 @@
           <h2 class="page-heading">Leads guardados</h2>
           <p class="page-sub">Snapshots independentes da retenção de 30 dias</p>
           <div class="card">
-            <div class="table-wrap">
-              <table class="data">
+            <div class="table-wrap table-wrap-leads">
+              <table class="data table-leads">
                 <thead><tr><th>Empresa</th><th>Endereço</th><th>Telefone</th><th>Email</th><th>Guardado em</th></tr></thead>
                 <tbody id="leads-body"></tbody>
               </table>
@@ -174,39 +174,23 @@
           </div>
           <div class="card settings-card" style="margin-top: var(--spacing-16)">
             <div class="card-header"><h3 class="card-title">Segurança da conta</h3></div>
-            <p class="card-muted" style="margin:0 0 12px">Altere a palavra-passe da conta. Será necessário iniciar sessão novamente após a alteração.</p>
-            <button type="button" class="btn btn-ghost" id="btn-show-change-password">Alterar palavra-passe</button>
-            <form id="change-password-form" class="stack-gap-16" hidden style="margin-top:16px">
-              <div class="form-group">
-                <label class="form-label" for="current-password">Palavra-passe atual</label>
-                <div class="password-field">
-                  <input class="input" type="password" id="current-password" name="currentPassword" autocomplete="current-password" required>
-                  <button type="button" class="btn btn-ghost btn-sm toggle-password" data-target="current-password" aria-label="Mostrar palavra-passe">Mostrar</button>
-                </div>
+            <p class="card-muted" style="margin:0 0 12px">Para alterar a palavra-passe, enviaremos um link de recuperação para o email associado à conta. Abra a mensagem e defina a nova palavra-passe na página indicada.</p>
+            <button type="button" class="btn btn-ghost" id="btn-show-reset-password">Alterar palavra-passe</button>
+            <div id="reset-password-panel" class="stack-gap-16" hidden style="margin-top:16px">
+              <div class="settings-row">
+                <span class="settings-label">Email de recuperação</span>
+                <span class="settings-value" id="reset-password-email">—</span>
               </div>
-              <div class="form-group">
-                <label class="form-label" for="new-password">Nova palavra-passe</label>
-                <div class="password-field">
-                  <input class="input" type="password" id="new-password" name="newPassword" autocomplete="new-password" required minlength="8">
-                  <button type="button" class="btn btn-ghost btn-sm toggle-password" data-target="new-password" aria-label="Mostrar palavra-passe">Mostrar</button>
-                </div>
-              </div>
-              <div class="form-group">
-                <label class="form-label" for="new-password-confirm">Confirmar nova palavra-passe</label>
-                <div class="password-field">
-                  <input class="input" type="password" id="new-password-confirm" name="newPasswordConfirm" autocomplete="new-password" required minlength="8">
-                  <button type="button" class="btn btn-ghost btn-sm toggle-password" data-target="new-password-confirm" aria-label="Mostrar palavra-passe">Mostrar</button>
-                </div>
-              </div>
-              <div class="error-box" id="change-password-error" role="alert"></div>
-              <div class="success-box" id="change-password-ok" role="status"></div>
+              <p class="card-muted" style="margin:0">O link será enviado apenas para este endereço. Não é possível escolher outro email.</p>
+              <div class="error-box" id="reset-password-error" role="alert"></div>
+              <div class="success-box" id="reset-password-ok" role="status"></div>
               <div class="toolbar">
                 <div class="toolbar-left">
-                  <button type="submit" class="btn btn-primary" id="btn-change-password">Guardar alterações</button>
-                  <button type="button" class="btn btn-ghost" id="btn-cancel-change-password">Cancelar</button>
+                  <button type="button" class="btn btn-primary" id="btn-send-reset-link">Enviar link de recuperação</button>
+                  <button type="button" class="btn btn-ghost" id="btn-cancel-reset-password">Cancelar</button>
                 </div>
               </div>
-            </form>
+            </div>
           </div>
         </section>
       </main>
