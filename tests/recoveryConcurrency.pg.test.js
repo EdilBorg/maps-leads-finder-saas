@@ -42,8 +42,10 @@ describe('recovery concurrency PostgreSQL (C/D/E/H)', { skip: !RUN }, () => {
   async function createUser() {
     const email = `rcv_${Date.now()}_${Math.random().toString(16).slice(2)}@test.local`;
     const { rows } = await pool.query(
-      `INSERT INTO users (email, password_hash, name, email_verified, free_search_used)
-       VALUES ($1, 'x', 'Recovery Test', TRUE, FALSE) RETURNING id`, [email]
+      `INSERT INTO users (email, email_normalized, password_hash, name, email_verified_at, free_search_used)
+       VALUES ($1, $2, 'x', 'Recovery Test', NOW(), FALSE)
+       RETURNING id`,
+      [email, email.toLowerCase()]
     );
     return rows[0].id;
   }

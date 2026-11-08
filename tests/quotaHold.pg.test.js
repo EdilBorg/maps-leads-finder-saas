@@ -37,9 +37,9 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
   async function createUser() {
     const email = `quota_${Date.now()}_${Math.random().toString(16).slice(2)}@test.local`;
     const { rows } = await pool.query(
-      `INSERT INTO users (email, password_hash, name, email_verified, free_search_used)
-       VALUES ($1, 'x', 'Quota Test', TRUE, FALSE) RETURNING id`,
-      [email]
+      `INSERT INTO users (email, email_normalized, password_hash, name, email_verified_at, free_search_used)
+       VALUES ($1, $2, 'x', 'Quota Test', NOW(), FALSE) RETURNING id`,
+      [email, email.toLowerCase()]
     );
     return rows[0].id;
   }
