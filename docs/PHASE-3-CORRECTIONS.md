@@ -1,36 +1,25 @@
-# Fase 3 — Correções críticas (auditoria)
+# Fase 3 — Correções críticas (quota, concorrência, persistência)
 
-## Problemas identificados
+## Problemas confirmados
+1. `consumeFreeSearchHold` não exigia `free_search_used=FALSE` nem `hold_until > NOW()`.
+2. `runAndPersist` ignorava o retorno de consume e fazia COMMIT.
+3. TTL sem renovação durante pesquisas longas.
+4. Testes de concorrência só com mocks.
+5. Pesquisas `running` abandonadas sem recuperação.
+6. OSM sem `relation`.
 
-1. **Quota gratuita concorrente** — `FOR UPDATE` + `COMMIT` antes dos fornecedores libertava o lock.
-2. **Testes do motor** — helpers isolados, não `executeSearch()` com mocks.
-3. **OSM/Overpass** — cobertura incompleta de `way` comercial; regex frágil.
-4. **Apify** — substituição de templates podia invalidar JSON.
-5. **Mensagens de cliente** — alinhamento às regras de negócio.
+## Soluções
+- Consume SQL: token + used=false + until > NOW().
+- COMMIT só se consume confirmar (senão ROLLBACK + failed/hold_lost).
+- `renewFreeSearchHold` + interval durante providers.
+- `recoverAbandonedSearches` para running antigas.
+- Migration 009: `free_search_hold_search_id`.
 
-## Reserva atómica
+## Testes
+| Suite | Tipo | Este ambiente |
+|-------|------|---------------|
+| quotaHold.test.js | unitário mock | pass |
+| quotaHold.pg.test.js | integração PG | **skipped** (sem ALLOW_DB_TESTS) |
+| motor/OSM/Apify | unitário | pass |
 
-- Migration `008_free_search_hold.sql`
-- `src/services/freeSearchHold.js`
-- Acquire / consume / release por token; TTL `FREE_SEARCH_HOLD_MINUTES` (default 20)
-- Sem transação aberta durante providers
-
-| Resultado | Quota |
-|-----------|-------|
-| Resultados / parcial com dados | Consome |
-| Sem resultados / falha total / falha persistência | Liberta hold |
-
-## Testes (40 unitários, todos passed neste ambiente)
-
-- searchEngine.execute.test.js
-- searchEngine.test.js
-- quotaHold.test.js
-- osmProvider.test.js
-- apifyProvider.test.js
-
-PostgreSQL real e APIs externas: **não executados**.
-
-## Render
-
-- `npm run migrate` (inclui 008)
-- Credenciais de fornecedores conforme `.env.example`
+Produção não foi migrada nesta tarefa.
