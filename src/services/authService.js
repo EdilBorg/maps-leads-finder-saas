@@ -414,11 +414,25 @@ async function changePassword({ userId, currentPassword, newPassword, newPasswor
   }
 
   const passwordHash = await hashPassword(newPassword);
-  await getPool().query(
-    `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
-    [passwordHash, userId]
-  );
-  await revokeUserSessions(userId);
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+      [passwordHash, userId]
+    );
+    await client.query(
+      `DELETE FROM session WHERE sess::text LIKE $1`,
+      [`%"userId":"${userId}"%`]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
   return { ok: true };
 }
 
