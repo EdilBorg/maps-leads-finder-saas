@@ -1,139 +1,121 @@
 # Testes de integração PostgreSQL — Maps Leads Finder SaaS
 
-Documento de referência permanente para validar concorrência, reservas gratuitas e recuperação de pesquisas abandonadas numa **base de dados isolada**.
+Referência permanente para validar holds, recuperação e concorrência numa **base isolada**.
 
-**Estado actual:** testes unitários disponíveis e a passar; testes reais PostgreSQL de concorrência **ainda não validados** neste ambiente.
+**Estado actual**
 
-Não confunda mocks unitários com integração real. Não altere estados desta tabela para “PASSOU” sem execução efectiva numa BD `*_test`.
+| Tipo | Estado |
+|------|--------|
+| Testes unitários | Implementados e executados neste ambiente |
+| Testes PG (ficheiros) | Implementados; **execução real pendente** sem BD `*_test` |
+| Validação de concorrência A–H | **Não validada** até corrida real com `ALLOW_DB_TESTS=1` |
 
----
-
-## 1. Situação actual
-
-### Testes unitários (sempre seguros)
-
-| Área | Ficheiros | Notas |
-|------|-----------|--------|
-| Quota / hold | `tests/quotaHold.test.js` | acquire, consume, renew, release, lockUserForUpdate |
-| Recovery job | `tests/abandonedSearchRecovery.test.js` | advisory lock, unlock, destroy client |
-| Shutdown / renovação | `tests/shutdown.and.renewal.test.js` | pool close, retry, sync errors |
-
-Comando: `npm test`
-
-### Testes de integração existentes
-
-| Ficheiro | Conteúdo aproximado |
-|----------|---------------------|
-| `tests/quotaHold.pg.test.js` | Aquisição, consumo, renovação, libertação, paralelismo, isolamento, lease válida/expirada, token substituído |
-| `tests/session.pg.test.js` | Sessões PostgreSQL (auth) |
-| `tests/domain.model.test.js` / `domain.concurrency.test.js` | Modelo de domínio e concorrência de locks de tenant |
-
-Estes ficheiros **só correm** quando o `testDbGuard` autoriza.
-
-### Cenários de concorrência ainda pendentes de validação real
-
-Ver secção 6 e tabela final.
+Não marcar cenários como PASSOU sem execução efectiva.
 
 ---
 
-## 2. Requisitos do ambiente futuro
+## 1. Ficheiros de teste
 
-- Node.js **≥ 20**
-- PostgreSQL compatível (12+ recomendado)
-- `npm install` concluído
-- Pelo menos **duas conexões** simultâneas
-- Base de dados **exclusiva para testes** (nunca produção / Render)
-- Migrations **apenas** nessa base
+| Ficheiro | Conteúdo |
+|----------|----------|
+| `tests/quotaHold.test.js` | Unitário: acquire/consume/renew/release, lockUserForUpdate |
+| `tests/abandonedSearchRecovery.test.js` | Unitário: job, advisory unlock/destroy |
+| `tests/shutdown.and.renewal.test.js` | Unitário: shutdown + renovação |
+| `tests/quotaHold.pg.test.js` | Integração: A, B, F, G (e operações de hold) |
+| `tests/recoveryConcurrency.pg.test.js` | Integração: **C, D, E, H** (concorrência real com 2 clients) |
+
+Todos os `*.pg.test.js` usam `shouldRunDbIntegration()` / `assertSafeTestDatabase()`.
+
+---
+
+## 2. Pré-requisitos
+
+- Node.js ≥ 20
+- PostgreSQL 12+
+- `npm install`
+- BD exclusiva (nome `*_test` ou `TEST_DATABASE_NAME`)
+- Migrations 001–009 aplicadas **só** nessa BD
+- ≥ 2 conexões simultâneas
 
 ---
 
 ## 3. Protecção (`testDbGuard` + `resolveConnection`)
 
-Ficheiros: `tests/helpers/testDbGuard.js`, `src/db/connectionConfig.js`
-
 Obrigatório:
 
 1. `NODE_ENV` ≠ `production`
 2. `ALLOW_DB_TESTS=1`
-3. Conexão resolvida (mesma do pool) segura
+3. Conexão resolvida = a do pool
 4. Nome termina em `_test` **ou** igual a `TEST_DATABASE_NAME`
-5. `DATABASE_URL` e `TEST_DATABASE_URL` não divergem se ambas existirem
+5. Sem divergência `DATABASE_URL` vs `TEST_DATABASE_URL`
 
-| Ambiente | Comportamento |
-|----------|----------------|
-| production + `TEST_DATABASE_URL` | Erro |
-| production + `ALLOW_DB_TESTS=1` | Erro |
-| URLs divergentes | Erro |
-| Não-prod + `TEST_DATABASE_URL` sem ALLOW | Erro |
-| Não-prod + ALLOW + `TEST_DATABASE_URL` | Usa só TEST_DATABASE_URL |
-| Caso contrário | DATABASE_URL ou PG* |
-
-**Nunca** use DATABASE_URL de produção.
+Em produção: `TEST_DATABASE_URL` e `ALLOW_DB_TESTS=1` são rejeitados.
 
 ---
 
-## 4. Preparação da BD de teste
-
-1. Criar BD dedicada (ex.: `maps_leads_finder_test`).
-2. Confirmar que não é produção.
-3. Configurar:
+## 4. Preparação
 
 ```bash
 export NODE_ENV=test
 export ALLOW_DB_TESTS=1
 export TEST_DATABASE_URL='postgresql://USER:PASS@HOST:5432/maps_leads_finder_test'
+
+npm run migrate   # apenas na BD de teste
+npm test
+# ou:
+node --test tests/quotaHold.pg.test.js tests/recoveryConcurrency.pg.test.js
 ```
 
-4. Migrations só nessa BD: `npm run migrate`
-5. Verificar tabelas; correr integração simples; depois concorrência.
+Schema de holds: migrations `008_free_search_hold.sql` e `009_free_search_hold_search_id.sql` (sem `ALTER TABLE` ad-hoc nos testes).
+
+Limpeza: fixtures criam emails `*_@test.local` e apagam `users` / `searches` / `search_results` no `finally`.
 
 ---
 
-## 5. Execução
-
-```bash
-npm test                          # suite completa
-node --test tests/quotaHold.pg.test.js   # após ALLOW_DB_TESTS=1 + BD segura
-```
-
-Scripts: `test` → `node --test tests/` ; `migrate` → `node scripts/migrate.js`.
-
----
-
-## 6. Cenários A–H (estado PENDENTE até validação)
+## 5. Cenários A–H
 
 Ordem de locks: **users → searches**.
 
-| ID | Cenário | Resultado esperado | Estado |
-|----|---------|-------------------|--------|
-| A | Aquisição concorrente (2 clients, mesmo user) | Um wins; outro FREE_SEARCH_IN_PROGRESS | PENDENTE |
-| B | Isolamento multi-tenant | Ambos adquirem | PENDENTE |
-| C | Renovação × recuperação | Lease válida não abandoned; sem deadlock | PENDENTE |
-| D | Persistência × recuperação | Atomicidade; sem deadlock | PENDENTE |
-| E | Dois jobs recovery | Advisory lock; unlock mesma sessão | PENDENTE |
-| F | Lease expirada | Mark failed; hold libertado | PENDENTE |
-| G | Token substituído | Token antigo não consome/liberta | PENDENTE |
-| H | Idempotência recovery | Segunda execução inócua | PENDENTE |
+| ID | Nome | Ficheiro | Implementado | Executado aqui | Validado PG real |
+|----|------|----------|--------------|----------------|------------------|
+| A | Aquisição concorrente mesmo user | `quotaHold.pg.test.js` | Sim | Não | **PENDENTE** |
+| B | Isolamento entre utilizadores | `quotaHold.pg.test.js` | Sim | Não | **PENDENTE** |
+| C | Renovação × recuperação | `recoveryConcurrency.pg.test.js` | Sim | Não | **PENDENTE** |
+| D | Persistência (lock user) × recuperação | `recoveryConcurrency.pg.test.js` | Sim | Não | **PENDENTE** |
+| E | Dois jobs / advisory lock | `recoveryConcurrency.pg.test.js` | Sim | Não | **PENDENTE** |
+| F | Lease expirada | `quotaHold.pg.test.js` | Sim | Não | **PENDENTE** |
+| G | Token substituído | `quotaHold.pg.test.js` | Sim | Não | **PENDENTE** |
+| H | Idempotência da recuperação | `recoveryConcurrency.pg.test.js` | Sim | Não | **PENDENTE** |
+
+### Detalhe C–H
+
+**C** — Client1: `BEGIN` + `lockUserForUpdate` + `renewFreeSearchHold` + `COMMIT`. Client2: `recoverAbandonedSearches` (bloqueia no user). Esperado: search `running`, lease válida.
+
+**D** — Mesmo padrão com `UPDATE searches` sob o lock do user. Esperado: sem deadlock; search não `failed`; update persistido.
+
+**E** — Sessão1 segura `pg_try_advisory_lock(87003145)`; `runOnce` noutra conexão → `skipped: lock_held`; unlock; re-aquisição possível.
+
+**H** — Search antiga + hold expirado; recover ×2; status `failed` estável; sem re-transições indevidas.
 
 ---
 
-## 7. Registo de validação futura
+## 6. Registo de validação futura
 
 | Cenário | Estado | Data | Observações |
 |---------|--------|------|-------------|
-| Aquisição concorrente | PENDENTE | — | — |
-| Isolamento entre utilizadores | PENDENTE | — | — |
-| Renovação × recuperação | PENDENTE | — | — |
-| Persistência × recuperação | PENDENTE | — | — |
-| Dois jobs simultâneos | PENDENTE | — | — |
-| Lease expirada | PENDENTE | — | — |
-| Token substituído | PENDENTE | — | — |
-| Idempotência | PENDENTE | — | — |
+| A Aquisição concorrente | PENDENTE | — | — |
+| B Isolamento multi-tenant | PENDENTE | — | — |
+| C Renovação × recuperação | PENDENTE | — | — |
+| D Persistência × recuperação | PENDENTE | — | — |
+| E Dois jobs simultâneos | PENDENTE | — | — |
+| F Lease expirada | PENDENTE | — | — |
+| G Token substituído | PENDENTE | — | — |
+| H Idempotência | PENDENTE | — | — |
 
-> **Não** alterar para PASSOU sem execução real numa BD PostgreSQL isolada.
+> Não alterar para PASSOU sem execução real numa BD PostgreSQL isolada.
 
 ---
 
-## 8. Produção
+## 7. Produção
 
-Proibido: migrar/testar na BD Render de produção; activar recovery job sem validação; apontar variáveis de teste a produção.
+Proibido: testar ou migrar a BD Render de produção; activar `ENABLE_ABANDONED_SEARCH_RECOVERY` sem validação; usar `DATABASE_URL` de produção nestes testes.

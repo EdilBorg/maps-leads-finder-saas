@@ -1,20 +1,20 @@
-# Fase 3 — Correções (shutdown, renovação, locks, testes)
+# Fase 3 — Correções
 
 ## Shutdown
 
-- `poolClosed: true` apenas se `closePool()` concluir sem erro.
-- Falha de close ou job activo → retryable; estado desbloqueado.
-- `exit(0)` só com `poolClosed: true`.
+- `poolClosed: true` somente após `closePool()` bem-sucedido.
+- `closePool` ausente → `poolClosed: false`, `closeError: true`, `reason: CLOSE_POOL_MISSING`, `retryable: true`.
+- Timeout do job ou falha de close → estado desbloqueado para retry.
+- `exit(0)` apenas com `poolClosed: true`.
 
 ## Renovação
 
-- Erros síncronos de `getPoolFn`/`connect` tratados.
-- Logs sem token; `inFlight` no finally.
+- Erros síncronos/assíncronos tratados; token nunca nos logs.
 
-## PostgreSQL
+## Testes PG
 
-Ver `docs/POSTGRESQL-INTEGRATION-TESTS.md`. Concorrência real: PENDENTE.
+Ver `docs/POSTGRESQL-INTEGRATION-TESTS.md`. Cenários C/D/E/H em `tests/recoveryConcurrency.pg.test.js`.
 
 ## Produção
 
-Sem migrations, job ou alterações no Render.
+Sem migrations, job ou alterações no Render nesta tarefa.

@@ -4,10 +4,10 @@
  *
  * State machine (shared `state` object):
  * - shuttingDown: attempt currently in progress (blocks concurrent attempts)
- * - poolClosed: pool was closed successfully (terminal success)
+ * - poolClosed: pool was closed successfully (terminal success — only after closePool succeeds)
  *
- * If wait times out (job still running) or close fails, shuttingDown is cleared
- * so a later SIGTERM/SIGINT can retry once the job is idle.
+ * If wait times out, close fails, or closePool is missing, shuttingDown is cleared
+ * so a later attempt can retry once dependencies are fixed / the job is idle.
  */
 
 async function performShutdown(deps = {}) {
@@ -58,8 +58,17 @@ async function performShutdown(deps = {}) {
   }
 
   if (typeof close !== 'function') {
-    state.poolClosed = true;
-    return { poolClosed: true, idle: true };
+    state.shuttingDown = false;
+    errFn(
+      '[server] closePool is missing or not a function; pool was not closed'
+    );
+    return {
+      poolClosed: false,
+      idle: true,
+      closeError: true,
+      retryable: true,
+      reason: 'CLOSE_POOL_MISSING',
+    };
   }
 
   try {
