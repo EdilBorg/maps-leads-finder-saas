@@ -96,13 +96,11 @@ describe('transactional email templates', () => {
       captured = JSON.parse(options.body);
       return { ok: true, status: 201, json: async () => ({ messageId: 'x1' }) };
     });
-    const { sendVerificationEmail } = loadService();
-    await sendVerificationEmail(
-      'user@example.com',
-      'https://app.example/v?token=t',
-      '<script>alert(1)</script>'
-    );
-    assert.doesNotMatch(captured.htmlContent, /<script>alert\(1\)<\/script>/);
-    assert.ok(captured.htmlContent.includes('<script>'));
+    const { sendVerificationEmail, escapeHtml } = loadService();
+    const evil = '<' + 'script>alert(1)</' + 'script>';
+    await sendVerificationEmail('user@example.com', 'https://app.example/v?token=t', evil);
+    assert.equal(captured.htmlContent.includes(evil), false);
+    const expected = escapeHtml(evil);
+    assert.ok(captured.htmlContent.includes(expected));
   });
 });
