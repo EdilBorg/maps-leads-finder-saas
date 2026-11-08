@@ -8,6 +8,7 @@
 
 const { createApp, config } = require('./app');
 const { closePool } = require('./db/pool');
+const { startAbandonedSearchRecovery } = require('./services/abandonedSearchRecovery');
 
 const app = createApp();
 
@@ -46,6 +47,7 @@ async function shutdown(signal) {
 // Only bind to a port when executed as the main module
 if (require.main === module) {
   start();
+  startAbandonedSearchRecovery();
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
