@@ -11,11 +11,14 @@
   <div class="auth-page">
     <div class="auth-card">
       <div class="auth-brand">Maps Leads Finder</div>
-      <h1>Verificação de email</h1>
-      <p class="sub">A confirmar o seu endereço…</p>
-      <div class="error-box" id="err"></div>
-      <div class="success-box" id="ok"></div>
-      <div class="links"><a href="/pages/login.html">Ir para login</a></div>
+      <h1 id="title">Verificação de email</h1>
+      <p class="sub" id="sub">A confirmar o seu endereço…</p>
+      <div class="error-box" id="err" role="alert"></div>
+      <div class="success-box" id="ok" role="status"></div>
+      <a class="btn btn-primary btn-block" id="loginBtn" href="/pages/login.html" hidden>Ir para iniciar sessão</a>
+      <div class="links" id="links">
+        <a href="/pages/login.html">Ir para login</a>
+      </div>
     </div>
   </div>
   <script>
@@ -49,21 +52,46 @@
     const token = params.get('token') || '';
     const err = document.getElementById('err');
     const ok = document.getElementById('ok');
+    const title = document.getElementById('title');
+    const sub = document.getElementById('sub');
+    const loginBtn = document.getElementById('loginBtn');
+    const links = document.getElementById('links');
+
     if (!token) {
-      err.textContent = 'Token em falta.';
+      title.textContent = 'Token em falta';
+      sub.textContent = 'O link de confirmação está incompleto.';
+      err.textContent = 'Token em falta. Solicite um novo email de confirmação.';
       err.classList.add('visible');
       return;
     }
     try {
       const { res, data } = await postJson('/api/auth/verify-email', { token });
       if (!res.ok) {
+        const code = data.code || '';
+        if (code === 'TOKEN_EXPIRED') {
+          title.textContent = 'Link expirado';
+          sub.textContent = 'Este link de confirmação já não é válido.';
+        } else if (code === 'TOKEN_USED') {
+          title.textContent = 'Link já utilizado';
+          sub.textContent = 'Este endereço já foi confirmado anteriormente.';
+        } else {
+          title.textContent = 'Confirmação não concluída';
+          sub.textContent = 'Não foi possível validar este link.';
+        }
         err.textContent = data.error || 'Verificação falhou.';
         err.classList.add('visible');
         return;
       }
-      ok.textContent = data.message || 'Email verificado.';
+      title.textContent = 'Email confirmado';
+      sub.textContent = 'O seu endereço foi verificado com sucesso.';
+      ok.textContent = data.message || 'Email verificado com sucesso. Pode iniciar sessão.';
       ok.classList.add('visible');
+      loginBtn.hidden = false;
+      links.hidden = true;
+      try { sessionStorage.removeItem('mlf_pending_email'); } catch (_) {}
     } catch (e) {
+      title.textContent = 'Erro de verificação';
+      sub.textContent = 'Ocorreu um problema ao confirmar o email.';
       err.textContent = e.message || 'Erro de rede ou de segurança.';
       err.classList.add('visible');
     }
