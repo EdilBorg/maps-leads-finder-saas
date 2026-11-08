@@ -125,15 +125,49 @@ describe('performShutdown', () => {
     assert.equal(result.closeError, true);
   });
 
-  it('treats missing closePool as success after idle', async () => {
+  it('treats missing closePool as failure after idle', async () => {
+    const state = { shuttingDown: false, poolClosed: false };
+    const logs = [];
     const result = await performShutdown({
-      state: { shuttingDown: false, poolClosed: false },
+      state,
+      waitForIdle: async () => true,
+      stopAbandonedSearchRecovery: () => {},
+      log: () => {},
+      error: (m) => logs.push(String(m)),
+    });
+    assert.equal(result.poolClosed, false);
+    assert.equal(result.closeError, true);
+    assert.equal(result.retryable, true);
+    assert.equal(result.reason, 'CLOSE_POOL_MISSING');
+    assert.equal(state.shuttingDown, false);
+    assert.equal(state.poolClosed, false);
+    assert.ok(logs.some((l) => l.toLowerCase().includes('closepool') || l.includes('not closed')));
+  });
+
+  it('retries successfully after missing closePool when close is provided', async () => {
+    const state = { shuttingDown: false, poolClosed: false };
+    const first = await performShutdown({
+      state,
       waitForIdle: async () => true,
       stopAbandonedSearchRecovery: () => {},
       log: () => {},
       error: () => {},
     });
-    assert.equal(result.poolClosed, true);
+    assert.equal(first.poolClosed, false);
+    assert.equal(first.retryable, true);
+
+    let closed = 0;
+    const second = await performShutdown({
+      state,
+      waitForIdle: async () => true,
+      closePool: async () => { closed += 1; },
+      stopAbandonedSearchRecovery: () => {},
+      log: () => {},
+      error: () => {},
+    });
+    assert.equal(second.poolClosed, true);
+    assert.equal(closed, 1);
+    assert.equal(state.poolClosed, true);
   });
 
   it('does not call closePool twice after success', async () => {
