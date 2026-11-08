@@ -1,33 +1,29 @@
 # Testes de integração PostgreSQL — Maps Leads Finder SaaS
 
-**Estado actual:** testes unitários executados neste ambiente; testes PG **implementados**, execução/validação real **PENDENTE** (sem BD `*_test` + `ALLOW_DB_TESTS=1`).
+**Estado:** unitários executados neste ambiente. Testes PG **implementados**; execução/validação real **PENDENTE** (sem BD `*_test` + `ALLOW_DB_TESTS=1`).
 
-## Matriz oficial A–H
+## Matriz oficial A–H (única)
 
-| ID | Cenário | Ficheiro / teste | Implementado | Executado | Validado PG real |
-|----|---------|------------------|--------------|-----------|------------------|
-| A | Aquisição concorrente (mesmo user) | `quotaHold.pg.test.js` — `A [official]` | Sim | Não | **PENDENTE** |
-| B | Isolamento multiutilizador | `quotaHold.pg.test.js` — `B [official]` | Sim | Não | **PENDENTE** |
-| C | Renovação × recuperação | `recoveryConcurrency.pg.test.js` — `C [official]` | Sim | Não | **PENDENTE** |
-| D | Persistência (`runAndPersist`) × recuperação | `recoveryConcurrency.pg.test.js` — `D [official]` | Sim | Não | **PENDENTE** |
-| E | Dois jobs / advisory lock | `recoveryConcurrency.pg.test.js` — `E [official]` | Sim | Não | **PENDENTE** |
-| F | Lease expirada | `quotaHold.pg.test.js` — `F [official]` | Sim | Não | **PENDENTE** |
-| G | Token substituído | `quotaHold.pg.test.js` — `G [official]` | Sim | Não | **PENDENTE** |
-| H | Idempotência da recuperação | `recoveryConcurrency.pg.test.js` — `H [official]` | Sim | Não | **PENDENTE** |
+| ID | Cenário | Comportamento | Ficheiro |
+|----|---------|---------------|----------|
+| A | Aquisição concorrente | Duas aquisições simultâneas do mesmo user: só uma obtém a reserva | `quotaHold.pg.test.js` |
+| B | Isolamento multiutilizador | Dois users adquirem independentemente | `quotaHold.pg.test.js` |
+| C | Renovação × recuperação | Lease renovada sob lock protege search `running` | `recoveryConcurrency.pg.test.js` |
+| D | Persistência × recuperação | `runAndPersist` real vs recover; sem deadlock; resultados + quota | `recoveryConcurrency.pg.test.js` |
+| E | Dois jobs de recuperação | Advisory lock: segundo job `skipped` | `recoveryConcurrency.pg.test.js` |
+| F | Lease expirada | Reserva expirada recuperável; token antigo não consome | `quotaHold.pg.test.js` |
+| G | Token substituído | Token antigo não renova/consome/liberta a reserva nova | `quotaHold.pg.test.js` |
+| H | Idempotência da recuperação | 2.ª recover: snapshot idêntico; target deixa de ser elegível | `recoveryConcurrency.pg.test.js` |
 
 Testes `extra:` cobrem primeira reserva, consume, release, token estrangeiro, renew, etc.
 
-## Sincronização C/D
-
-`tests/helpers/pgLockWait.js`: `waitUntilBlockedBy` via `pg_blocking_pids` (timeout 8s).
-
-## Cenário D
-
-`runAndPersist` com `executeSearchFn` + `afterUserLock` (sem APIs externas).
+| ID | Implementado | Executado | Validado PG real |
+|----|--------------|-----------|------------------|
+| A–H | Sim | Não | **PENDENTE** |
 
 ## Schema
 
-Migrations 008/009. Testes sem `ALTER TABLE` ad-hoc.
+Migrations `008` e `009`. **Os testes não executam ALTER TABLE / CREATE TABLE / ADD COLUMN.**
 
 ## Guard e execução
 
@@ -40,4 +36,4 @@ node --test tests/quotaHold.pg.test.js tests/recoveryConcurrency.pg.test.js
 
 ## Produção
 
-Não usar BD Render; não activar recovery job; não migrar produção.
+Não usar BD Render; não migrar produção; não activar recovery job.

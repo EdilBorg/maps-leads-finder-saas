@@ -1,6 +1,7 @@
 /**
- * PostgreSQL integration tests for free-search holds.
- * Requires ALLOW_DB_TESTS=1 and a *_test database (testDbGuard).
+ * PostgreSQL integration — official scenarios A, B, F, G (+ extras).
+ * Schema: migrations 008/009 only (no ALTER TABLE in tests).
+ * Requires ALLOW_DB_TESTS=1 and a safe *_test database (testDbGuard).
  */
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,6 +15,7 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
   let consumeFreeSearchHold;
   let releaseFreeSearchHold;
   let renewFreeSearchHold;
+  let recoverAbandonedSearches;
 
   before(async () => {
     assertSafeTestDatabase();
@@ -24,13 +26,8 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
       consumeFreeSearchHold,
       releaseFreeSearchHold,
       renewFreeSearchHold,
+      recoverAbandonedSearches,
     } = require('../src/services/freeSearchHold'));
-    await pool.query(`
-      ALTER TABLE users
-        ADD COLUMN IF NOT EXISTS free_search_hold_token UUID NULL,
-        ADD COLUMN IF NOT EXISTS free_search_hold_until TIMESTAMPTZ NULL,
-        ADD COLUMN IF NOT EXISTS free_search_hold_search_id UUID NULL
-    `);
   });
 
   after(async () => {
@@ -48,10 +45,11 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
   }
 
   async function cleanupUser(id) {
+    await pool.query('DELETE FROM searches WHERE user_id = $1', [id]).catch(() => {});
     await pool.query('DELETE FROM users WHERE id = $1', [id]).catch(() => {});
   }
 
-  it('A: first reservation creates token without consuming', async () => {
+  it('extra: first reservation creates token without consuming', async () => {
     const id = await createUser();
     try {
       const client = await pool.connect();
@@ -67,7 +65,7 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
     } finally { await cleanupUser(id); }
   });
 
-  it('B: parallel acquires — only one wins', async () => {
+  it('A [official]: concurrent acquire — only one wins for same user', async () => {
     const id = await createUser();
     try {
       const c1 = await pool.connect();
@@ -86,7 +84,7 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
     } finally { await cleanupUser(id); }
   });
 
-  it('C: different users both acquire', async () => {
+  it('B [official]: multi-tenant isolation — different users both acquire', async () => {
     const id1 = await createUser();
     const id2 = await createUser();
     try {
@@ -106,7 +104,7 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
     }
   });
 
-  it('D+E: expired hold reclaimable; old token cannot consume', async () => {
+  it('F [official]: expired lease reclaimable; old token cannot consume', async () => {
     const id = await createUser();
     try {
       const client = await pool.connect();
@@ -128,7 +126,30 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
     } finally { await cleanupUser(id); }
   });
 
-  it('F: valid consume', async () => {
+  it('G [official]: replaced token — old token cannot renew/consume/release', async () => {
+    const id = await createUser();
+    try {
+      const client = await pool.connect();
+      try {
+        const first = await acquireFreeSearchHold(client, id);
+        await client.query(
+          `UPDATE users SET free_search_hold_until = NOW() - interval '1 minute' WHERE id=$1`, [id]
+        );
+        const second = await acquireFreeSearchHold(client, id);
+        assert.notEqual(second.holdToken, first.holdToken);
+        assert.equal((await renewFreeSearchHold(client, id, first.holdToken)).renewed, false);
+        assert.equal(await consumeFreeSearchHold(client, id, first.holdToken), false);
+        await releaseFreeSearchHold(client, id, first.holdToken);
+        const { rows } = await client.query(
+          'SELECT free_search_hold_token, free_search_used FROM users WHERE id=$1', [id]
+        );
+        assert.equal(rows[0].free_search_hold_token, second.holdToken);
+        assert.equal(rows[0].free_search_used, false);
+      } finally { client.release(); }
+    } finally { await cleanupUser(id); }
+  });
+
+  it('extra: valid consume sets free_search_used', async () => {
     const id = await createUser();
     try {
       const client = await pool.connect();
@@ -144,7 +165,7 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
     } finally { await cleanupUser(id); }
   });
 
-  it('G: release restores availability', async () => {
+  it('extra: release restores availability', async () => {
     const id = await createUser();
     try {
       const client = await pool.connect();
@@ -156,7 +177,7 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
     } finally { await cleanupUser(id); }
   });
 
-  it('H: other user cannot consume foreign token', async () => {
+  it('extra: other user cannot consume foreign token', async () => {
     const a = await createUser();
     const b = await createUser();
     try {
@@ -176,7 +197,7 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
     }
   });
 
-  it('J: renew extends valid hold; wrong token fails', async () => {
+  it('extra: renew extends valid hold; wrong token fails', async () => {
     const id = await createUser();
     try {
       const client = await pool.connect();
@@ -188,6 +209,43 @@ describe('free search hold PostgreSQL integration', { skip: !RUN }, () => {
           false
         );
       } finally { client.release(); }
+    } finally { await cleanupUser(id); }
+  });
+
+  it('extra: recovery does not clear a newer replaced token', async () => {
+    const id = await createUser();
+    try {
+      const client = await pool.connect();
+      let oldSearchId;
+      let newToken;
+      try {
+        const first = await acquireFreeSearchHold(client, id);
+        const ins = await client.query(
+          `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
+           VALUES ($1, 'old', 'loc', $2::jsonb, 'running', '[]'::jsonb,
+                   NOW() - interval '3 hours', NOW() + interval '30 days')
+           RETURNING id`,
+          [id, JSON.stringify({ holdToken: first.holdToken })]
+        );
+        oldSearchId = ins.rows[0].id;
+        await client.query(
+          `UPDATE users SET free_search_hold_until = NOW() - interval '1 minute' WHERE id=$1`, [id]
+        );
+        const second = await acquireFreeSearchHold(client, id);
+        newToken = second.holdToken;
+        await client.query(
+          `UPDATE users SET free_search_hold_until = NOW() + interval '20 minutes',
+             free_search_hold_search_id = NULL WHERE id=$1`, [id]
+        );
+      } finally { client.release(); }
+
+      await recoverAbandonedSearches(pool, { graceMinutes: 30 });
+      const { rows: s } = await pool.query('SELECT status FROM searches WHERE id=$1', [oldSearchId]);
+      assert.equal(s[0].status, 'failed');
+      const { rows: u } = await pool.query(
+        'SELECT free_search_hold_token FROM users WHERE id=$1', [id]
+      );
+      assert.equal(u[0].free_search_hold_token, newToken);
     } finally { await cleanupUser(id); }
   });
 });
