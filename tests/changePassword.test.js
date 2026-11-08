@@ -98,4 +98,21 @@ describe('frontend account UI contract', () => {
     assert.match(html, /table-wrap-history/);
     assert.match(html, /table-wrap-leads/);
   });
+
+  it('masks recovery email in UI but keeps full email for API body', () => {
+    const js = fs.readFileSync(path.join(root, 'public/js/app.js'), 'utf8');
+    assert.match(js, /function maskEmail\s*\(/);
+    assert.match(js, /maskEmail\(currentUser\.email\)/);
+    assert.match(js, /body:\s*\{\s*email:\s*currentUser\.email/);
+    assert.doesNotMatch(js, /emailEl\.textContent\s*=\s*\(currentUser && currentUser\.email\)\s*\?\s*currentUser\.email/);
+  });
+
+  it('dashboard recent searches use table-wrap and min-width class', () => {
+    const js = fs.readFileSync(path.join(root, 'public/js/app.js'), 'utf8');
+    const css = fs.readFileSync(path.join(root, 'public/css/main.css'), 'utf8');
+    assert.match(js, /table-wrap table-wrap-dashboard/);
+    assert.match(js, /data table-dashboard/);
+    assert.match(js, /openSearch\(item\.id\)/);
+    assert.match(css, /table-wrap-dashboard[\s\S]*min-width:\s*720px/);
+  });
 });
