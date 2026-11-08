@@ -26,6 +26,7 @@
         <div class="nav-section-label">Conta</div>
         <button type="button" class="nav-item" data-view="history">Histórico</button>
         <button type="button" class="nav-item" data-view="leads">Leads guardados</button>
+        <button type="button" class="nav-item" data-view="settings">Configurações</button>
         <button type="button" class="nav-item" data-view="plans" disabled title="Disponível em etapas posteriores">Planos</button>
       </nav>
     </aside>
@@ -35,11 +36,15 @@
           <button type="button" class="mobile-toggle" id="mobile-toggle" aria-label="Abrir menu">☰</button>
           <span class="topbar-title" id="topbar-title">Dashboard</span>
         </div>
-        <div class="topbar-actions">
-          <span id="auth-badge" class="badge"></span>
-          <a href="/pages/login.html" id="link-login" class="btn btn-ghost btn-sm">Entrar</a>
-          <a href="/pages/register.html" id="link-register" class="btn btn-ghost btn-sm">Registar</a>
-          <button type="button" class="btn btn-ghost btn-sm" id="btn-logout" hidden>Sair</button>
+        <div class="topbar-actions" data-auth-state="loading">
+          <div id="guest-actions" class="topbar-group" hidden>
+            <a href="/pages/login.html" id="link-login" class="btn btn-ghost btn-sm">Entrar</a>
+            <a href="/pages/register.html" id="link-register" class="btn btn-primary btn-sm">Registar</a>
+          </div>
+          <div id="user-actions" class="topbar-group" hidden>
+            <span id="auth-badge" class="badge auth-badge" title=""></span>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-logout">Sair</button>
+          </div>
         </div>
       </header>
       <div class="demo-banner" id="app-banner" hidden></div>
@@ -153,6 +158,55 @@
                 <tbody id="leads-body"></tbody>
               </table>
             </div>
+          </div>
+        </section>
+
+        <section class="view" id="view-settings" aria-label="Configurações">
+          <h2 class="page-heading">Configurações</h2>
+          <p class="page-sub">Informações da conta e segurança</p>
+          <div class="card settings-card">
+            <div class="card-header"><h3 class="card-title">Informações da conta</h3></div>
+            <div class="settings-info">
+              <div class="settings-row"><span class="settings-label">Nome</span><span class="settings-value" id="settings-name">—</span></div>
+              <div class="settings-row"><span class="settings-label">Email</span><span class="settings-value" id="settings-email">—</span></div>
+              <div class="settings-row"><span class="settings-label">Estado do email</span><span class="settings-value" id="settings-verified">—</span></div>
+            </div>
+          </div>
+          <div class="card settings-card" style="margin-top: var(--spacing-16)">
+            <div class="card-header"><h3 class="card-title">Segurança da conta</h3></div>
+            <p class="card-muted" style="margin:0 0 12px">Altere a palavra-passe da conta. Será necessário iniciar sessão novamente após a alteração.</p>
+            <button type="button" class="btn btn-ghost" id="btn-show-change-password">Alterar palavra-passe</button>
+            <form id="change-password-form" class="stack-gap-16" hidden style="margin-top:16px">
+              <div class="form-group">
+                <label class="form-label" for="current-password">Palavra-passe atual</label>
+                <div class="password-field">
+                  <input class="input" type="password" id="current-password" name="currentPassword" autocomplete="current-password" required>
+                  <button type="button" class="btn btn-ghost btn-sm toggle-password" data-target="current-password" aria-label="Mostrar palavra-passe">Mostrar</button>
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="new-password">Nova palavra-passe</label>
+                <div class="password-field">
+                  <input class="input" type="password" id="new-password" name="newPassword" autocomplete="new-password" required minlength="8">
+                  <button type="button" class="btn btn-ghost btn-sm toggle-password" data-target="new-password" aria-label="Mostrar palavra-passe">Mostrar</button>
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="new-password-confirm">Confirmar nova palavra-passe</label>
+                <div class="password-field">
+                  <input class="input" type="password" id="new-password-confirm" name="newPasswordConfirm" autocomplete="new-password" required minlength="8">
+                  <button type="button" class="btn btn-ghost btn-sm toggle-password" data-target="new-password-confirm" aria-label="Mostrar palavra-passe">Mostrar</button>
+                </div>
+              </div>
+              <div class="error-box" id="change-password-error" role="alert"></div>
+              <div class="success-box" id="change-password-ok" role="status"></div>
+              <div class="toolbar">
+                <div class="toolbar-left">
+                  <button type="submit" class="btn btn-primary" id="btn-change-password">Guardar alterações</button>
+                  <button type="button" class="btn btn-ghost" id="btn-cancel-change-password">Cancelar</button>
+                </div>
+              </div>
+            </form>
           </div>
         </section>
       </main>
