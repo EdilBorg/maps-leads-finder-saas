@@ -5,6 +5,16 @@
   const $ = (s, r) => (r || document).querySelector(s);
   const $all = (s, r) => Array.from((r || document).querySelectorAll(s));
   function esc(s) { return s == null ? '' : String(s); }
+  function maskEmail(Email(email) {
+    const value = String(email == null ? '' : email).trim();
+    const at = value.indexOf('@');
+    if (at <= 0 || at === value.length - 1) return '—';
+    const local = value.slice(0, at);
+    const domain = value.slice(at + 1);
+    if (!domain) return '—';
+    const visible = local.slice(0, Math.min(2, local.length));
+    return visible + '****@' + domain;
+  }
   async function ensureCsrf() {
     if (csrfToken) return csrfToken;
     const res = await fetch('/api/auth/csrf', { credentials: 'same-origin' });
@@ -161,7 +171,10 @@
     if (!data.recentSearches || !data.recentSearches.length) {
       const p = document.createElement('p'); p.className = 'empty-hint'; p.textContent = 'Ainda não existem pesquisas.'; box.appendChild(p); return;
     }
-    const table = document.createElement('table'); table.className = 'data-table';
+    const wrap = document.createElement('div');
+    wrap.className = 'table-wrap table-wrap-dashboard';
+    const table = document.createElement('table');
+    table.className = 'data table-dashboard';
     const thead = document.createElement('thead');
     thead.innerHTML = '<tr><th>Categoria</th><th>Localização</th><th>Resultados</th><th>Estado</th><th>Data</th></tr>';
     table.appendChild(thead);
@@ -177,7 +190,9 @@
       });
       tbody.appendChild(tr);
     });
-    table.appendChild(tbody); box.appendChild(table);
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    box.appendChild(wrap);
   }
   async function loadHistory() {
     const body = $('#history-body'); if (!body) return; body.innerHTML = '';
@@ -357,7 +372,7 @@
         showBtn.hidden = true;
         hideMessages();
         if (emailEl) {
-          emailEl.textContent = (currentUser && currentUser.email) ? currentUser.email : '—';
+          emailEl.textContent = (currentUser && currentUser.email) ? maskEmail(currentUser.email) : '—';
         }
       });
     }
