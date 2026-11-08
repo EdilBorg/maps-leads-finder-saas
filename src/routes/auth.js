@@ -146,6 +146,43 @@ router.get('/me', requireAuth, async (req, res, next) => {
   }
 });
 
+router.post('/change-password', requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword, newPasswordConfirm } = req.body || {};
+    const result = await authService.changePassword({
+      userId: req.session.userId,
+      currentPassword,
+      newPassword,
+      newPasswordConfirm,
+    });
+    if (!result.ok) {
+      if (result.code === 'UNAUTHORIZED') {
+        return res.status(401).json({ error: 'Não autenticado.' });
+      }
+      if (result.code === 'INVALID_CURRENT') {
+        return res.status(400).json({
+          error: result.errors?.[0] || 'Palavra-passe atual incorrecta.',
+          code: result.code,
+        });
+      }
+      return res.status(400).json({
+        error: result.errors?.[0] || 'Dados inválidos.',
+        code: result.code || 'VALIDATION',
+      });
+    }
+    req.session.destroy((err) => {
+      if (err) return next(err);
+      res.clearCookie(config.sessionCookieName || 'mlf.sid');
+      return res.json({
+        message: 'Palavra-passe atualizada. Inicie sessão novamente.',
+        requireReauth: true,
+      });
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 router.post('/verify-email', requireCsrf, async (req, res, next) => {
   try {
     const token = (req.body && req.body.token) || req.query.token;
