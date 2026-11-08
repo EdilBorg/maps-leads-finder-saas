@@ -6,6 +6,7 @@ const {
   releaseFreeSearchHold,
   renewFreeSearchHold,
   recoverAbandonedSearches,
+  resolveDbClient,
 } = require('../src/services/freeSearchHold');
 
 function createMockClient(userState) {
@@ -109,14 +110,104 @@ describe('free search hold (service logic)', () => {
   });
 });
 
-describe('recoverAbandonedSearches (mock SQL contract)', () => {
-  it('does not mark search failed when lease is still valid and bound', async () => {
+describe('resolveDbClient Pool vs PoolClient', () => {
+  it('classifies Pool (connect, no release)', () => {
+    const pool = {
+      query: async () => ({ rows: [] }),
+      connect: async () => ({ query: async () => ({ rows: [] }), release() {} }),
+    };
+    const r = resolveDbClient(pool);
+    assert.equal(r.source, 'pool');
+    assert.equal(r.shouldRelease, true);
+    assert.equal(r.client, null);
+  });
+
+  it('classifies PoolClient (release, no connect)', () => {
+    const client = {
+      query: async () => ({ rows: [] }),
+      release() {},
+    };
+    const r = resolveDbClient(client);
+    assert.equal(r.source, 'client');
+    assert.equal(r.shouldRelease, false);
+    assert.equal(r.client, client);
+  });
+
+  it('classifies query-only mock as query-object', () => {
+    const mock = { query: async () => ({ rows: [] }) };
+    const r = resolveDbClient(mock);
+    assert.equal(r.source, 'query-object');
+    assert.equal(r.shouldRelease, false);
+  });
+
+  it('throws without query', () => {
+    assert.throws(() => resolveDbClient({}), /requires a pg/);
+  });
+});
+
+describe('recoverAbandonedSearches connection handling', () => {
+  it('uses PoolClient without calling connect or release', async () => {
+    let releaseCalled = false;
     const client = {
       async query(sql) {
         const s = sql.replace(/\s+/g, ' ');
         if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) {
           return { rows: [], rowCount: 0 };
         }
+        if (s.includes('FOR UPDATE')) return { rows: [], rowCount: 0 };
+        if (s.includes('UPDATE searches')) {
+          assert.ok(s.includes('free_search_hold_until > NOW()') || s.includes('free_search_hold_until > now()'));
+          assert.ok(s.includes('NOT (') || s.includes('not ('));
+          return { rows: [], rowCount: 0 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      release() {
+        releaseCalled = true;
+      },
+    };
+    const r = await recoverAbandonedSearches(client);
+    assert.equal(r.abandoned, 0);
+    assert.equal(releaseCalled, false);
+  });
+
+  it('acquires and releases when given a Pool', async () => {
+    let released = 0;
+    const poolClient = {
+      async query(sql) {
+        const s = sql.replace(/\s+/g, ' ');
+        if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (s.includes('FOR UPDATE')) return { rows: [], rowCount: 0 };
+        if (s.includes('UPDATE searches')) return { rows: [], rowCount: 0 };
+        return { rows: [], rowCount: 0 };
+      },
+      release() {
+        released += 1;
+      },
+    };
+    const pool = {
+      async query() {
+        return { rows: [] };
+      },
+      async connect() {
+        return poolClient;
+      },
+    };
+    const r = await recoverAbandonedSearches(pool);
+    assert.equal(r.abandoned, 0);
+    assert.equal(released, 1);
+  });
+
+  it('does not mark search failed when lease valid (SQL contract)', async () => {
+    const client = {
+      async query(sql) {
+        const s = sql.replace(/\s+/g, ' ');
+        if (s.startsWith('BEGIN') || s.startsWith('COMMIT') || s.startsWith('ROLLBACK')) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (s.includes('FOR UPDATE')) return { rows: [], rowCount: 0 };
         if (s.includes('UPDATE searches AS s') || s.includes('UPDATE searches as s')) {
           assert.ok(s.includes('free_search_hold_until > NOW()') || s.includes('free_search_hold_until > now()'));
           assert.ok(s.includes('NOT (') || s.includes('not ('));
@@ -125,7 +216,7 @@ describe('recoverAbandonedSearches (mock SQL contract)', () => {
         return { rows: [], rowCount: 0 };
       },
     };
-    const r = await recoverAbandonedSearches({ query: client.query.bind(client) });
+    const r = await recoverAbandonedSearches(client);
     assert.equal(r.abandoned, 0);
   });
 });
