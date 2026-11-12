@@ -5,6 +5,7 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   search,
+  resolveErrorCode,
   buildOverpassQuery,
   mapElement,
   escapeOverpassRegex,
@@ -277,5 +278,104 @@ describe('osmProvider error diagnostics', () => {
     assert.equal(r.status, 'error');
     assert.equal(r.errorCode, 'PROVIDER_TIMEOUT');
     assert.equal(r.errorStage, 'geocode');
+  });
+
+  it('TypeError fetch failed with cause ENOTFOUND resolves network code', async () => {
+    delete process.env.OSM_DISABLED;
+    mockFetch(async (url, init) => {
+      if (!init || init.method !== 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return [{ lat: '1', lon: '2' }];
+          },
+        };
+      }
+      const cause = new Error('getaddrinfo ENOTFOUND overpass-api.de');
+      cause.code = 'ENOTFOUND';
+      const err = new TypeError('fetch failed');
+      err.cause = cause;
+      throw err;
+    });
+    const r = await search({ query: 'x', location: 'y', limit: 5 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorStage, 'overpass');
+    assert.equal(r.errorCode, 'ENOTFOUND');
+    assert.equal(r.httpStatus, null);
+    assert.equal(r.errorName, 'TypeError');
+    assert.equal(r.causeCode, 'ENOTFOUND');
+  });
+
+  it('TypeError fetch failed with cause ECONNRESET', async () => {
+    delete process.env.OSM_DISABLED;
+    mockFetch(async (url, init) => {
+      if (!init || init.method !== 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return [{ lat: '1', lon: '2' }];
+          },
+        };
+      }
+      const cause = new Error('read ECONNRESET');
+      cause.code = 'ECONNRESET';
+      const err = new TypeError('fetch failed');
+      err.cause = cause;
+      throw err;
+    });
+    const r = await search({ query: 'x', location: 'y', limit: 5 });
+    assert.equal(r.errorCode, 'ECONNRESET');
+    assert.equal(r.errorStage, 'overpass');
+    assert.equal(r.httpStatus, null);
+  });
+
+  it('TLS cause code is preserved from fetch failed wrapper', async () => {
+    delete process.env.OSM_DISABLED;
+    mockFetch(async (url, init) => {
+      if (!init || init.method !== 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return [{ lat: '1', lon: '2' }];
+          },
+        };
+      }
+      const cause = new Error('certificate has expired');
+      cause.code = 'CERT_HAS_EXPIRED';
+      const err = new TypeError('fetch failed');
+      err.cause = cause;
+      throw err;
+    });
+    const r = await search({ query: 'x', location: 'y', limit: 5 });
+    assert.equal(r.errorCode, 'CERT_HAS_EXPIRED');
+    assert.equal(r.errorStage, 'overpass');
+    assert.equal(r.httpStatus, null);
+  });
+
+  it('error without code or cause falls back to PROVIDER_ERROR', async () => {
+    delete process.env.OSM_DISABLED;
+    mockFetch(async () => {
+      throw new Error('something went wrong');
+    });
+    const r = await search({ query: 'x', location: 'y', limit: 5 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorCode, 'PROVIDER_ERROR');
+    assert.equal(r.errorStage, 'geocode');
+    assert.equal(r.httpStatus, null);
+  });
+
+  it('resolveErrorCode prefers cause for generic fetch failures', () => {
+    const cause = new Error('dns');
+    cause.code = 'ENOTFOUND';
+    const err = new TypeError('fetch failed');
+    err.cause = cause;
+    assert.equal(resolveErrorCode(err), 'ENOTFOUND');
+    assert.equal(resolveErrorCode(null), 'PROVIDER_ERROR');
+    const plain = new Error('x');
+    plain.code = 'HTTP_ERROR';
+    assert.equal(resolveErrorCode(plain), 'HTTP_ERROR');
   });
 });
