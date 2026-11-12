@@ -79,18 +79,19 @@ function deduplicate(leads) {
   return out;
 }
 
-function applyFilters(leads, filters = {}) {
+function applyFilters(leads, filters) {
+  if (!filters || typeof filters !== 'object') return leads;
   return leads.filter((lead) => {
     if (filters.hasPhone && !lead.phone) return false;
     if (filters.hasEmail && !lead.email) return false;
-    if (filters.noWebsite && lead.website) return false;
+    if (filters.hasWebsite === false && lead.website) return false;
     if (filters.minRating != null && filters.minRating !== '') {
       const min = Number(filters.minRating);
       if (Number.isFinite(min) && (lead.rating == null || lead.rating < min)) return false;
     }
-    if (filters.minReviews != null && filters.minReviews !== '' && filters.minReviews !== false) {
-      const minR = Number(filters.minReviews);
-      if (Number.isFinite(minR) && minR > 0 && (lead.reviewsCount == null || lead.reviewsCount < minR)) return false;
+    if (filters.minReviews) {
+      const n = Number(lead.reviewsCount);
+      if (!Number.isFinite(n) || n < 1) return false;
     }
     return true;
   });
@@ -98,6 +99,131 @@ function applyFilters(leads, filters = {}) {
 
 function perProviderLimit(globalLimit) {
   return Math.min(Math.max(globalLimit, 20), 200);
+}
+
+function normalizeProviderResult(raw) {
+  if (raw == null || typeof raw !== 'object') {
+    return {
+      status: 'error',
+      results: [],
+      errorCode: 'INVALID_RESPONSE',
+      errorMessage: 'Invalid provider response',
+    };
+  }
+  const allowed = new Set(['ok', 'empty', 'error', 'not_configured']);
+  let status = allowed.has(raw.status) ? raw.status : 'error';
+  if (!Array.isArray(raw.results)) {
+    if (status === 'ok' || status === 'empty') {
+      return {
+        status: 'error',
+        results: [],
+        errorCode: 'INVALID_RESPONSE',
+        errorMessage: 'Provider results must be an array',
+      };
+    }
+    return {
+      status,
+      results: [],
+      errorCode: raw.errorCode || (status === 'error' ? 'PROVIDER_ERROR' : null),
+      errorMessage: raw.errorMessage || null,
+    };
+  }
+  const results = raw.results;
+  if (status === 'ok' && results.length === 0) status = 'empty';
+  return {
+    status,
+    results,
+    errorCode: raw.errorCode || null,
+    errorMessage: raw.errorMessage || null,
+  };
+}
+
+/**
+ * Run a single provider in isolation. Never throws.
+ */
+async function runProviderSafe(providerEntry, criteria) {
+  const code = providerEntry && providerEntry.code != null ? providerEntry.code : 'unknown';
+  const t0 = Date.now();
+  try {
+    if (!providerEntry || typeof providerEntry.search !== 'function') {
+      return {
+        code,
+        result: {
+          status: 'error',
+          results: [],
+          errorCode: 'PROVIDER_MISSING',
+          errorMessage: 'Provider search unavailable',
+        },
+        durationMs: Date.now() - t0,
+      };
+    }
+    const raw = await providerEntry.search(criteria);
+    return {
+      code,
+      result: normalizeProviderResult(raw),
+      durationMs: Date.now() - t0,
+    };
+  } catch (err) {
+    return {
+      code,
+      result: {
+        status: 'error',
+        results: [],
+        errorCode: (err && err.code) || 'PROVIDER_ERROR',
+        errorMessage: (err && err.message) || 'provider failed',
+      },
+      durationMs: Date.now() - t0,
+    };
+  }
+}
+
+function isSuccessStatus(status) {
+  return status === 'ok' || status === 'empty';
+}
+
+function isTechnicalFail(status) {
+  return status === 'error';
+}
+
+function isUnavailable(status) {
+  return status === 'not_configured';
+}
+
+/**
+ * Central classification of multi-provider search outcomes.
+ * @param {string[]} statuses provider result statuses
+ * @param {boolean} hasResults whether usable leads remain after filters
+ */
+function classifySearchOutcome(statuses, hasResults) {
+  const list = Array.isArray(statuses) ? statuses : [];
+  const anySuccess = list.some(isSuccessStatus);
+  const anyTechFail = list.some(isTechnicalFail);
+  const anyUnavailable = list.some(isUnavailable);
+  const allFailedOrUnavailable = list.length > 0 && list.every((s) => isTechnicalFail(s) || isUnavailable(s));
+
+  if (hasResults) {
+    return {
+      outcome: 'results',
+      searchStatus: anyTechFail || anyUnavailable ? 'partial' : 'completed',
+    };
+  }
+
+  if (list.length === 0 || allFailedOrUnavailable) {
+    return { outcome: 'error', searchStatus: 'failed' };
+  }
+
+  // At least one provider completed normally (ok/empty) but no usable results.
+  if (anyTechFail && anySuccess) {
+    // Coverage compromised — do not claim absolute absence of establishments.
+    return { outcome: 'inconclusive', searchStatus: 'completed' };
+  }
+
+  if (anySuccess && !anyTechFail) {
+    // All completed sources empty; optional not_configured peers allowed.
+    return { outcome: 'no_results', searchStatus: 'completed' };
+  }
+
+  return { outcome: 'error', searchStatus: 'failed' };
 }
 
 async function executeSearch(input) {
@@ -124,23 +250,21 @@ async function executeSearch(input) {
   const registry = { ...DEFAULT_PROVIDERS, ...(input.providers || {}) };
   const selected = modality.providerCodes.map((code) => {
     const p = registry[code];
-    if (!p || typeof p.search !== 'function') throw new Error(`Provider missing: ${code}`);
+    if (!p || typeof p.search !== 'function') {
+      return { code, search: null };
+    }
     return { code, search: p.search.bind(p) };
   });
 
   const started = Date.now();
   const providerResults = await Promise.all(
-    selected.map(async (provider) => {
-      const t0 = Date.now();
-      const result = await provider.search(criteria);
-      return { code: provider.code, result, durationMs: Date.now() - t0 };
-    })
+    selected.map((provider) => runProviderSafe(provider, criteria))
   );
 
   const internalProviders = providerResults.map((p) => ({
     code: p.code,
     status: p.result.status,
-    count: (p.result.results || []).length,
+    count: Array.isArray(p.result.results) ? p.result.results.length : 0,
     errorCode: p.result.errorCode || null,
     durationMs: p.durationMs,
   }));
@@ -156,24 +280,11 @@ async function executeSearch(input) {
   const limited = afterFilters.slice(0, globalLimit);
 
   const statuses = providerResults.map((p) => p.result.status);
-  const anyResults = limited.length > 0;
-  const hardFail = (s) => s === 'error' || s === 'not_configured';
-  const softEmpty = (s) => s === 'empty' || s === 'ok';
-
-  let outcome;
-  if (anyResults) outcome = 'results';
-  else if (statuses.every(hardFail)) outcome = 'error';
-  else if (statuses.some(hardFail) && statuses.some((s) => s === 'empty' || s === 'ok')) outcome = 'no_results';
-  else if (statuses.every((s) => softEmpty(s) || s === 'not_configured')) outcome = 'no_results';
-  else outcome = 'error';
-
-  let searchStatus = 'completed';
-  if (outcome === 'error') searchStatus = 'failed';
-  else if (anyResults && statuses.some(hardFail)) searchStatus = 'partial';
+  const classified = classifySearchOutcome(statuses, limited.length > 0);
 
   return {
-    outcome,
-    searchStatus,
+    outcome: classified.outcome,
+    searchStatus: classified.searchStatus,
     modality: modality.id,
     _providers: internalProviders,
     durationMs: Date.now() - started,
@@ -208,13 +319,19 @@ function publicLead(lead, index) {
 
 function clientMessageForOutcome(outcome) {
   if (outcome === 'results') return null;
-  if (outcome === 'no_results') return 'Não foi possível encontrar resultados para esta pesquisa.';
-  return 'Não foi possível realizar a pesquisa.';
+  if (outcome === 'no_results') {
+    return 'Não foram encontrados estabelecimentos para esta pesquisa. Experimenta alterar a categoria ou a localização.';
+  }
+  if (outcome === 'inconclusive') {
+    return 'Não foi possível concluir a pesquisa em todas as fontes. Os resultados disponíveis podem estar incompletos.';
+  }
+  return 'Não foi possível realizar a pesquisa neste momento. Tenta novamente mais tarde.';
 }
 
 function clientHintForOutcome(outcome) {
-  if (outcome === 'no_results') return 'Tenta alterar os termos ou a localização da pesquisa.';
-  if (outcome === 'error') return 'Ocorreu um problema. Tenta novamente.';
+  if (outcome === 'no_results') return 'Experimenta alterar a categoria ou a localização.';
+  if (outcome === 'inconclusive') return 'Tenta novamente mais tarde ou ajusta os critérios de pesquisa.';
+  if (outcome === 'error') return 'Tenta novamente mais tarde.';
   return null;
 }
 
@@ -229,6 +346,9 @@ module.exports = {
   deduplicate,
   applyFilters,
   perProviderLimit,
+  normalizeProviderResult,
+  runProviderSafe,
+  classifySearchOutcome,
   executeSearch,
   publicLead,
   clientMessageForOutcome,
