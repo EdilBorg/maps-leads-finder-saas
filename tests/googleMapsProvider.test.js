@@ -344,7 +344,7 @@ describe('googleMapsProvider Places API (New)', () => {
 
   it('uses explicit FieldMask without wildcard', async () => {
     const calls = mockFetchSequence([{ body: { places: [] } }]);
-    await google google.search({ query: 'x', location: 'y', limit: 5 });
+    await google.search({ query: 'x', location: 'y', limit: 5 });
     const mask = calls[0].init.headers['X-Goog-FieldMask'];
     assert.equal(mask.includes('*'), false);
     assert.equal(mask.includes('places.nationalPhoneNumber'), true);
