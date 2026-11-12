@@ -42,8 +42,26 @@ async function loadUser(req, res, next) {
   return next();
 }
 
+function requireAdmin(req, res, next) {
+  if (!req.session || !req.session.userId) {
+    return res.status(401).json({ error: 'Não autenticado.' });
+  }
+  // Role and verification must come from DB-backed req.user (loadUser).
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+  if (!req.user.emailVerified) {
+    return res.status(403).json({
+      error: 'Email não verificado.',
+      code: 'EMAIL_NOT_VERIFIED',
+    });
+  }
+  return next();
+}
+
 module.exports = {
   requireAuth,
   requireVerifiedEmail,
+  requireAdmin,
   loadUser,
 };
