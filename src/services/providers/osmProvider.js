@@ -85,7 +85,6 @@ const CATEGORIES = [
   },
   {
     id: 'shops',
-    // Generic shop=* — kept intentional; radius + result limit bound cost.
     tags: [{ key: 'shop', value: null }],
     aliases: ['loja', 'lojas', 'shop', 'shops', 'store', 'stores'],
   },
@@ -99,7 +98,6 @@ function userAgent() {
   return process.env.OSM_USER_AGENT || 'MapsLeadsFinderSaaS/0.1 (contact@example.com)';
 }
 
-/** Lowercase, strip diacritics, collapse whitespace. */
 function normalizeText(s) {
   return String(s == null ? '' : s)
     .normalize('NFD')
@@ -113,10 +111,6 @@ function escapeOverpassRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/**
- * Resolve query to a category via exact normalized alias match only.
- * @returns {{ id: string, tags: Array<{key:string,value:string|null}> }|null}
- */
 function resolveCategory(query) {
   const normalized = normalizeText(query);
   if (!normalized) return null;
@@ -165,10 +159,6 @@ function groupTagsByKey(tags) {
   return byKey;
 }
 
-/**
- * Build Overpass union for structured category tags (no name filter).
- * Supports multiple keys, multi-value regex, and key-only (e.g. shop=*).
- */
 function buildCategoryOverpassQuery(tags, radius, lat, lon, limit) {
   const lines = [];
   const byKey = groupTagsByKey(tags);
@@ -177,55 +167,50 @@ function buildCategoryOverpassQuery(tags, radius, lat, lon, limit) {
     const anyValue = values.some((v) => v == null);
     let filter;
     if (anyValue) {
-      filter = `["${key}"]`;
+      filter = '["' + key + '"]';
     } else if (values.length === 1) {
-      filter = `["${key}"=\"${values[0]}\"]`;
+      filter = '["' + key + '"="' + values[0] + '"]';
     } else {
       const reg = values.map((v) => escapeOverpassRegex(v)).join('|');
-      filter = `["${key}"~"^(${reg})$"]`;
+      filter = '["' + key + '"~"^(' + reg + ')$"]';
     }
     for (const type of ['node', 'way', 'relation']) {
-      lines.push(`  ${type}${filter}(around:${radius},${lat},${lon});`);
+      lines.push('  ' + type + filter + '(around:' + radius + ',' + lat + ',' + lon + ');');
     }
   }
 
-  return `
-[out:json][timeout:25];
-(
-${lines.join('\n')}
-);
-out center ${Math.min(limit, 100)};
-`.trim();
+  return (
+    '[out:json][timeout:25];\n(\n' +
+    lines.join('\n') +
+    '\n);\nout center ' +
+    Math.min(limit, 100) +
+    ';'
+  ).trim();
 }
 
-/** Legacy free-text name search (preserves previous behaviour). */
 function buildNameOverpassQuery(qEscaped, radius, lat, lon, limit) {
-  return `
-[out:json][timeout:25];
-(
-  node["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  way["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  node["amenity"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  way["amenity"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  node["shop"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  way["shop"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  node["office"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  way["office"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  node["tourism"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  way["tourism"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  relation["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  relation["amenity"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-  relation["shop"]["name"~"${qEscaped}",i](around:${radius},${lat},${lon});
-);
-out center ${Math.min(limit, 100)};
-`.trim();
+  const a = '(around:' + radius + ',' + lat + ',' + lon + ')';
+  return (
+    '[out:json][timeout:25];\n(\n' +
+    '  node["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  way["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  node["amenity"]["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  way["amenity"]["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  node["shop"]["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  way["shop"]["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  node["office"]["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  way["office"]["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  node["tourism"]["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  way["tourism"]["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  relation["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  relation["amenity"]["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    '  relation["shop"]["name"~"' + qEscaped + '",i]' + a + ';\n' +
+    ');\nout center ' +
+    Math.min(limit, 100) +
+    ';'
+  ).trim();
 }
 
-/**
- * Build Overpass QL for a user query.
- * Category aliases → tag filters; otherwise escaped name regex.
- * @param {string} query Raw user query (not pre-escaped).
- */
 function buildOverpassQuery(query, radius, lat, lon, limit) {
   const category = resolveCategory(query);
   if (category) {
@@ -307,7 +292,6 @@ async function search(criteria) {
     const stage = (err && err.errorStage) || 'osm_search';
     const httpStatus = err && err.httpStatus != null ? err.httpStatus : null;
     const code = (err && err.code) || 'PROVIDER_ERROR';
-    // Keep message short and free of credentials/URLs.
     let message = (err && err.message) || 'osm failed';
     message = String(message).slice(0, 200);
     return {
