@@ -1,9 +1,95 @@
 /**
  * OSM commercial/place search: Nominatim geocode + Overpass POI query.
- * Covers node, way and relation for amenity/shop/office/tourism + name match.
+ * Supports structured category tags (amenity/shop/…) and free-text name match.
  */
 const { withTimeout, okResult, errorResult, DEFAULT_TIMEOUT_MS } = require('./baseProvider');
 const CODE = 'osm';
+
+/**
+ * Extensible category catalogue: explicit aliases → OSM key/value tags.
+ * Matching is exact after normalisation (no vague substring heuristics).
+ */
+const CATEGORIES = [
+  {
+    id: 'restaurants',
+    tags: [
+      { key: 'amenity', value: 'restaurant' },
+      { key: 'amenity', value: 'fast_food' },
+      { key: 'amenity', value: 'cafe' },
+    ],
+    aliases: [
+      'restaurante',
+      'restaurantes',
+      'restaurant',
+      'restaurants',
+      'fast food',
+      'fastfood',
+      'cafe',
+      'cafes',
+      'café',
+      'cafés',
+    ],
+  },
+  {
+    id: 'clinics',
+    tags: [
+      { key: 'amenity', value: 'clinic' },
+      { key: 'healthcare', value: 'clinic' },
+    ],
+    aliases: [
+      'clinica',
+      'clinicas',
+      'clínica',
+      'clínicas',
+      'clinic',
+      'clinics',
+    ],
+  },
+  {
+    id: 'dentists',
+    tags: [{ key: 'amenity', value: 'dentist' }],
+    aliases: [
+      'clinica dentaria',
+      'clinicas dentarias',
+      'clínica dentária',
+      'clínicas dentárias',
+      'clinica dentária',
+      'clínica dentaria',
+      'dentista',
+      'dentistas',
+      'dentist',
+      'dentists',
+    ],
+  },
+  {
+    id: 'beauty',
+    tags: [
+      { key: 'shop', value: 'beauty' },
+      { key: 'shop', value: 'hairdresser' },
+    ],
+    aliases: [
+      'salao de beleza',
+      'saloes de beleza',
+      'salão de beleza',
+      'salões de beleza',
+      'salao de belesa',
+      'cabeleireiro',
+      'cabeleireiros',
+      'cabeleireira',
+      'cabeleireiras',
+      'beauty',
+      'beauty salon',
+      'hairdresser',
+      'hairdressers',
+    ],
+  },
+  {
+    id: 'shops',
+    // Generic shop=* — kept intentional; radius + result limit bound cost.
+    tags: [{ key: 'shop', value: null }],
+    aliases: ['loja', 'lojas', 'shop', 'shops', 'store', 'stores'],
+  },
+];
 
 function isConfigured() {
   return process.env.OSM_DISABLED !== '1';
@@ -13,11 +99,46 @@ function userAgent() {
   return process.env.OSM_USER_AGENT || 'MapsLeadsFinderSaaS/0.1 (contact@example.com)';
 }
 
+/** Lowercase, strip diacritics, collapse whitespace. */
+function normalizeText(s) {
+  return String(s == null ? '' : s)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function escapeOverpassRegex(s) {
   return String(s)
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
     .replace(/[\[\](){}.+*?^$|]/g, '\\$&');
+}
+
+/**
+ * Resolve a user query to a known category, or null for free-text name search.
+ * Exact alias match only after normalisation — compound phrases fall back to name search.
+ */
+function resolveCategory(query) {
+  const normalized = normalizeText(query);
+  if (!normalized) return null;
+
+  // Prefer longer aliases first so "clinica dentaria" wins over "clinica".
+  const candidates = [];
+  for (const cat of CATEGORIES) {
+    for (const alias of cat.aliases) {
+      candidates.push({ aliasNorm: normalizeText(alias), category: cat });
+    }
+  }
+  candidates.sort((a, b) => b.aliasNorm.length - a.aliasNorm.length);
+
+  for (const { aliasNorm, category } of candidates) {
+    if (aliasNorm && aliasNorm === normalized) {
+      return category;
+    }
+  }
+  return null;
 }
 
 async function geocodeLocation(location) {
@@ -37,7 +158,50 @@ async function geocodeLocation(location) {
   return { lat: Number(data[0].lat), lon: Number(data[0].lon) };
 }
 
-function buildOverpassQuery(qEscaped, radius, lat, lon, limit) {
+function groupTagsByKey(tags) {
+  const byKey = new Map();
+  for (const tag of tags) {
+    if (!byKey.has(tag.key)) byKey.set(tag.key, []);
+    byKey.get(tag.key).push(tag.value);
+  }
+  return byKey;
+}
+
+/**
+ * Build Overpass union for structured category tags (no name filter).
+ * Supports multiple keys, multi-value regex, and key-only (e.g. shop=*).
+ */
+function buildCategoryOverpassQuery(tags, radius, lat, lon, limit) {
+  const lines = [];
+  const byKey = groupTagsByKey(tags);
+
+  for (const [key, values] of byKey.entries()) {
+    const anyValue = values.some((v) => v == null);
+    let filter;
+    if (anyValue) {
+      filter = `["${key}"]`;
+    } else if (values.length === 1) {
+      filter = `["${key}"="${values[0]}"]`;
+    } else {
+      const reg = values.map((v) => escapeOverpassRegex(v)).join('|');
+      filter = `["${key}"~"^(${reg})$"]`;
+    }
+    for (const type of ['node', 'way', 'relation']) {
+      lines.push(`  ${type}${filter}(around:${radius},${lat},${lon});`);
+    }
+  }
+
+  return `
+[out:json][timeout:25];
+(
+${lines.join('\n')}
+);
+out center ${Math.min(limit, 100)};
+`.trim();
+}
+
+/** Legacy free-text name search (preserves previous behaviour). */
+function buildNameOverpassQuery(qEscaped, radius, lat, lon, limit) {
   return `
 [out:json][timeout:25];
 (
@@ -57,6 +221,20 @@ function buildOverpassQuery(qEscaped, radius, lat, lon, limit) {
 );
 out center ${Math.min(limit, 100)};
 `.trim();
+}
+
+/**
+ * Build Overpass QL for a user query.
+ * Category aliases → tag filters; otherwise escaped name regex.
+ * @param {string} query Raw user query (not pre-escaped).
+ */
+function buildOverpassQuery(query, radius, lat, lon, limit) {
+  const category = resolveCategory(query);
+  if (category) {
+    return buildCategoryOverpassQuery(category.tags, radius, lat, lon, limit);
+  }
+  const qEscaped = escapeOverpassRegex(String(query == null ? '' : query));
+  return buildNameOverpassQuery(qEscaped, radius, lat, lon, limit);
 }
 
 function mapElement(el, criteria) {
@@ -79,7 +257,7 @@ function mapElement(el, criteria) {
     website: tags.website || tags['contact:website'] || tags.url || null,
     rating: null,
     reviewsCount: null,
-    category: tags.amenity || tags.shop || tags.office || tags.tourism || criteria.query,
+    category: tags.amenity || tags.shop || tags.office || tags.tourism || tags.healthcare || criteria.query,
     lat: Number.isFinite(lat) ? lat : null,
     lng: Number.isFinite(lon) ? lon : null,
     sourceProvider: CODE,
@@ -97,9 +275,8 @@ async function search(criteria) {
     if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lon)) return okResult([]);
     const radius = Math.min(Math.max(parseInt(process.env.OSM_SEARCH_RADIUS_M || '5000', 10) || 5000, 500), 25000);
     const limit = Math.min(criteria.limit || 50, 100);
-    const qEscaped = escapeOverpassRegex(criteria.query);
     const overpassUrl = process.env.OSM_OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
-    const ql = buildOverpassQuery(qEscaped, radius, center.lat, center.lon, limit);
+    const ql = buildOverpassQuery(criteria.query, radius, center.lat, center.lon, limit);
     const data = await withTimeout(
       fetch(overpassUrl, {
         method: 'POST',
@@ -136,4 +313,7 @@ module.exports = {
   escapeOverpassRegex,
   buildOverpassQuery,
   mapElement,
+  normalizeText,
+  resolveCategory,
+  CATEGORIES,
 };
