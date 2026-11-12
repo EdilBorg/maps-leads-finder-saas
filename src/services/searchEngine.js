@@ -110,6 +110,8 @@ function normalizeProviderResult(raw) {
       errorMessage: 'Invalid provider response',
       errorStage: null,
       httpStatus: null,
+      errorName: null,
+      causeCode: null,
     };
   }
   const allowed = new Set(['ok', 'empty', 'error', 'not_configured']);
@@ -118,6 +120,14 @@ function normalizeProviderResult(raw) {
   const httpStatus =
     raw.httpStatus != null && Number.isFinite(Number(raw.httpStatus))
       ? Number(raw.httpStatus)
+      : null;
+  const errorName =
+    raw.errorName != null && String(raw.errorName).trim()
+      ? String(raw.errorName).trim().slice(0, 64)
+      : null;
+  const causeCode =
+    raw.causeCode != null && String(raw.causeCode).trim()
+      ? String(raw.causeCode).trim().slice(0, 64)
       : null;
   if (!Array.isArray(raw.results)) {
     if (status === 'ok' || status === 'empty') {
@@ -128,6 +138,8 @@ function normalizeProviderResult(raw) {
         errorMessage: 'Provider results must be an array',
         errorStage,
         httpStatus,
+        errorName,
+        causeCode,
       };
     }
     return {
@@ -137,6 +149,8 @@ function normalizeProviderResult(raw) {
       errorMessage: raw.errorMessage || null,
       errorStage,
       httpStatus,
+      errorName,
+      causeCode,
     };
   }
   const results = raw.results;
@@ -148,6 +162,8 @@ function normalizeProviderResult(raw) {
     errorMessage: raw.errorMessage || null,
     errorStage,
     httpStatus,
+    errorName,
+    causeCode,
   };
 }
 
@@ -168,6 +184,8 @@ async function runProviderSafe(providerEntry, criteria) {
           errorMessage: 'Provider search unavailable',
           errorStage: null,
           httpStatus: null,
+          errorName: null,
+          causeCode: null,
         },
         durationMs: Date.now() - t0,
       };
@@ -188,6 +206,11 @@ async function runProviderSafe(providerEntry, criteria) {
         errorMessage: (err && err.message) || 'provider failed',
         errorStage: (err && err.errorStage) || null,
         httpStatus: err && err.httpStatus != null ? err.httpStatus : null,
+        errorName: err && err.name ? String(err.name).slice(0, 64) : null,
+        causeCode:
+          err && err.cause && err.cause.code != null
+            ? String(err.cause.code).slice(0, 64)
+            : null,
       },
       durationMs: Date.now() - t0,
     };
@@ -278,6 +301,8 @@ async function executeSearch(input) {
     errorCode: p.result.errorCode || null,
     errorStage: p.result.errorStage || null,
     httpStatus: p.result.httpStatus != null ? p.result.httpStatus : null,
+    errorName: p.result.errorName || null,
+    causeCode: p.result.causeCode || null,
     durationMs: p.durationMs,
   }));
 
@@ -289,6 +314,8 @@ async function executeSearch(input) {
           provider: p.code,
           stage: p.result.errorStage || null,
           errorCode: p.result.errorCode || null,
+          errorName: p.result.errorName || null,
+          causeCode: p.result.causeCode || null,
           httpStatus: p.result.httpStatus != null ? p.result.httpStatus : null,
           durationMs: p.durationMs,
         })
