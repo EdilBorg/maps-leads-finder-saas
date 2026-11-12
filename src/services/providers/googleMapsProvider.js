@@ -210,9 +210,22 @@ async function search(criteria) {
         };
       }
 
-      const places = Array.isArray(data.places) ? data.places : [];
+      // Valid empty search is only an explicit empty array.
+      // Missing or non-array places is an invalid API response, not "no results".
+      if (!Object.prototype.hasOwnProperty.call(data, 'places') || !Array.isArray(data.places)) {
+        if (pageIndex === 0) {
+          return errorResult('INVALID_RESPONSE', 'Places API response missing places array');
+        }
+        return {
+          status: 'error',
+          results: accumulated,
+          errorCode: 'INVALID_RESPONSE',
+          errorMessage: 'Places API response missing places array',
+        };
+      }
+
+      const places = data.places;
       if (places.length === 0 && pageIndex === 0) {
-        // Successful response with no places.
         return okResult([]);
       }
 
