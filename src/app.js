@@ -18,6 +18,7 @@ const { loadUser } = require('./middleware/auth');
 const healthRouter = require('./routes/health');
 const authRouter = require('./routes/auth');
 const searchRouter = require('./routes/search');
+const adminRouter = require('./routes/admin');
 const { loginRateKey, clientIp } = require('./middleware/rateLimitKeys');
 
 validateConfig();
@@ -97,6 +98,7 @@ function createApp(options = {}) {
   app.use('/api', healthRouter);
   app.use('/api/auth', authRouter);
   app.use('/api/searches', searchRouter);
+  app.use('/api/admin', adminRouter);
 
   if (process.env.ENABLE_TEST_ROUTES === '1' && process.env.NODE_ENV !== 'production') {
     app.get('/__test/client-ip', (req, res) => {
