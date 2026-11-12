@@ -3,9 +3,9 @@ const assert = require('node:assert/strict');
 const {
   resolveModality,
   providersForModality,
+  normalizeLead,
   deduplicate,
   applyFilters,
-  normalizeLead,
   perProviderLimit,
   clientMessageForOutcome,
   publicLead,
@@ -14,6 +14,7 @@ const {
 describe('searchEngine modalities', () => {
   it('standard maps to google_maps + osm only', () => {
     assert.deepEqual(providersForModality('standard'), ['google_maps', 'osm']);
+    assert.equal(resolveModality('standard').id, 'standard');
   });
   it('expanded maps to google_maps + apify only', () => {
     assert.deepEqual(providersForModality('expanded'), ['google_maps', 'apify']);
@@ -26,8 +27,6 @@ describe('searchEngine modalities', () => {
     const e = providersForModality('expanded');
     assert.equal(s.includes('apify'), false);
     assert.equal(e.includes('osm'), false);
-    assert.equal(s.length, 2);
-    assert.equal(e.length, 2);
   });
 });
 
@@ -73,11 +72,13 @@ describe('searchEngine normalize dedupe filter limit', () => {
 describe('searchEngine client messages', () => {
   it('no_results message is user-facing without provider names', () => {
     const msg = clientMessageForOutcome('no_results');
-    assert.equal(msg, 'Não foi possível encontrar resultados para esta pesquisa.');
+    assert.match(msg, /Não foram encontrados estabelecimentos/);
+    assert.match(msg, /categoria ou a localização/);
     assert.equal(/google|apify|osm|openstreet/i.test(msg), false);
   });
   it('error message is generic', () => {
-    assert.match(clientMessageForOutcome('error'), /Não foi possível realizar a pesquisa/);
+    assert.match(clientMessageForOutcome('error'), /Não foi possível realizar a pesquisa neste momento/);
+    assert.match(clientMessageForOutcome('inconclusive'), /Não foi possível concluir a pesquisa em todas as fontes/);
   });
   it('publicLead strips sourceProvider', () => {
     const p = publicLead({

@@ -1,12 +1,29 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { executeSearch, providersForModality } = require('../src/services/searchEngine');
+const {
+  executeSearch,
+  providersForModality,
+  classifySearchOutcome,
+  normalizeProviderResult,
+  runProviderSafe,
+} = require('../src/services/searchEngine');
 
-function mockProvider(code, status, results) {
+function mockProvider(code, status, results, opts = {}) {
   return {
     code,
     async search() {
-      return { status, results: results || [], errorCode: status === 'error' ? 'E' : null, errorMessage: null };
+      if (opts.throwError) {
+        const err = new Error(opts.throwMessage || 'boom');
+        err.code = opts.throwCode || 'PROVIDER_ERROR';
+        throw err;
+      }
+      if (Object.prototype.hasOwnProperty.call(opts, 'raw')) return opts.raw;
+      return {
+        status,
+        results: results || [],
+        errorCode: status === 'error' ? opts.errorCode || 'E' : null,
+        errorMessage: status === 'error' ? opts.errorMessage || 'err' : null,
+      };
     },
   };
 }
@@ -27,6 +44,95 @@ function lead(name, externalId, sourceProvider, extra = {}) {
     externalId,
   };
 }
+
+describe('classifySearchOutcome matrix', () => {
+  it('results + results → completed/results', () => {
+    assert.deepEqual(classifySearchOutcome(['ok', 'ok'], true), {
+      outcome: 'results',
+      searchStatus: 'completed',
+    });
+  });
+  it('results + empty → completed/results', () => {
+    assert.deepEqual(classifySearchOutcome(['ok', 'empty'], true), {
+      outcome: 'results',
+      searchStatus: 'completed',
+    });
+  });
+  it('results + error → partial/results', () => {
+    assert.deepEqual(classifySearchOutcome(['ok', 'error'], true), {
+      outcome: 'results',
+      searchStatus: 'partial',
+    });
+  });
+  it('empty + empty → completed/no_results', () => {
+    assert.deepEqual(classifySearchOutcome(['empty', 'empty'], false), {
+      outcome: 'no_results',
+      searchStatus: 'completed',
+    });
+  });
+  it('empty + error → inconclusive (not absolute no_results)', () => {
+    assert.deepEqual(classifySearchOutcome(['empty', 'error'], false), {
+      outcome: 'inconclusive',
+      searchStatus: 'completed',
+    });
+  });
+  it('error + error → failed/error', () => {
+    assert.deepEqual(classifySearchOutcome(['error', 'error'], false), {
+      outcome: 'error',
+      searchStatus: 'failed',
+    });
+  });
+  it('not_configured + empty → no_results', () => {
+    assert.deepEqual(classifySearchOutcome(['not_configured', 'empty'], false), {
+      outcome: 'no_results',
+      searchStatus: 'completed',
+    });
+  });
+  it('not_configured + results → partial/results', () => {
+    assert.deepEqual(classifySearchOutcome(['not_configured', 'ok'], true), {
+      outcome: 'results',
+      searchStatus: 'partial',
+    });
+  });
+  it('all not_configured → failed/error', () => {
+    assert.deepEqual(classifySearchOutcome(['not_configured', 'not_configured'], false), {
+      outcome: 'error',
+      searchStatus: 'failed',
+    });
+  });
+});
+
+describe('normalizeProviderResult', () => {
+  it('handles null and non-object', () => {
+    assert.equal(normalizeProviderResult(null).status, 'error');
+    assert.equal(normalizeProviderResult('x').status, 'error');
+  });
+  it('handles non-array results on ok', () => {
+    const r = normalizeProviderResult({ status: 'ok', results: null });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorCode, 'INVALID_RESPONSE');
+  });
+  it('coerces ok with empty array to empty', () => {
+    assert.equal(normalizeProviderResult({ status: 'ok', results: [] }).status, 'empty');
+  });
+});
+
+describe('runProviderSafe isolation', () => {
+  it('captures thrown exceptions', async () => {
+    const r = await runProviderSafe(
+      mockProvider('osm', 'ok', [], { throwError: true, throwCode: 'HTTP_ERROR' }),
+      { query: 'x', location: 'y' }
+    );
+    assert.equal(r.result.status, 'error');
+    assert.equal(r.result.errorCode, 'HTTP_ERROR');
+    assert.equal(r.result.results.length, 0);
+  });
+  it('handles missing search function', async () => {
+    const r = await runProviderSafe({ code: 'ghost', search: null }, { query: 'x', location: 'y' });
+    assert.equal(r.result.status, 'error');
+    assert.equal(r.result.errorCode, 'PROVIDER_MISSING');
+  });
+});
 
 describe('executeSearch full pipeline with mocked providers', () => {
   it('standard modality never uses apify', async () => {
@@ -80,10 +186,10 @@ describe('executeSearch full pipeline with mocked providers', () => {
     });
     assert.equal(r.outcome, 'results');
     assert.equal(r.searchStatus, 'completed');
-    assert.equal(r.totals.returned, 2);
+    assert.equal(r.results.length, 2);
   });
 
-  it('first ok second empty', async () => {
+  it('first ok second empty → completed results', async () => {
     const r = await executeSearch({
       modality: 'standard',
       query: 'x',
@@ -94,6 +200,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
       },
     });
     assert.equal(r.outcome, 'results');
+    assert.equal(r.searchStatus, 'completed');
     assert.equal(r.results.length, 1);
   });
 
@@ -167,6 +274,135 @@ describe('executeSearch full pipeline with mocked providers', () => {
     assert.equal(r.searchStatus, 'failed');
   });
 
+  it('empty + error → inconclusive (does not claim no establishments)', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'empty', []),
+        osm: mockProvider('osm', 'error', []),
+      },
+    });
+    assert.equal(r.outcome, 'inconclusive');
+    assert.equal(r.searchStatus, 'completed');
+    assert.equal(r.results.length, 0);
+  });
+
+  it('exception from one provider does not block the other', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'ok', [], {
+          throwError: true,
+          throwCode: 'TIMEOUT',
+          throwMessage: 'timeout',
+        }),
+        osm: mockProvider('osm', 'ok', [lead('B', '2', 'osm')]),
+      },
+    });
+    assert.equal(r.outcome, 'results');
+    assert.equal(r.searchStatus, 'partial');
+    assert.equal(r.results.length, 1);
+    assert.equal(r._providers.find((p) => p.code === 'google_maps').status, 'error');
+    assert.equal(r._providers.find((p) => p.code === 'osm').status, 'ok');
+  });
+
+  it('exception from both providers → failed', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'ok', [], { throwError: true }),
+        osm: mockProvider('osm', 'ok', [], { throwError: true }),
+      },
+    });
+    assert.equal(r.outcome, 'error');
+    assert.equal(r.searchStatus, 'failed');
+  });
+
+  it('missing provider in registry does not throw and records error', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'ok', [lead('A', '1', 'google_maps')]),
+        osm: { code: 'osm' }, // present but without search()
+      },
+    });
+    assert.equal(r.outcome, 'results');
+    assert.equal(r.searchStatus, 'partial');
+    const osmDiag = r._providers.find((p) => p.code === 'osm');
+    assert.ok(osmDiag);
+    assert.equal(osmDiag.status, 'error');
+    assert.equal(osmDiag.errorCode, 'PROVIDER_MISSING');
+  });
+
+  it('invalid null response becomes provider error without crashing', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'ok', [], { raw: null }),
+        osm: mockProvider('osm', 'ok', [lead('B', '2', 'osm')]),
+      },
+    });
+    assert.equal(r.results.length, 1);
+    assert.equal(r.searchStatus, 'partial');
+    assert.equal(r._providers.find((p) => p.code === 'google_maps').status, 'error');
+  });
+
+  it('invalid results shape does not throw', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'ok', [], { raw: { status: 'ok', results: 'bad' } }),
+        osm: mockProvider('osm', 'empty', []),
+      },
+    });
+    assert.equal(r.outcome, 'inconclusive');
+    assert.equal(r._providers.find((p) => p.code === 'google_maps').status, 'error');
+  });
+
+  it('expanded modality: apify results + google error → partial', async () => {
+    const r = await executeSearch({
+      modality: 'expanded',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'error', []),
+        apify: mockProvider('apify', 'ok', [lead('A', '1', 'apify')]),
+      },
+    });
+    assert.equal(r.modality, 'expanded');
+    assert.equal(r.outcome, 'results');
+    assert.equal(r.searchStatus, 'partial');
+    assert.equal(r.results.length, 1);
+    assert.ok(!r._providers.some((p) => p.code === 'osm'));
+  });
+
+  it('not_configured + results keeps results with partial status', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'not_configured', []),
+        osm: mockProvider('osm', 'ok', [lead('B', '2', 'osm')]),
+      },
+    });
+    assert.equal(r.outcome, 'results');
+    assert.equal(r.searchStatus, 'partial');
+    assert.equal(r._providers.find((p) => p.code === 'google_maps').status, 'not_configured');
+  });
+
   it('filters reduce afterFilters and returned', async () => {
     const r = await executeSearch({
       modality: 'standard',
@@ -206,5 +442,21 @@ describe('executeSearch full pipeline with mocked providers', () => {
     assert.ok(r.totals.afterDedup <= r.totals.normalized);
     assert.ok(r.totals.returned <= r.totals.afterFilters);
     assert.ok(r.totals.returned <= 5);
+  });
+
+  it('diagnostics retained on total failure', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'error', [], { errorCode: 'HTTP_429' }),
+        osm: mockProvider('osm', 'error', [], { errorCode: 'TIMEOUT' }),
+      },
+    });
+    assert.equal(r.outcome, 'error');
+    assert.equal(r._providers.length, 2);
+    assert.equal(r._providers[0].errorCode, 'HTTP_429');
+    assert.equal(r._providers[1].errorCode, 'TIMEOUT');
   });
 });
