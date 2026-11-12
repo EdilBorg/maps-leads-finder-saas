@@ -33,21 +33,83 @@ function resolveErrorName(err) {
   return null;
 }
 
+function createTimeoutError() {
+  const timeoutErr = new Error('diagnostic timeout');
+  timeoutErr.code = 'DIAGNOSTIC_TIMEOUT';
+  timeoutErr.name = 'TimeoutError';
+  return timeoutErr;
+}
+
+function isAbortError(err) {
+  return (
+    (err && err.name === 'AbortError') ||
+    (err && err.code === 'ABORT_ERR') ||
+    (err && err.code === 'DIAGNOSTIC_TIMEOUT') ||
+    (err && err.name === 'TimeoutError')
+  );
+}
+
+/**
+ * Fetch + JSON parse under a single AbortController deadline.
+ * Covers connection, headers, body download and JSON parsing.
+ * Clears the timer on all completion paths.
+ */
+async function fetchJsonWithTimeout(url, options, timeoutMs = DIAG_TIMEOUT_MS) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+
+    const data = await Promise.race([
+      res.json().catch((parseErr) => {
+        // Abort during body read must remain a timeout, not invalid_response.
+        if (timedOut || controller.signal.aborted || isAbortError(parseErr)) {
+          throw createTimeoutError();
+        }
+        const err = new Error('invalid json');
+        err.code = 'INVALID_JSON';
+        err.cause = parseErr;
+        err.httpStatus = res.status;
+        throw err;
+      }),
+      new Promise((_, reject) => {
+        if (controller.signal.aborted) {
+          reject(createTimeoutError());
+          return;
+        }
+        const onAbort = () => {
+          controller.signal.removeEventListener('abort', onAbort);
+          reject(createTimeoutError());
+        };
+        controller.signal.addEventListener('abort', onAbort);
+      }),
+    ]);
+
+    return { res, data };
+  } catch (err) {
+    if (timedOut || isAbortError(err) || controller.signal.aborted) {
+      throw createTimeoutError();
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Kept for low-level abort tests of connection phase. */
 async function fetchWithTimeout(url, options, timeoutMs = DIAG_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } catch (err) {
-    if (
-      (err && err.name === 'AbortError') ||
-      (err && err.code === 'ABORT_ERR') ||
-      controller.signal.aborted
-    ) {
-      const timeoutErr = new Error('diagnostic timeout');
-      timeoutErr.code = 'DIAGNOSTIC_TIMEOUT';
-      timeoutErr.name = 'TimeoutError';
-      throw timeoutErr;
+    if (isAbortError(err) || controller.signal.aborted) {
+      throw createTimeoutError();
     }
     throw err;
   } finally {
@@ -73,11 +135,22 @@ function classifyThrown(target, err, durationMs) {
   const causeCode = resolveCauseCode(err);
   const errorName = resolveErrorName(err);
 
-  if (code === 'DIAGNOSTIC_TIMEOUT' || (err && err.name === 'TimeoutError')) {
+  if (
+    code === 'DIAGNOSTIC_TIMEOUT' ||
+    (err && err.name === 'TimeoutError') ||
+    (err && err.code === 'DIAGNOSTIC_TIMEOUT')
+  ) {
     out.status = 'timeout';
     out.errorCode = 'DIAGNOSTIC_TIMEOUT';
     out.errorName = errorName || 'TimeoutError';
     out.causeCode = causeCode;
+    return out;
+  }
+
+  if (err && err.code === 'INVALID_JSON') {
+    out.status = 'invalid_response';
+    out.httpStatus = err.httpStatus != null ? err.httpStatus : null;
+    out.errorCode = 'INVALID_RESPONSE';
     return out;
   }
 
@@ -92,7 +165,7 @@ async function probeNominatim() {
   const target = 'nominatim';
   const t0 = Date.now();
   try {
-    const res = await fetchWithTimeout(
+    const { res, data } = await fetchJsonWithTimeout(
       NOMINATIM_URL,
       {
         method: 'GET',
@@ -103,6 +176,7 @@ async function probeNominatim() {
       },
       DIAG_TIMEOUT_MS
     );
+
     if (!res.ok) {
       return {
         target,
@@ -114,20 +188,7 @@ async function probeNominatim() {
         causeCode: null,
       };
     }
-    let data;
-    try {
-      data = await res.json();
-    } catch {
-      return {
-        target,
-        status: 'invalid_response',
-        httpStatus: res.status,
-        durationMs: Date.now() - t0,
-        errorCode: 'INVALID_RESPONSE',
-        errorName: null,
-        causeCode: null,
-      };
-    }
+
     if (!Array.isArray(data)) {
       return {
         target,
@@ -139,6 +200,7 @@ async function probeNominatim() {
         causeCode: null,
       };
     }
+
     return {
       target,
       status: 'reachable',
@@ -153,10 +215,19 @@ async function probeNominatim() {
   }
 }
 
+function isValidOverpassPayload(data) {
+  return (
+    data != null &&
+    typeof data === 'object' &&
+    !Array.isArray(data) &&
+    Array.isArray(data.elements)
+  );
+}
+
 async function probeOverpass(target, url) {
   const t0 = Date.now();
   try {
-    const res = await fetchWithTimeout(
+    const { res, data } = await fetchJsonWithTimeout(
       url,
       {
         method: 'POST',
@@ -168,6 +239,7 @@ async function probeOverpass(target, url) {
       },
       DIAG_TIMEOUT_MS
     );
+
     if (!res.ok) {
       return {
         target,
@@ -179,10 +251,8 @@ async function probeOverpass(target, url) {
         causeCode: null,
       };
     }
-    let data;
-    try {
-      data = await res.json();
-    } catch {
+
+    if (!isValidOverpassPayload(data)) {
       return {
         target,
         status: 'invalid_response',
@@ -193,17 +263,7 @@ async function probeOverpass(target, url) {
         causeCode: null,
       };
     }
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      return {
-        target,
-        status: 'invalid_response',
-        httpStatus: res.status,
-        durationMs: Date.now() - t0,
-        errorCode: 'INVALID_RESPONSE',
-        errorName: null,
-        causeCode: null,
-      };
-    }
+
     return {
       target,
       status: 'reachable',
@@ -237,9 +297,11 @@ module.exports = {
   probeNominatim,
   probeOverpass,
   fetchWithTimeout,
+  fetchJsonWithTimeout,
   DIAG_TIMEOUT_MS,
   NOMINATIM_URL,
   OVERPASS_ALTERNATIVE_URL,
   primaryOverpassUrl,
   TINY_OVERPASS_QL,
+  isValidOverpassPayload,
 };
