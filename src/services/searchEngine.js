@@ -84,7 +84,8 @@ function applyFilters(leads, filters) {
   return leads.filter((lead) => {
     if (filters.hasPhone && !lead.phone) return false;
     if (filters.hasEmail && !lead.email) return false;
-    if (filters.hasWebsite === false && lead.website) return false;
+    // Frontend/route send noWebsite; keep hasWebsite===false as legacy alias.
+    if ((filters.noWebsite || filters.hasWebsite === false) && lead.website) return false;
     if (filters.minRating != null && filters.minRating !== '') {
       const min = Number(filters.minRating);
       if (Number.isFinite(min) && (lead.rating == null || lead.rating < min)) return false;
@@ -199,12 +200,14 @@ function classifySearchOutcome(statuses, hasResults) {
   const anySuccess = list.some(isSuccessStatus);
   const anyTechFail = list.some(isTechnicalFail);
   const anyUnavailable = list.some(isUnavailable);
+  // Selected-but-unavailable sources compromise coverage the same way technical fails do.
+  const anyCoverageGap = anyTechFail || anyUnavailable;
   const allFailedOrUnavailable = list.length > 0 && list.every((s) => isTechnicalFail(s) || isUnavailable(s));
 
   if (hasResults) {
     return {
       outcome: 'results',
-      searchStatus: anyTechFail || anyUnavailable ? 'partial' : 'completed',
+      searchStatus: anyCoverageGap ? 'partial' : 'completed',
     };
   }
 
@@ -212,14 +215,14 @@ function classifySearchOutcome(statuses, hasResults) {
     return { outcome: 'error', searchStatus: 'failed' };
   }
 
-  // At least one provider completed normally (ok/empty) but no usable results.
-  if (anyTechFail && anySuccess) {
-    // Coverage compromised — do not claim absolute absence of establishments.
-    return { outcome: 'inconclusive', searchStatus: 'completed' };
+  // At least one provider completed (ok/empty) but coverage was incomplete.
+  if (anySuccess && anyCoverageGap) {
+    // Do not claim absolute absence of establishments.
+    return { outcome: 'inconclusive', searchStatus: 'partial' };
   }
 
-  if (anySuccess && !anyTechFail) {
-    // All completed sources empty; optional not_configured peers allowed.
+  if (anySuccess && !anyCoverageGap) {
+    // Every selected source completed successfully with no usable results.
     return { outcome: 'no_results', searchStatus: 'completed' };
   }
 
