@@ -23,6 +23,8 @@ function mockProvider(code, status, results, opts = {}) {
         results: results || [],
         errorCode: status === 'error' ? opts.errorCode || 'E' : null,
         errorMessage: status === 'error' ? opts.errorMessage || 'err' : null,
+        errorStage: opts.errorStage || null,
+        httpStatus: opts.httpStatus != null ? opts.httpStatus : null,
       };
     },
   };
@@ -120,6 +122,19 @@ describe('normalizeProviderResult', () => {
   });
   it('coerces ok with empty array to empty', () => {
     assert.equal(normalizeProviderResult({ status: 'ok', results: [] }).status, 'empty');
+  });
+  it('preserves errorStage and httpStatus from provider', () => {
+    const r = normalizeProviderResult({
+      status: 'error',
+      results: [],
+      errorCode: 'HTTP_ERROR',
+      errorMessage: 'geocode HTTP 403',
+      errorStage: 'geocode',
+      httpStatus: 403,
+    });
+    assert.equal(r.errorStage, 'geocode');
+    assert.equal(r.httpStatus, 403);
+    assert.equal(r.errorCode, 'HTTP_ERROR');
   });
 });
 
@@ -542,6 +557,43 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const g = r._providers.find((p) => p.code === 'google_maps');
     assert.equal(g.status, 'error');
     assert.equal(g.errorCode, 'INVALID_RESPONSE');
+  });
+
+  it('executeSearch retains OSM diagnostics in _providers without leaking to results', async () => {
+    const osm = {
+      code: 'osm',
+      async search() {
+        return {
+          status: 'error',
+          results: [],
+          errorCode: 'HTTP_ERROR',
+          errorMessage: 'overpass HTTP 502',
+          errorStage: 'overpass',
+          httpStatus: 502,
+        };
+      },
+    };
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'ok', [lead('A', '1', 'google_maps')]),
+        osm,
+      },
+    });
+    assert.equal(r.outcome, 'results');
+    assert.equal(r.searchStatus, 'partial');
+    const diag = r._providers.find((p) => p.code === 'osm');
+    assert.equal(diag.status, 'error');
+    assert.equal(diag.errorCode, 'HTTP_ERROR');
+    assert.equal(diag.errorStage, 'overpass');
+    assert.equal(diag.httpStatus, 502);
+    for (const item of r.results) {
+      assert.equal(item.errorStage, undefined);
+      assert.equal(item.httpStatus, undefined);
+      assert.equal(item.errorCode, undefined);
+    }
   });
 
   it('diagnostics retained on total failure', async () => {
