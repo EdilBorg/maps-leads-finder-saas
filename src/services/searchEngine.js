@@ -84,7 +84,6 @@ function applyFilters(leads, filters) {
   return leads.filter((lead) => {
     if (filters.hasPhone && !lead.phone) return false;
     if (filters.hasEmail && !lead.email) return false;
-    // Frontend/route send noWebsite; keep hasWebsite===false as legacy alias.
     if ((filters.noWebsite || filters.hasWebsite === false) && lead.website) return false;
     if (filters.minRating != null && filters.minRating !== '') {
       const min = Number(filters.minRating);
@@ -109,10 +108,17 @@ function normalizeProviderResult(raw) {
       results: [],
       errorCode: 'INVALID_RESPONSE',
       errorMessage: 'Invalid provider response',
+      errorStage: null,
+      httpStatus: null,
     };
   }
   const allowed = new Set(['ok', 'empty', 'error', 'not_configured']);
   let status = allowed.has(raw.status) ? raw.status : 'error';
+  const errorStage = raw.errorStage != null ? String(raw.errorStage) : null;
+  const httpStatus =
+    raw.httpStatus != null && Number.isFinite(Number(raw.httpStatus))
+      ? Number(raw.httpStatus)
+      : null;
   if (!Array.isArray(raw.results)) {
     if (status === 'ok' || status === 'empty') {
       return {
@@ -120,6 +126,8 @@ function normalizeProviderResult(raw) {
         results: [],
         errorCode: 'INVALID_RESPONSE',
         errorMessage: 'Provider results must be an array',
+        errorStage,
+        httpStatus,
       };
     }
     return {
@@ -127,6 +135,8 @@ function normalizeProviderResult(raw) {
       results: [],
       errorCode: raw.errorCode || (status === 'error' ? 'PROVIDER_ERROR' : null),
       errorMessage: raw.errorMessage || null,
+      errorStage,
+      httpStatus,
     };
   }
   const results = raw.results;
@@ -136,6 +146,8 @@ function normalizeProviderResult(raw) {
     results,
     errorCode: raw.errorCode || null,
     errorMessage: raw.errorMessage || null,
+    errorStage,
+    httpStatus,
   };
 }
 
@@ -154,6 +166,8 @@ async function runProviderSafe(providerEntry, criteria) {
           results: [],
           errorCode: 'PROVIDER_MISSING',
           errorMessage: 'Provider search unavailable',
+          errorStage: null,
+          httpStatus: null,
         },
         durationMs: Date.now() - t0,
       };
@@ -172,6 +186,8 @@ async function runProviderSafe(providerEntry, criteria) {
         results: [],
         errorCode: (err && err.code) || 'PROVIDER_ERROR',
         errorMessage: (err && err.message) || 'provider failed',
+        errorStage: (err && err.errorStage) || null,
+        httpStatus: err && err.httpStatus != null ? err.httpStatus : null,
       },
       durationMs: Date.now() - t0,
     };
@@ -190,17 +206,11 @@ function isUnavailable(status) {
   return status === 'not_configured';
 }
 
-/**
- * Central classification of multi-provider search outcomes.
- * @param {string[]} statuses provider result statuses
- * @param {boolean} hasResults whether usable leads remain after filters
- */
 function classifySearchOutcome(statuses, hasResults) {
   const list = Array.isArray(statuses) ? statuses : [];
   const anySuccess = list.some(isSuccessStatus);
   const anyTechFail = list.some(isTechnicalFail);
   const anyUnavailable = list.some(isUnavailable);
-  // Selected-but-unavailable sources compromise coverage the same way technical fails do.
   const anyCoverageGap = anyTechFail || anyUnavailable;
   const allFailedOrUnavailable = list.length > 0 && list.every((s) => isTechnicalFail(s) || isUnavailable(s));
 
@@ -215,14 +225,11 @@ function classifySearchOutcome(statuses, hasResults) {
     return { outcome: 'error', searchStatus: 'failed' };
   }
 
-  // At least one provider completed (ok/empty) but coverage was incomplete.
   if (anySuccess && anyCoverageGap) {
-    // Do not claim absolute absence of establishments.
     return { outcome: 'inconclusive', searchStatus: 'partial' };
   }
 
   if (anySuccess && !anyCoverageGap) {
-    // Every selected source completed successfully with no usable results.
     return { outcome: 'no_results', searchStatus: 'completed' };
   }
 
@@ -269,8 +276,25 @@ async function executeSearch(input) {
     status: p.result.status,
     count: Array.isArray(p.result.results) ? p.result.results.length : 0,
     errorCode: p.result.errorCode || null,
+    errorStage: p.result.errorStage || null,
+    httpStatus: p.result.httpStatus != null ? p.result.httpStatus : null,
     durationMs: p.durationMs,
   }));
+
+  for (const p of providerResults) {
+    if (p.result && p.result.status === 'error') {
+      console.info(
+        '[provider-error]',
+        JSON.stringify({
+          provider: p.code,
+          stage: p.result.errorStage || null,
+          errorCode: p.result.errorCode || null,
+          httpStatus: p.result.httpStatus != null ? p.result.httpStatus : null,
+          durationMs: p.durationMs,
+        })
+      );
+    }
+  }
 
   const allRaw = [];
   for (const p of providerResults) {
