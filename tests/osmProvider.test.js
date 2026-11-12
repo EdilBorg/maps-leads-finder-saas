@@ -1,9 +1,10 @@
 /**
  * OSM provider — category tag search + name-match fallback.
  */
-const { describe, it } = require('node:test');
+const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  search,
   buildOverpassQuery,
   mapElement,
   escapeOverpassRegex,
@@ -172,5 +173,109 @@ describe('osmProvider mapElement', () => {
     assert.equal(item.name, 'O Sabor');
     assert.equal(item.category, 'restaurant');
     assert.equal(item.sourceProvider, 'osm');
+  });
+});
+
+describe('osmProvider error diagnostics', () => {
+  const ORIGINAL_FETCH = global.fetch;
+  const ORIGINAL_ENV = { ...process.env };
+
+  afterEach(() => {
+    global.fetch = ORIGINAL_FETCH;
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  function mockFetch(handler) {
+    global.fetch = handler;
+  }
+
+  it('Nominatim HTTP 403 → geocode stage with httpStatus 403', async () => {
+    delete process.env.OSM_DISABLED;
+    mockFetch(async (url) => {
+      const u = String(url);
+      if (u.includes('nominatim') || u.includes('search?q=')) {
+        return { ok: false, status: 403, async json() { return {}; }, async text() { return ''; } };
+      }
+      throw new Error('unexpected url ' + u);
+    });
+    const r = await search({ query: 'clinica', location: 'Maputo', limit: 10 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorCode, 'HTTP_ERROR');
+    assert.equal(r.errorStage, 'geocode');
+    assert.equal(r.httpStatus, 403);
+    assert.equal(r.results.length, 0);
+  });
+
+  it('Overpass HTTP 502 after successful geocode → overpass stage', async () => {
+    delete process.env.OSM_DISABLED;
+    let calls = 0;
+    mockFetch(async (url, init) => {
+      calls += 1;
+      if (!init || init.method !== 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return [{ lat: '-25.97', lon: '32.57' }];
+          },
+        };
+      }
+      return { ok: false, status: 502, async json() { return {}; }, async text() { return ''; } };
+    });
+    const r = await search({ query: 'clinica', location: 'Maputo', limit: 10 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorCode, 'HTTP_ERROR');
+    assert.equal(r.errorStage, 'overpass');
+    assert.equal(r.httpStatus, 502);
+    assert.ok(calls >= 2);
+  });
+
+  it('network error on Nominatim preserves geocode stage', async () => {
+    delete process.env.OSM_DISABLED;
+    mockFetch(async () => {
+      const err = new Error('getaddrinfo ENOTFOUND');
+      err.code = 'ENOTFOUND';
+      throw err;
+    });
+    const r = await search({ query: 'x', location: 'y', limit: 5 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorStage, 'geocode');
+    assert.equal(r.errorCode, 'ENOTFOUND');
+    assert.equal(r.httpStatus, null);
+  });
+
+  it('network error on Overpass preserves overpass stage', async () => {
+    delete process.env.OSM_DISABLED;
+    mockFetch(async (url, init) => {
+      if (!init || init.method !== 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return [{ lat: '1', lon: '2' }];
+          },
+        };
+      }
+      const err = new Error('socket hang up');
+      err.code = 'ECONNRESET';
+      throw err;
+    });
+    const r = await search({ query: 'x', location: 'y', limit: 5 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorStage, 'overpass');
+    assert.equal(r.errorCode, 'ECONNRESET');
+  });
+
+  it('timeout is classified as error with stage', async () => {
+    delete process.env.OSM_DISABLED;
+    mockFetch(async () => {
+      const err = new Error('osm-geocode timeout after 15000ms');
+      err.code = 'PROVIDER_TIMEOUT';
+      throw err;
+    });
+    const r = await search({ query: 'x', location: 'y', limit: 5 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorCode, 'PROVIDER_TIMEOUT');
+    assert.equal(r.errorStage, 'geocode');
   });
 });
