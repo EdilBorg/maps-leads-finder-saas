@@ -50,8 +50,9 @@ function isAbortError(err) {
 }
 
 /**
- * Fetch + JSON parse under a single AbortController deadline.
- * Covers connection, headers, body download and JSON parsing.
+ * Fetch under a single AbortController deadline covering connection, headers,
+ * body download and (when HTTP ok) JSON parsing.
+ * Non-OK HTTP responses skip JSON parsing so HTML/text error pages stay http_error.
  * Clears the timer on all completion paths.
  */
 async function fetchJsonWithTimeout(url, options, timeoutMs = DIAG_TIMEOUT_MS) {
@@ -62,8 +63,39 @@ async function fetchJsonWithTimeout(url, options, timeoutMs = DIAG_TIMEOUT_MS) {
     controller.abort();
   }, timeoutMs);
 
+  function rejectOnAbort() {
+    return new Promise((_, reject) => {
+      if (controller.signal.aborted) {
+        reject(createTimeoutError());
+        return;
+      }
+      const onAbort = () => {
+        controller.signal.removeEventListener('abort', onAbort);
+        reject(createTimeoutError());
+      };
+      controller.signal.addEventListener('abort', onAbort);
+    });
+  }
+
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
+
+    // Error HTTP responses (502/503/…) may return HTML or plain text.
+    // Do not require JSON — probes classify via res.ok / res.status.
+    if (!res.ok) {
+      try {
+        await Promise.race([
+          res.text().catch(() => ''),
+          rejectOnAbort(),
+        ]);
+      } catch (err) {
+        if (timedOut || isAbortError(err) || controller.signal.aborted) {
+          throw createTimeoutError();
+        }
+        // Ignore body drain failures; status is what matters.
+      }
+      return { res, data: null };
+    }
 
     const data = await Promise.race([
       res.json().catch((parseErr) => {
@@ -77,17 +109,7 @@ async function fetchJsonWithTimeout(url, options, timeoutMs = DIAG_TIMEOUT_MS) {
         err.httpStatus = res.status;
         throw err;
       }),
-      new Promise((_, reject) => {
-        if (controller.signal.aborted) {
-          reject(createTimeoutError());
-          return;
-        }
-        const onAbort = () => {
-          controller.signal.removeEventListener('abort', onAbort);
-          reject(createTimeoutError());
-        };
-        controller.signal.addEventListener('abort', onAbort);
-      }),
+      rejectOnAbort(),
     ]);
 
     return { res, data };
