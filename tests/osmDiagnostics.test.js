@@ -69,6 +69,56 @@ describe('osmDiagnostics service classification', () => {
     assert.equal(r.errorCode, 'HTTP_ERROR');
   });
 
+  it('HTTP 502 with HTML body is http_error not invalid_response', async () => {
+    mockFetch(async () => ({
+      ok: false,
+      status: 502,
+      async json() {
+        throw new SyntaxError('Unexpected token <');
+      },
+      async text() {
+        return '<html>Bad Gateway</html>';
+      },
+    }));
+    const r = await probeOverpass('overpass_primary', 'https://overpass-api.de/api/interpreter');
+    assert.equal(r.status, 'http_error');
+    assert.equal(r.httpStatus, 502);
+    assert.equal(r.errorCode, 'HTTP_ERROR');
+  });
+
+  it('HTTP 503 with plain text body is http_error', async () => {
+    mockFetch(async () => ({
+      ok: false,
+      status: 503,
+      async json() {
+        throw new SyntaxError('Unexpected token');
+      },
+      async text() {
+        return 'Service Unavailable';
+      },
+    }));
+    const r = await probeOverpass('overpass_primary', 'https://overpass-api.de/api/interpreter');
+    assert.equal(r.status, 'http_error');
+    assert.equal(r.httpStatus, 503);
+    assert.equal(r.errorCode, 'HTTP_ERROR');
+  });
+
+  it('HTTP 200 with invalid JSON remains invalid_response', async () => {
+    mockFetch(async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        throw new SyntaxError('Unexpected token');
+      },
+      async text() {
+        return 'not-json';
+      },
+    }));
+    const r = await probeOverpass('overpass_primary', 'https://overpass-api.de/api/interpreter');
+    assert.equal(r.status, 'invalid_response');
+    assert.equal(r.httpStatus, 200);
+  });
+
   it('classifies ECONNREFUSED as network_error', async () => {
     mockFetch(async () => {
       const cause = new Error('connect ECONNREFUSED');
