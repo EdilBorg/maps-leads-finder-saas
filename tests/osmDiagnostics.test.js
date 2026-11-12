@@ -13,6 +13,8 @@ const {
   probeNominatim,
   probeOverpass,
   fetchWithTimeout,
+  fetchJsonWithTimeout,
+  isValidOverpassPayload,
 } = require('../src/services/osmDiagnostics');
 const { requireAdmin } = require('../src/middleware/auth');
 const authService = require('../src/services/authService');
@@ -177,6 +179,99 @@ describe('osmDiagnostics service classification', () => {
     assert.equal(payload.results[1].status, 'network_error');
     assert.equal(payload.results[1].errorCode, 'ECONNREFUSED');
     assert.equal(payload.results[2].status, 'reachable');
+  });
+
+  it('Overpass elements:[] is reachable', async () => {
+    mockFetch(async () => jsonResponse(200, { elements: [] }));
+    const r = await probeOverpass('overpass_primary', 'https://overpass-api.de/api/interpreter');
+    assert.equal(r.status, 'reachable');
+    assert.equal(r.httpStatus, 200);
+  });
+
+  it('Overpass with elements array is reachable', async () => {
+    mockFetch(async () => jsonResponse(200, { elements: [{ type: 'node', id: 1 }] }));
+    const r = await probeOverpass('overpass_primary', 'https://overpass-api.de/api/interpreter');
+    assert.equal(r.status, 'reachable');
+  });
+
+  it('Overpass JSON object without elements is invalid_response', async () => {
+    mockFetch(async () => jsonResponse(200, { foo: 'bar' }));
+    const r = await probeOverpass('overpass_primary', 'https://overpass-api.de/api/interpreter');
+    assert.equal(r.status, 'invalid_response');
+    assert.equal(r.httpStatus, 200);
+    assert.equal(r.errorCode, 'INVALID_RESPONSE');
+  });
+
+  it('timeout during connection establishment', async () => {
+    mockFetch(async (_url, opts) => {
+      return new Promise((resolve, reject) => {
+        const signal = opts && opts.signal;
+        if (signal) {
+          signal.addEventListener('abort', () => {
+            const err = new Error('aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }
+      });
+    });
+    const r = await probeOverpass('overpass_primary', 'https://example.test/overpass');
+    assert.equal(r.status, 'timeout');
+    assert.equal(r.errorCode, 'DIAGNOSTIC_TIMEOUT');
+  });
+
+  it('timeout during body read is timeout not invalid_response', async () => {
+    let aborted = false;
+    mockFetch(async (_url, opts) => {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return new Promise((resolve, reject) => {
+            const signal = opts && opts.signal;
+            if (signal) {
+              signal.addEventListener('abort', () => {
+                aborted = true;
+                const err = new Error('aborted');
+                err.name = 'AbortError';
+                reject(err);
+              });
+            }
+          });
+        },
+      };
+    });
+    await assert.rejects(
+      () => fetchJsonWithTimeout('https://example.test', {}, 40),
+      (err) => err.code === 'DIAGNOSTIC_TIMEOUT'
+    );
+    assert.equal(aborted, true);
+
+    mockFetch(async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        throw err;
+      },
+    }));
+    const r = await probeNominatim();
+    assert.equal(r.status, 'timeout');
+    assert.equal(r.errorCode, 'DIAGNOSTIC_TIMEOUT');
+  });
+
+  it('clears timer after successful fetchJsonWithTimeout', async () => {
+    mockFetch(async () => jsonResponse(200, { elements: [] }));
+    const { data } = await fetchJsonWithTimeout(
+      'https://overpass-api.de/api/interpreter',
+      { method: 'POST', body: 'data=x' },
+      200
+    );
+    assert.ok(data);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(isValidOverpassPayload({ elements: [] }), true);
+    assert.equal(isValidOverpassPayload({ foo: 1 }), false);
   });
 
   it('response does not include sensitive fields', async () => {
