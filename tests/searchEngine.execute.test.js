@@ -499,6 +499,51 @@ describe('executeSearch full pipeline with mocked providers', () => {
     assert.equal(r.searchStatus, 'partial');
   });
 
+  it('google later-page failure preserves results as partial', async () => {
+    const googleProvider = {
+      code: 'google_maps',
+      async search() {
+        return {
+          status: 'error',
+          results: [
+            {
+              name: 'Kept',
+              address: 'Rua 1',
+              phone: null,
+              email: null,
+              website: null,
+              rating: 4,
+              reviewsCount: 1,
+              category: 'test',
+              lat: 1,
+              lng: 1,
+              sourceProvider: 'google_maps',
+              externalId: 'kept',
+            },
+          ],
+          errorCode: 'INVALID_RESPONSE',
+          errorMessage: 'pagination invalid',
+        };
+      },
+    };
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: googleProvider,
+        osm: mockProvider('osm', 'empty', []),
+      },
+    });
+    assert.equal(r.outcome, 'results');
+    assert.equal(r.searchStatus, 'partial');
+    assert.equal(r.results.length, 1);
+    assert.equal(r.results[0].name, 'Kept');
+    const g = r._providers.find((p) => p.code === 'google_maps');
+    assert.equal(g.status, 'error');
+    assert.equal(g.errorCode, 'INVALID_RESPONSE');
+  });
+
   it('diagnostics retained on total failure', async () => {
     const r = await executeSearch({
       modality: 'standard',
