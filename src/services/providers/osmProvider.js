@@ -5,10 +5,6 @@
 const { withTimeout, okResult, errorResult, DEFAULT_TIMEOUT_MS } = require('./baseProvider');
 const CODE = 'osm';
 
-/**
- * Extensible category catalogue: explicit aliases → OSM key/value tags.
- * Matching is exact after normalisation (no vague substring heuristics).
- */
 const CATEGORIES = [
   {
     id: 'restaurants',
@@ -18,16 +14,8 @@ const CATEGORIES = [
       { key: 'amenity', value: 'cafe' },
     ],
     aliases: [
-      'restaurante',
-      'restaurantes',
-      'restaurant',
-      'restaurants',
-      'fast food',
-      'fastfood',
-      'cafe',
-      'cafes',
-      'café',
-      'cafés',
+      'restaurante', 'restaurantes', 'restaurant', 'restaurants',
+      'fast food', 'fastfood', 'cafe', 'cafes', 'café', 'cafés',
     ],
   },
   {
@@ -36,29 +24,14 @@ const CATEGORIES = [
       { key: 'amenity', value: 'clinic' },
       { key: 'healthcare', value: 'clinic' },
     ],
-    aliases: [
-      'clinica',
-      'clinicas',
-      'clínica',
-      'clínicas',
-      'clinic',
-      'clinics',
-    ],
+    aliases: ['clinica', 'clinicas', 'clínica', 'clínicas', 'clinic', 'clinics'],
   },
   {
     id: 'dentists',
     tags: [{ key: 'amenity', value: 'dentist' }],
     aliases: [
-      'clinica dentaria',
-      'clinicas dentarias',
-      'clínica dentária',
-      'clínicas dentárias',
-      'clinica dentária',
-      'clínica dentaria',
-      'dentista',
-      'dentistas',
-      'dentist',
-      'dentists',
+      'clinica dentaria', 'clinicas dentarias', 'clínica dentária', 'clínicas dentárias',
+      'clinica dentária', 'clínica dentaria', 'dentista', 'dentistas', 'dentist', 'dentists',
     ],
   },
   {
@@ -68,19 +41,9 @@ const CATEGORIES = [
       { key: 'shop', value: 'hairdresser' },
     ],
     aliases: [
-      'salao de beleza',
-      'saloes de beleza',
-      'salão de beleza',
-      'salões de beleza',
-      'salao de belesa',
-      'cabeleireiro',
-      'cabeleireiros',
-      'cabeleireira',
-      'cabeleireiras',
-      'beauty',
-      'beauty salon',
-      'hairdresser',
-      'hairdressers',
+      'salao de beleza', 'saloes de beleza', 'salão de beleza', 'salões de beleza',
+      'salao de belesa', 'cabeleireiro', 'cabeleireiros', 'cabeleireira', 'cabeleireiras',
+      'beauty', 'beauty salon', 'hairdresser', 'hairdressers',
     ],
   },
   {
@@ -120,6 +83,74 @@ function resolveCategory(query) {
     }
   }
   return null;
+}
+
+/**
+ * Extract a stable technical error code from Node fetch / undici failures.
+ * Native fetch often wraps system errors as TypeError("fetch failed") with err.cause.
+ */
+function resolveErrorCode(err) {
+  if (!err || typeof err !== 'object') return 'PROVIDER_ERROR';
+
+  const asCode = (v) => {
+    if (v == null) return null;
+    const s = String(v).trim();
+    if (!s || s.length > 64) return null;
+    if (s === 'undefined' || s === 'null') return null;
+    return s;
+  };
+
+  const direct = asCode(err.code);
+  const cause = err.cause && typeof err.cause === 'object' ? err.cause : null;
+  const causeCode = cause ? asCode(cause.code) || asCode(cause.errno) : null;
+
+  const outerIsGenericFetch =
+    err.name === 'TypeError' ||
+    (typeof err.message === 'string' && /fetch failed/i.test(err.message));
+
+  if (outerIsGenericFetch && causeCode) return causeCode;
+  if (direct && direct !== 'ERR_INVALID_THIS') return direct;
+  if (causeCode) return causeCode;
+  if (err.name === 'AbortError') return 'ABORTED';
+  if (direct) return direct;
+  return 'PROVIDER_ERROR';
+}
+
+function resolveCauseCode(err) {
+  if (!err || typeof err !== 'object' || !err.cause || typeof err.cause !== 'object') return null;
+  const c = err.cause;
+  if (c.code != null) {
+    const s = String(c.code).trim();
+    return s ? s.slice(0, 64) : null;
+  }
+  if (c.errno != null) {
+    const s = String(c.errno).trim();
+    return s ? s.slice(0, 64) : null;
+  }
+  return null;
+}
+
+function resolveErrorName(err) {
+  if (!err || typeof err !== 'object') return null;
+  if (typeof err.name === 'string' && err.name && err.name !== 'Error') {
+    return err.name.slice(0, 64);
+  }
+  return null;
+}
+
+function sanitizeOsmErrorMessage(err) {
+  let message = (err && err.message) || 'osm failed';
+  if (
+    typeof message === 'string' &&
+    /fetch failed/i.test(message) &&
+    err &&
+    err.cause &&
+    typeof err.cause.message === 'string' &&
+    err.cause.message
+  ) {
+    message = err.cause.message;
+  }
+  return String(message).slice(0, 200);
 }
 
 async function geocodeLocation(location) {
@@ -291,9 +322,10 @@ async function search(criteria) {
   } catch (err) {
     const stage = (err && err.errorStage) || 'osm_search';
     const httpStatus = err && err.httpStatus != null ? err.httpStatus : null;
-    const code = (err && err.code) || 'PROVIDER_ERROR';
-    let message = (err && err.message) || 'osm failed';
-    message = String(message).slice(0, 200);
+    const code = resolveErrorCode(err);
+    const causeCode = resolveCauseCode(err);
+    const errorName = resolveErrorName(err);
+    const message = sanitizeOsmErrorMessage(err);
     return {
       status: 'error',
       results: [],
@@ -301,6 +333,8 @@ async function search(criteria) {
       errorMessage: message,
       errorStage: stage,
       httpStatus,
+      errorName,
+      causeCode: causeCode && causeCode !== code ? causeCode : causeCode,
     };
   }
 }
@@ -315,4 +349,6 @@ module.exports = {
   normalizeText,
   resolveCategory,
   CATEGORIES,
+  resolveErrorCode,
+  resolveCauseCode,
 };
