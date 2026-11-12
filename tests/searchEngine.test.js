@@ -57,6 +57,21 @@ describe('searchEngine normalize dedupe filter limit', () => {
       1
     );
   });
+  it('applyFilters noWebsite removes leads with website', () => {
+    const leads = [
+      { name: 'A', website: 'https://x.test' },
+      { name: 'B', website: null },
+    ];
+    const filtered = applyFilters(leads, { noWebsite: true });
+    assert.equal(filtered.length, 1);
+    assert.equal(filtered[0].name, 'B');
+  });
+  it('applyFilters noWebsite false keeps websites', () => {
+    assert.equal(
+      applyFilters([{ name: 'A', website: 'https://x.test' }], { noWebsite: false }).length,
+      1
+    );
+  });
   it('perProviderLimit is bounded', () => {
     assert.ok(perProviderLimit(10) >= 10);
     assert.ok(perProviderLimit(500) <= 200);

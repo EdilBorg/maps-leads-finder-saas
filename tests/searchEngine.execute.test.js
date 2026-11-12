@@ -70,10 +70,10 @@ describe('classifySearchOutcome matrix', () => {
       searchStatus: 'completed',
     });
   });
-  it('empty + error → inconclusive (not absolute no_results)', () => {
+  it('empty + error → inconclusive / partial', () => {
     assert.deepEqual(classifySearchOutcome(['empty', 'error'], false), {
       outcome: 'inconclusive',
-      searchStatus: 'completed',
+      searchStatus: 'partial',
     });
   });
   it('error + error → failed/error', () => {
@@ -82,10 +82,16 @@ describe('classifySearchOutcome matrix', () => {
       searchStatus: 'failed',
     });
   });
-  it('not_configured + empty → no_results', () => {
+  it('not_configured + empty → inconclusive / partial', () => {
     assert.deepEqual(classifySearchOutcome(['not_configured', 'empty'], false), {
-      outcome: 'no_results',
-      searchStatus: 'completed',
+      outcome: 'inconclusive',
+      searchStatus: 'partial',
+    });
+  });
+  it('empty + not_configured → inconclusive / partial', () => {
+    assert.deepEqual(classifySearchOutcome(['empty', 'not_configured'], false), {
+      outcome: 'inconclusive',
+      searchStatus: 'partial',
     });
   });
   it('not_configured + results → partial/results', () => {
@@ -285,7 +291,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
       },
     });
     assert.equal(r.outcome, 'inconclusive');
-    assert.equal(r.searchStatus, 'completed');
+    assert.equal(r.searchStatus, 'partial');
     assert.equal(r.results.length, 0);
   });
 
@@ -331,7 +337,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
       location: 'y',
       providers: {
         google_maps: mockProvider('google_maps', 'ok', [lead('A', '1', 'google_maps')]),
-        osm: { code: 'osm' }, // present but without search()
+        osm: { code: 'osm' },
       },
     });
     assert.equal(r.outcome, 'results');
@@ -442,6 +448,55 @@ describe('executeSearch full pipeline with mocked providers', () => {
     assert.ok(r.totals.afterDedup <= r.totals.normalized);
     assert.ok(r.totals.returned <= r.totals.afterFilters);
     assert.ok(r.totals.returned <= 5);
+  });
+
+  it('noWebsite: true removes leads with website', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      filters: { noWebsite: true },
+      providers: {
+        google_maps: mockProvider('google_maps', 'ok', [
+          lead('WithWeb', '1', 'google_maps', { website: 'https://a.example' }),
+          lead('NoWeb', '2', 'google_maps', { website: null }),
+        ]),
+        osm: mockProvider('osm', 'empty', []),
+      },
+    });
+    assert.equal(r.totals.afterFilters, 1);
+    assert.equal(r.results[0].name, 'NoWeb');
+  });
+
+  it('noWebsite: false keeps leads with website', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      filters: { noWebsite: false },
+      providers: {
+        google_maps: mockProvider('google_maps', 'ok', [
+          lead('WithWeb', '1', 'google_maps', { website: 'https://a.example' }),
+        ]),
+        osm: mockProvider('osm', 'empty', []),
+      },
+    });
+    assert.equal(r.results.length, 1);
+    assert.equal(r.results[0].name, 'WithWeb');
+  });
+
+  it('not_configured + empty → inconclusive partial (not no_results)', async () => {
+    const r = await executeSearch({
+      modality: 'standard',
+      query: 'x',
+      location: 'y',
+      providers: {
+        google_maps: mockProvider('google_maps', 'not_configured', []),
+        osm: mockProvider('osm', 'empty', []),
+      },
+    });
+    assert.equal(r.outcome, 'inconclusive');
+    assert.equal(r.searchStatus, 'partial');
   });
 
   it('diagnostics retained on total failure', async () => {

@@ -21,4 +21,10 @@ describe('free search quota consumption', () => {
   it('does not consume on total failure', () => {
     assert.equal(shouldConsumeFreeSearch(0, 'error', 'failed'), false);
   });
+  it('does not consume on inconclusive without results even if partial', () => {
+    assert.equal(shouldConsumeFreeSearch(0, 'inconclusive', 'partial'), false);
+  });
+  it('consumes on results with partial status', () => {
+    assert.equal(shouldConsumeFreeSearch(3, 'results', 'partial'), true);
+  });
 });
