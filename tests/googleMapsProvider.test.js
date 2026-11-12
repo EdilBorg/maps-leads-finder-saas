@@ -274,10 +274,50 @@ describe('googleMapsProvider Places API (New)', () => {
     assert.equal(r.results.length, 0);
   });
 
-  it('unexpected structure without places is empty on first page', async () => {
+  it('response without places field is error not empty', async () => {
     mockFetchSequence([{ body: { foo: 1 } }]);
     const r = await google.search({ query: 'x', location: 'y', limit: 5 });
-    assert.equal(r.status, 'empty');
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorCode, 'INVALID_RESPONSE');
+    assert.equal(r.results.length, 0);
+  });
+
+  it('empty object response is error not empty', async () => {
+    mockFetchSequence([{ body: {} }]);
+    const r = await google.search({ query: 'x', location: 'y', limit: 5 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorCode, 'INVALID_RESPONSE');
+  });
+
+  it('places null is error not empty', async () => {
+    mockFetchSequence([{ body: { places: null } }]);
+    const r = await google.search({ query: 'x', location: 'y', limit: 5 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorCode, 'INVALID_RESPONSE');
+  });
+
+  it('places non-array is error not empty', async () => {
+    mockFetchSequence([{ body: { places: 'invalid' } }]);
+    const r = await google.search({ query: 'x', location: 'y', limit: 5 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorCode, 'INVALID_RESPONSE');
+  });
+
+  it('invalid places on second page preserves first page results', async () => {
+    mockFetchSequence([
+      {
+        body: {
+          places: [placeFixture('kept')],
+          nextPageToken: 't2',
+        },
+      },
+      { body: { foo: 1 } },
+    ]);
+    const r = await google.search({ query: 'x', location: 'y', limit: 20 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.errorCode, 'INVALID_RESPONSE');
+    assert.equal(r.results.length, 1);
+    assert.equal(r.results[0].externalId, 'kept');
   });
 
   it('quota/permission errors surface as error status', async () => {
@@ -304,7 +344,7 @@ describe('googleMapsProvider Places API (New)', () => {
 
   it('uses explicit FieldMask without wildcard', async () => {
     const calls = mockFetchSequence([{ body: { places: [] } }]);
-    await google.search({ query: 'x', location: 'y', limit: 5 });
+    await google google.search({ query: 'x', location: 'y', limit: 5 });
     const mask = calls[0].init.headers['X-Goog-FieldMask'];
     assert.equal(mask.includes('*'), false);
     assert.equal(mask.includes('places.nationalPhoneNumber'), true);
