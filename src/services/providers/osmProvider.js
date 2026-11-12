@@ -110,32 +110,19 @@ function normalizeText(s) {
 }
 
 function escapeOverpassRegex(s) {
-  return String(s)
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/[\[\](){}.+*?^$|]/g, '\\$&');
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
- * Resolve a user query to a known category, or null for free-text name search.
- * Exact alias match only after normalisation — compound phrases fall back to name search.
+ * Resolve query to a category via exact normalized alias match only.
+ * @returns {{ id: string, tags: Array<{key:string,value:string|null}> }|null}
  */
 function resolveCategory(query) {
   const normalized = normalizeText(query);
   if (!normalized) return null;
-
-  // Prefer longer aliases first so "clinica dentaria" wins over "clinica".
-  const candidates = [];
   for (const cat of CATEGORIES) {
     for (const alias of cat.aliases) {
-      candidates.push({ aliasNorm: normalizeText(alias), category: cat });
-    }
-  }
-  candidates.sort((a, b) => b.aliasNorm.length - a.aliasNorm.length);
-
-  for (const { aliasNorm, category } of candidates) {
-    if (aliasNorm && aliasNorm === normalized) {
-      return category;
+      if (normalizeText(alias) === normalized) return cat;
     }
   }
   return null;
@@ -144,18 +131,29 @@ function resolveCategory(query) {
 async function geocodeLocation(location) {
   const base = process.env.OSM_NOMINATIM_URL || 'https://nominatim.openstreetmap.org';
   const url = `${base}/search?q=${encodeURIComponent(location)}&format=json&limit=1`;
-  const data = await withTimeout(
-    fetch(url, {
-      headers: { 'User-Agent': userAgent(), Accept: 'application/json' },
-    }).then(async (res) => {
-      if (!res.ok) throw Object.assign(new Error(`geocode HTTP ${res.status}`), { code: 'HTTP_ERROR' });
-      return res.json();
-    }),
-    15000,
-    'osm-geocode'
-  );
-  if (!Array.isArray(data) || !data[0]) return null;
-  return { lat: Number(data[0].lat), lon: Number(data[0].lon) };
+  try {
+    const data = await withTimeout(
+      fetch(url, {
+        headers: { 'User-Agent': userAgent(), Accept: 'application/json' },
+      }).then(async (res) => {
+        if (!res.ok) {
+          const err = new Error(`geocode HTTP ${res.status}`);
+          err.code = 'HTTP_ERROR';
+          err.errorStage = 'geocode';
+          err.httpStatus = res.status;
+          throw err;
+        }
+        return res.json();
+      }),
+      15000,
+      'osm-geocode'
+    );
+    if (!Array.isArray(data) || !data[0]) return null;
+    return { lat: Number(data[0].lat), lon: Number(data[0].lon) };
+  } catch (err) {
+    if (err && !err.errorStage) err.errorStage = 'geocode';
+    throw err;
+  }
 }
 
 function groupTagsByKey(tags) {
@@ -181,7 +179,7 @@ function buildCategoryOverpassQuery(tags, radius, lat, lon, limit) {
     if (anyValue) {
       filter = `["${key}"]`;
     } else if (values.length === 1) {
-      filter = `["${key}"="${values[0]}"]`;
+      filter = `["${key}"=\"${values[0]}\"]`;
     } else {
       const reg = values.map((v) => escapeOverpassRegex(v)).join('|');
       filter = `["${key}"~"^(${reg})$"]`;
@@ -246,7 +244,8 @@ function mapElement(el, criteria) {
   const addressParts = [
     tags['addr:street'],
     tags['addr:housenumber'],
-    tags['addr:city'] || tags['addr:town'],
+    tags['addr:city'],
+    tags['addr:postcode'],
     tags['addr:country'],
   ].filter(Boolean);
   return {
@@ -277,32 +276,48 @@ async function search(criteria) {
     const limit = Math.min(criteria.limit || 50, 100);
     const overpassUrl = process.env.OSM_OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
     const ql = buildOverpassQuery(criteria.query, radius, center.lat, center.lon, limit);
-    const data = await withTimeout(
-      fetch(overpassUrl, {
-        method: 'POST',
-        headers: { 'User-Agent': userAgent(), 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `data=${encodeURIComponent(ql)}`,
-      }).then(async (res) => {
-        if (!res.ok) throw Object.assign(new Error(`overpass HTTP ${res.status}`), { code: 'HTTP_ERROR' });
-        return res.json();
-      }),
-      Math.max(DEFAULT_TIMEOUT_MS, 35000),
-      CODE
-    );
-    const elements = Array.isArray(data.elements) ? data.elements : [];
-    const mapped = [];
-    const seen = new Set();
-    for (const el of elements) {
-      const item = mapElement(el, criteria);
-      if (!item) continue;
-      if (seen.has(item.externalId)) continue;
-      seen.add(item.externalId);
-      mapped.push(item);
-      if (mapped.length >= limit) break;
+    let data;
+    try {
+      data = await withTimeout(
+        fetch(overpassUrl, {
+          method: 'POST',
+          headers: { 'User-Agent': userAgent(), 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: `data=${encodeURIComponent(ql)}`,
+        }).then(async (res) => {
+          if (!res.ok) {
+            const err = new Error(`overpass HTTP ${res.status}`);
+            err.code = 'HTTP_ERROR';
+            err.errorStage = 'overpass';
+            err.httpStatus = res.status;
+            throw err;
+          }
+          return res.json();
+        }),
+        DEFAULT_TIMEOUT_MS,
+        'osm-overpass'
+      );
+    } catch (err) {
+      if (err && !err.errorStage) err.errorStage = 'overpass';
+      throw err;
     }
+    const elements = Array.isArray(data.elements) ? data.elements : [];
+    const mapped = elements.map((el) => mapElement(el, criteria)).filter(Boolean).slice(0, limit);
     return okResult(mapped);
   } catch (err) {
-    return errorResult(err.code || 'PROVIDER_ERROR', err.message || 'osm failed');
+    const stage = (err && err.errorStage) || 'osm_search';
+    const httpStatus = err && err.httpStatus != null ? err.httpStatus : null;
+    const code = (err && err.code) || 'PROVIDER_ERROR';
+    // Keep message short and free of credentials/URLs.
+    let message = (err && err.message) || 'osm failed';
+    message = String(message).slice(0, 200);
+    return {
+      status: 'error',
+      results: [],
+      errorCode: code,
+      errorMessage: message,
+      errorStage: stage,
+      httpStatus,
+    };
   }
 }
 
