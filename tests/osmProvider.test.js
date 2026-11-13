@@ -1,9 +1,5 @@
 /**
-<<<<<<< HEAD
- * OSM provider — category tag search + name-match fallback.
-=======
  * OSM provider — category tags + name match, multi-endpoint fallback, geocode bbox.
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
  */
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -15,12 +11,9 @@ const {
   escapeOverpassRegex,
   resolveCategory,
   normalizeText,
-<<<<<<< HEAD
-=======
   resolveOverpassEndpoints,
   extractRemarkError,
   isTransientError,
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
 } = require('../src/services/providers/osmProvider');
 
 describe('osmProvider normalize + resolveCategory', () => {
@@ -35,10 +28,7 @@ describe('osmProvider normalize + resolveCategory', () => {
     assert.equal(resolveCategory('restaurante').id, 'restaurants');
     assert.equal(resolveCategory('RESTAURANTS').id, 'restaurants');
     assert.equal(resolveCategory('café').id, 'restaurants');
-<<<<<<< HEAD
-=======
     assert.equal(resolveCategory('pastelaria').id, 'restaurants');
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
   });
 
   it('recognises clinics and dentists distinctly', () => {
@@ -51,16 +41,11 @@ describe('osmProvider normalize + resolveCategory', () => {
   it('recognises beauty and shops', () => {
     assert.equal(resolveCategory('Salões de beleza').id, 'beauty');
     assert.equal(resolveCategory('cabeleireiro').id, 'beauty');
-<<<<<<< HEAD
-=======
     assert.equal(resolveCategory('barbeiro').id, 'beauty');
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     assert.equal(resolveCategory('Lojas').id, 'shops');
     assert.equal(resolveCategory('loja').id, 'shops');
   });
 
-<<<<<<< HEAD
-=======
   it('recognises expanded categories from original catalogue', () => {
     assert.equal(resolveCategory('Farmácia').id, 'pharmacies');
     assert.equal(resolveCategory('farmacias').id, 'pharmacies');
@@ -75,27 +60,18 @@ describe('osmProvider normalize + resolveCategory', () => {
     assert.equal(resolveCategory('Veterinário').id, 'veterinary');
   });
 
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
   it('does not treat compound or unknown phrases as categories', () => {
     assert.equal(resolveCategory('Restaurantes italianos'), null);
     assert.equal(resolveCategory('Clínicas privadas'), null);
     assert.equal(resolveCategory('Padaria Central'), null);
     assert.equal(resolveCategory('Restaurante O Sabor'), null);
-<<<<<<< HEAD
-=======
     assert.equal(resolveCategory('Farmácia Central'), null);
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     assert.equal(resolveCategory(''), null);
   });
 });
 
-<<<<<<< HEAD
-describe('osmProvider buildOverpassQuery — categories', () => {
-  it('restaurants query uses amenity tags without name filter', () => {
-=======
 describe('osmProvider buildOverpassQuery — categories include name + tags', () => {
   it('restaurants query uses amenity tags AND name filter', () => {
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     const q = buildOverpassQuery('Restaurantes', 3000, -25.97, 32.57, 40);
     assert.match(q, /amenity/);
     assert.match(q, /restaurant/);
@@ -104,24 +80,13 @@ describe('osmProvider buildOverpassQuery — categories include name + tags', ()
     assert.match(q, /node\["amenity"/);
     assert.match(q, /way\["amenity"/);
     assert.match(q, /relation\["amenity"/);
-<<<<<<< HEAD
-    assert.doesNotMatch(q, /\["name"~/);
-=======
     // Name search must also be present
     assert.match(q, /\["name"~/);
     assert.match(q, /Restaurantes|restaurantes/i);
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     assert.match(q, /around:3000,-25\.97,32\.57/);
     assert.match(q, /out center 40/);
   });
 
-<<<<<<< HEAD
-  it('clinics query uses amenity and healthcare without name match', () => {
-    const q = buildOverpassQuery('Clínicas', 2000, -25.9, 32.5, 25);
-    assert.match(q, /\["amenity"="clinic"\]/);
-    assert.match(q, /\["healthcare"="clinic"\]/);
-    assert.doesNotMatch(q, /\["name"~/);
-=======
   it('clinics query uses amenity/healthcare AND name match', () => {
     const q = buildOverpassQuery('Clínicas', 2000, -25.9, 32.5, 25);
     // amenity clinic|doctors may be grouped as regex when multiple values share key
@@ -129,37 +94,19 @@ describe('osmProvider buildOverpassQuery — categories include name + tags', ()
     assert.match(q, /clinic/);
     assert.match(q, /\["healthcare"="clinic"\]/);
     assert.match(q, /\["name"~/);
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     assert.match(q, /around:2000,-25\.9,32\.5/);
     assert.match(q, /out center 25/);
   });
 
-<<<<<<< HEAD
-  it('dentists query targets amenity=dentist', () => {
-    const q = buildOverpassQuery('clínica dentária', 1500, 1, 2, 10);
-    assert.match(q, /\["amenity"="dentist"\]/);
-    assert.doesNotMatch(q, /\["name"~/);
-=======
   it('dentists query targets amenity=dentist and name', () => {
     const q = buildOverpassQuery('clínica dentária', 1500, 1, 2, 10);
     assert.match(q, /\["amenity"="dentist"\]/);
     assert.match(q, /\["name"~/);
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     assert.match(q, /node\["amenity"="dentist"\]/);
     assert.match(q, /way\["amenity"="dentist"\]/);
     assert.match(q, /relation\["amenity"="dentist"\]/);
   });
 
-<<<<<<< HEAD
-  it('beauty query uses shop beauty and hairdresser', () => {
-    const q = buildOverpassQuery('Salões de beleza', 4000, 0, 0, 15);
-    assert.match(q, /shop/);
-    assert.match(q, /beauty|hairdresser/);
-    assert.doesNotMatch(q, /\["name"~/);
-  });
-
-  it('shops category uses key-only shop filter', () => {
-=======
   it('beauty query uses shop beauty/hairdresser and name', () => {
     const q = buildOverpassQuery('Salões de beleza', 4000, 0, 0, 15);
     assert.match(q, /shop/);
@@ -168,14 +115,10 @@ describe('osmProvider buildOverpassQuery — categories include name + tags', ()
   });
 
   it('shops category uses key-only shop filter and name', () => {
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     const q = buildOverpassQuery('Lojas', 5000, -26, 32, 30);
     assert.match(q, /node\["shop"\]\(around:5000/);
     assert.match(q, /way\["shop"\]\(around:5000/);
     assert.match(q, /relation\["shop"\]\(around:5000/);
-<<<<<<< HEAD
-    assert.doesNotMatch(q, /\["name"~/);
-=======
     assert.match(q, /\["name"~/);
   });
 
@@ -183,15 +126,12 @@ describe('osmProvider buildOverpassQuery — categories include name + tags', ()
     const q = buildOverpassQuery('Farmácia', 3000, -25, 32, 20);
     assert.match(q, /\["amenity"="pharmacy"\]/);
     assert.match(q, /\["name"~/);
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
   });
 
   it('caps out limit at 100', () => {
     const q = buildOverpassQuery('restaurante', 1000, 0, 0, 500);
     assert.match(q, /out center 100/);
   });
-<<<<<<< HEAD
-=======
 
   it('uses bbox when geo.bbox is provided', () => {
     const geo = {
@@ -203,29 +143,20 @@ describe('osmProvider buildOverpassQuery — categories include name + tags', ()
     assert.match(q, /\(-26\.1,32\.4,-25\.8,32\.7\)/);
     assert.doesNotMatch(q, /around:/);
   });
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
 });
 
 describe('osmProvider buildOverpassQuery — name fallback', () => {
   it('free-text still uses name regex and commercial keys', () => {
-<<<<<<< HEAD
-    const q = buildOverpassQuery('padaria', 2000, -25.9, 32.5, 30);
-    assert.match(q, /padaria/);
-=======
     const q = buildOverpassQuery('padaria central', 2000, -25.9, 32.5, 30);
     assert.match(q, /padaria/i);
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     assert.match(q, /\["name"~/);
     assert.match(q, /node\["shop"\]/);
     assert.match(q, /way\["shop"\]/);
     assert.match(q, /node\["amenity"\]/);
     assert.match(q, /way\["amenity"\]/);
     assert.match(q, /way\["office"\]/);
-<<<<<<< HEAD
-=======
     assert.match(q, /craft/);
     assert.match(q, /tourism/);
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     assert.match(q, /around:2000,-25\.9,32\.5/);
     assert.match(q, /out center 30/);
   });
@@ -234,8 +165,6 @@ describe('osmProvider buildOverpassQuery — name fallback', () => {
     const q = buildOverpassQuery('Restaurantes italianos', 2500, 1, 2, 20);
     assert.match(q, /\["name"~/);
     assert.match(q, /italianos/i);
-<<<<<<< HEAD
-=======
     // Should not resolve as pure category (no bare amenity=restaurant without name)
     // but name search is present
   });
@@ -245,7 +174,6 @@ describe('osmProvider buildOverpassQuery — name fallback', () => {
     const q = buildOverpassQuery('Farmácia Central', 3000, -25, 32, 15);
     assert.match(q, /\["name"~/);
     assert.match(q, /Farmácia Central|Farm\\xe1cia Central|Farmácia/i);
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
   });
 
   it('escapes regex metacharacters in name search', () => {
@@ -298,8 +226,6 @@ describe('osmProvider mapElement', () => {
     assert.equal(item.name, 'O Sabor');
     assert.equal(item.category, 'restaurant');
     assert.equal(item.sourceProvider, 'osm');
-<<<<<<< HEAD
-=======
     assert.equal(item.externalId, 'node/42');
     assert.equal(item.lng, 32.5);
     assert.equal(item.rating, null);
@@ -339,7 +265,6 @@ describe('osmProvider endpoints and helpers', () => {
     assert.equal(isTransientError({ code: 'ECONNRESET' }), true);
     assert.equal(isTransientError({ code: 'PROVIDER_TIMEOUT' }), true);
     assert.equal(isTransientError({ code: 'HTTP_ERROR', httpStatus: 400 }), false);
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
   });
 });
 
@@ -373,14 +298,9 @@ describe('osmProvider error diagnostics', () => {
     assert.equal(r.results.length, 0);
   });
 
-<<<<<<< HEAD
-  it('Overpass HTTP 502 after successful geocode → overpass stage', async () => {
-    delete process.env.OSM_DISABLED;
-=======
   it('Overpass HTTP 502 after successful geocode → overpass stage (may try fallback)', async () => {
     delete process.env.OSM_DISABLED;
     delete process.env.OSM_OVERPASS_URL;
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     let calls = 0;
     mockFetch(async (url, init) => {
       calls += 1;
@@ -400,11 +320,6 @@ describe('osmProvider error diagnostics', () => {
     assert.equal(r.errorCode, 'HTTP_ERROR');
     assert.equal(r.errorStage, 'overpass');
     assert.equal(r.httpStatus, 502);
-<<<<<<< HEAD
-    assert.ok(calls >= 2);
-  });
-
-=======
     // At least geocode + one overpass; with multi-endpoint may be more
     assert.ok(calls >= 2);
   });
@@ -584,7 +499,6 @@ describe('osmProvider error diagnostics', () => {
     assert.equal(r.errorStage, 'overpass');
   });
 
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
   it('network error on Nominatim preserves geocode stage', async () => {
     delete process.env.OSM_DISABLED;
     mockFetch(async () => {
@@ -601,10 +515,7 @@ describe('osmProvider error diagnostics', () => {
 
   it('network error on Overpass preserves overpass stage', async () => {
     delete process.env.OSM_DISABLED;
-<<<<<<< HEAD
-=======
     process.env.OSM_OVERPASS_URL = 'https://single.example/api';
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     mockFetch(async (url, init) => {
       if (!init || init.method !== 'POST') {
         return {
@@ -640,10 +551,7 @@ describe('osmProvider error diagnostics', () => {
 
   it('TypeError fetch failed with cause ENOTFOUND resolves network code', async () => {
     delete process.env.OSM_DISABLED;
-<<<<<<< HEAD
-=======
     process.env.OSM_OVERPASS_URL = 'https://single.example/api';
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     mockFetch(async (url, init) => {
       if (!init || init.method !== 'POST') {
         return {
@@ -671,10 +579,7 @@ describe('osmProvider error diagnostics', () => {
 
   it('TypeError fetch failed with cause ECONNRESET', async () => {
     delete process.env.OSM_DISABLED;
-<<<<<<< HEAD
-=======
     process.env.OSM_OVERPASS_URL = 'https://single.example/api';
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     mockFetch(async (url, init) => {
       if (!init || init.method !== 'POST') {
         return {
@@ -699,10 +604,7 @@ describe('osmProvider error diagnostics', () => {
 
   it('TLS cause code is preserved from fetch failed wrapper', async () => {
     delete process.env.OSM_DISABLED;
-<<<<<<< HEAD
-=======
     process.env.OSM_OVERPASS_URL = 'https://single.example/api';
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
     mockFetch(async (url, init) => {
       if (!init || init.method !== 'POST') {
         return {
@@ -748,8 +650,6 @@ describe('osmProvider error diagnostics', () => {
     plain.code = 'HTTP_ERROR';
     assert.equal(resolveErrorCode(plain), 'HTTP_ERROR');
   });
-<<<<<<< HEAD
-=======
 
   it('preserves result contract fields on successful search', async () => {
     delete process.env.OSM_DISABLED;
@@ -846,5 +746,4 @@ describe('osmProvider error diagnostics', () => {
     assert.equal(r.status, 'ok');
     assert.equal(r.results.length, 1);
   });
->>>>>>> 5a08e2e (fix(osm): improve search coverage and Overpass resilience)
 });
