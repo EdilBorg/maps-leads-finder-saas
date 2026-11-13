@@ -77,9 +77,7 @@ describe('osmProvider buildOverpassQuery — categories include name + tags', ()
     assert.match(q, /restaurant/);
     assert.match(q, /fast_food/);
     assert.match(q, /cafe/);
-    assert.match(q, /node\["amenity"/);
-    assert.match(q, /way\["amenity"/);
-    assert.match(q, /relation\["amenity"/);
+    assert.match(q, /nwr\["amenity"/);
     // Name search must also be present
     assert.match(q, /\["name"~/);
     assert.match(q, /Restaurantes|restaurantes/i);
@@ -102,9 +100,7 @@ describe('osmProvider buildOverpassQuery — categories include name + tags', ()
     const q = buildOverpassQuery('clínica dentária', 1500, 1, 2, 10);
     assert.match(q, /\["amenity"="dentist"\]/);
     assert.match(q, /\["name"~/);
-    assert.match(q, /node\["amenity"="dentist"\]/);
-    assert.match(q, /way\["amenity"="dentist"\]/);
-    assert.match(q, /relation\["amenity"="dentist"\]/);
+    assert.match(q, /nwr\["amenity"="dentist"\]/);
   });
 
   it('beauty query uses shop beauty/hairdresser and name', () => {
@@ -116,10 +112,19 @@ describe('osmProvider buildOverpassQuery — categories include name + tags', ()
 
   it('shops category uses key-only shop filter and name', () => {
     const q = buildOverpassQuery('Lojas', 5000, -26, 32, 30);
-    assert.match(q, /node\["shop"\]\(around:5000/);
-    assert.match(q, /way\["shop"\]\(around:5000/);
-    assert.match(q, /relation\["shop"\]\(around:5000/);
+    assert.match(q, /nwr\["shop"\]\(around:5000/);
     assert.match(q, /\["name"~/);
+  });
+
+  it('barbearia uses beauty tags with nwr (not node/way/relation expansion)', () => {
+    const q = buildOverpassQuery('Barbearia', 5000, 38.72, -9.14, 40);
+    assert.equal(resolveCategory('Barbearia').id, 'beauty');
+    assert.match(q, /nwr/);
+    assert.match(q, /hairdresser|beauty/);
+    assert.match(q, /\["name"~/);
+    assert.doesNotMatch(q, /node\["shop"/);
+    assert.doesNotMatch(q, /way\["shop"/);
+    assert.doesNotMatch(q, /relation\["shop"/);
   });
 
   it('pharmacy category uses amenity=pharmacy and name', () => {
@@ -150,11 +155,9 @@ describe('osmProvider buildOverpassQuery — name fallback', () => {
     const q = buildOverpassQuery('padaria central', 2000, -25.9, 32.5, 30);
     assert.match(q, /padaria/i);
     assert.match(q, /\["name"~/);
-    assert.match(q, /node\["shop"\]/);
-    assert.match(q, /way\["shop"\]/);
-    assert.match(q, /node\["amenity"\]/);
-    assert.match(q, /way\["amenity"\]/);
-    assert.match(q, /way\["office"\]/);
+    assert.match(q, /nwr\["shop"\]/);
+    assert.match(q, /nwr\["amenity"\]/);
+    assert.match(q, /nwr\["office"\]/);
     assert.match(q, /craft/);
     assert.match(q, /tourism/);
     assert.match(q, /around:2000,-25\.9,32\.5/);
