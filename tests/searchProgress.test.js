@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { mapProviderUiStatus } = require('../src/services/searchService');
+const { mapProviderUiStatus, markPendingProvidersCancelled } = require('../src/services/searchService');
 
 describe('provider progress mapping', () => {
   it('maps ok/empty/not_configured/error/cancel', () => {
@@ -11,5 +11,16 @@ describe('provider progress mapping', () => {
     assert.equal(mapProviderUiStatus('running'), 'running');
     assert.equal(mapProviderUiStatus('pending'), 'pending');
     assert.equal(mapProviderUiStatus('error', 'CANCELLED'), 'cancelled');
+  });
+});
+
+describe('markPendingProvidersCancelled', () => {
+  it('only cancels pending and running', () => {
+    const out = markPendingProvidersCancelled([
+      { code: 'a', status: 'completed', count: 1 },
+      { code: 'b', status: 'running', count: 0 },
+    ]);
+    assert.equal(out[0].status, 'completed');
+    assert.equal(out[1].status, 'cancelled');
   });
 });
