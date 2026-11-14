@@ -64,32 +64,15 @@
         </section>
         <section class="view" id="view-search" aria-label="Nova pesquisa">
           <h2 class="page-heading">Nova pesquisa</h2>
-          <p class="page-sub">Define categoria, localização e modalidade</p>
+          <p class="page-sub">Define categoria, localização e limite de resultados</p>
           <div class="card">
             <form id="search-form" class="stack-gap-16" novalidate>
               <div class="form-grid cols-2">
                 <div class="form-group"><label class="form-label" for="query">Categoria / atividade</label><input class="input" id="query" name="query" type="text" placeholder="Ex.: clínicas dentárias" autocomplete="off"></div>
                 <div class="form-group"><label class="form-label" for="location">Localização</label><input class="input" id="location" name="location" type="text" placeholder="Ex.: Maputo, Beira" autocomplete="off"></div>
               </div>
-              <div class="form-group">
-                <span class="form-label">Modalidade de pesquisa</span>
-                <div class="modality-grid" id="modality-grid" role="radiogroup" aria-label="Modalidade de pesquisa">
-                  <label class="modality-card selected">
-                    <input type="radio" name="modality" value="standard" checked>
-                    <span class="modality-title">Pesquisa padrão</span>
-                    <span class="modality-sub">Pesquisa equilibrada</span>
-                    <span class="modality-desc">Ideal para pesquisas habituais de empresas e estabelecimentos numa determinada localização.</span>
-                  </label>
-                  <label class="modality-card">
-                    <input type="radio" name="modality" value="expanded">
-                    <span class="modality-title">Pesquisa ampliada</span>
-                    <span class="modality-sub">Maior alcance</span>
-                    <span class="modality-desc">Ideal para pesquisas que exigem uma recolha mais abrangente de potenciais clientes.</span>
-                  </label>
-                </div>
-              </div>
               <div class="form-grid cols-2">
-                <div class="form-group"><label class="form-label" for="limit">Limite de resultados</label><select class="select" id="limit" name="limit"><option value="50">50</option><option value="100" selected>100</option><option value="200">200</option><option value="500">500</option></select></div>
+                <div class="form-group"><label class="form-label" for="limit">Limite de resultados</label><select class="select" id="limit" name="limit"><option value="100" selected>100</option><option value="200">200</option><option value="300">300</option><option value="400">400</option><option value="500">500</option></select></div>
                 <div class="form-group"><label class="form-label" for="min-rating">Classificação mínima</label><select class="select" id="min-rating" name="minRating"><option value="">Qualquer</option><option value="3">3.0+</option><option value="4">4.0+</option><option value="4.5">4.5+</option></select></div>
               </div>
               <div class="form-group">
@@ -102,7 +85,7 @@
                 </div>
               </div>
               <div class="toolbar">
-                <div class="toolbar-left"><button type="submit" class="btn btn-primary" id="btn-search">Iniciar pesquisa</button></div>
+                <div class="toolbar-left"><button type="submit" class="btn btn-primary" id="btn-search">Pesquisar</button></div>
                 <span class="card-muted" id="search-status"></span>
               </div>
             </form>
@@ -113,7 +96,7 @@
           <p class="page-sub">Resultados da última pesquisa</p>
           <div class="toolbar">
             <div class="toolbar-left">
-              <input class="input" type="search" id="results-filter" placeholder="Filtrar na tabela…" style="max-width:220px;padding:8px 12px;">
+              <input class="input" type="search" id="results-filter" placeholder="Filtrar resultados…" style="max-width:220px;padding:8px 12px;">
             </div>
             <div class="toolbar-right">
               <button type="button" class="btn btn-ghost btn-sm" id="btn-save-leads">Guardar selecionados</button>
@@ -124,16 +107,32 @@
             <h3>Sem resultados</h3>
             <p>Executa uma pesquisa a partir de Nova pesquisa.</p>
           </div>
-          <div id="results-table-wrap" class="table-wrap table-wrap-results">
-            <table class="data table-results" id="results-table">
-              <thead>
-                <tr>
-                  <th><input type="checkbox" id="select-all" aria-label="Selecionar todos"></th>
-                  <th>Empresa</th><th>Endereço</th><th>Telefone</th><th>Email</th><th>Website</th><th>Rating</th>
-                </tr>
-              </thead>
-              <tbody id="results-body"></tbody>
-            </table>
+          <div id="results-progress" class="card" hidden style="margin-bottom:16px">
+            <p id="results-progress-text" class="card-muted" style="margin:0">Pesquisa em curso…</p>
+          </div>
+          <div id="results-summary" class="card" hidden style="margin-bottom:16px">
+            <p id="results-summary-text" class="card-muted" style="margin:0"></p>
+          </div>
+          <div class="results-toolbar-select" style="margin-bottom:12px">
+            <label class="checkbox-item"><input type="checkbox" id="select-all" aria-label="Selecionar todos"> Selecionar todos da página</label>
+          </div>
+          <div id="results-cards" class="results-cards-grid"></div>
+          <div id="results-pagination" class="results-pagination" hidden></div>
+          <div id="contact-modal" class="modal" hidden>
+            <div class="modal-backdrop" data-close-modal></div>
+            <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="contact-modal-title">
+              <h3 id="contact-modal-title">Contactar</h3>
+              <p id="contact-modal-place" class="card-muted"></p>
+              <label class="form-label" for="contact-message">Mensagem</label>
+              <textarea class="input" id="contact-message" rows="5"></textarea>
+              <div class="toolbar" style="margin-top:12px">
+                <div class="toolbar-left">
+                  <button type="button" class="btn btn-ghost btn-sm" id="btn-regen-message">Regenerar</button>
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-open-whatsapp">Abrir WhatsApp</button>
+                  <button type="button" class="btn btn-ghost btn-sm" data-close-modal>Fechar</button>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
         <section class="view" id="view-history" aria-label="Histórico">
