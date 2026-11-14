@@ -6,7 +6,6 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { shouldRunDbIntegration, assertSafeTestDatabase } = require('./helpers/testDbGuard');
-const { applyMigrationsOnce } = require('./helpers/applyMigrationsOnce');
 
 const RUN = shouldRunDbIntegration();
 
@@ -17,6 +16,7 @@ describe('provider progress persistence (pg)', { skip: !RUN }, () => {
 
   before(async () => {
     assertSafeTestDatabase();
+    const { applyMigrationsOnce } = require('./helpers/applyMigrationsOnce');
     const { getPool } = require('../src/db/pool');
     pool = getPool();
     await applyMigrationsOnce(pool);
