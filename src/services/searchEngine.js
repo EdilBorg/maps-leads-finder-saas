@@ -1,5 +1,6 @@
 /**
  * Search engine: Apify + TomTom + Foursquare in parallel.
+ * Per-provider limits: Apify 200, TomTom 200, Foursquare 50.
  * Smart dedupe, filters, global limit, AbortSignal support.
  */
 const apify = require('./providers/apifyProvider');
@@ -9,10 +10,17 @@ const foursquare = require('./providers/foursquareProvider');
 const PROVIDER_CODES = Object.freeze(['apify', 'tomtom', 'foursquare']);
 const DEFAULT_PROVIDERS = { apify, tomtom, foursquare };
 const ALLOWED_LIMITS = Object.freeze([100, 200, 300, 400, 500]);
+const PROVIDER_MAX = Object.freeze({ apify: 200, tomtom: 200, foursquare: 50 });
 
 function normalizeLimit(value) {
   const n = parseInt(value, 10);
   return ALLOWED_LIMITS.includes(n) ? n : 100;
+}
+
+function providerLimit(code, globalLimit) {
+  const max = PROVIDER_MAX[code] != null ? PROVIDER_MAX[code] : 100;
+  const g = normalizeLimit(globalLimit);
+  return Math.min(max, Math.max(g, 1));
 }
 
 function normalizeText(s) {
@@ -174,8 +182,9 @@ function applyFilters(leads, filters) {
   });
 }
 
+/** @deprecated use providerLimit(code, globalLimit) */
 function perProviderLimit(globalLimit) {
-  return Math.min(Math.max(globalLimit, 20), 200);
+  return Math.min(Math.max(normalizeLimit(globalLimit), 20), 200);
 }
 
 function normalizeProviderResult(raw) {
@@ -232,15 +241,15 @@ function classifySearchOutcome(statuses, hasResults) {
 
 async function executeSearch(input, opts = {}) {
   const signal = opts.signal;
+  const onProviderProgress = typeof opts.onProviderProgress === 'function' ? opts.onProviderProgress : null;
   const globalLimit = normalizeLimit(input.limit);
-  const criteria = {
+  const baseCriteria = {
     query: String(input.query || '').trim(),
     location: String(input.location || '').trim(),
     filters: input.filters || {},
-    limit: perProviderLimit(globalLimit),
   };
-  if (!criteria.query) { const err = new Error('Categoria/query obrigatória.'); err.code = 'VALIDATION'; throw err; }
-  if (!criteria.location) { const err = new Error('Localização obrigatória.'); err.code = 'VALIDATION'; throw err; }
+  if (!baseCriteria.query) { const err = new Error('Categoria/query obrigatória.'); err.code = 'VALIDATION'; throw err; }
+  if (!baseCriteria.location) { const err = new Error('Localização obrigatória.'); err.code = 'VALIDATION'; throw err; }
   if (signal && signal.aborted) {
     return { outcome: 'error', searchStatus: 'cancelled', _providers: [], durationMs: 0,
       totals: { raw: 0, normalized: 0, afterDedup: 0, afterFilters: 0, returned: 0, limit: globalLimit }, results: [], cancelled: true };
@@ -248,10 +257,33 @@ async function executeSearch(input, opts = {}) {
   const registry = { ...DEFAULT_PROVIDERS, ...(input.providers || {}) };
   const selected = PROVIDER_CODES.map((code) => {
     const p = registry[code];
-    return (!p || typeof p.search !== 'function') ? { code, search: null } : { code, search: p.search.bind(p) };
+    return (!p || typeof p.search !== 'function')
+      ? { code, search: null }
+      : { code, search: p.search.bind(p) };
   });
   const started = Date.now();
-  const providerResults = await Promise.all(selected.map((p) => runProviderSafe(p, criteria, signal)));
+
+  const providerResults = await Promise.all(
+    selected.map(async (p) => {
+      if (onProviderProgress) {
+        try { onProviderProgress({ code: p.code, status: 'running', count: 0 }); } catch (_) {}
+      }
+      const criteria = { ...baseCriteria, limit: providerLimit(p.code, globalLimit) };
+      const out = await runProviderSafe(p, criteria, signal);
+      if (onProviderProgress) {
+        try {
+          onProviderProgress({
+            code: out.code,
+            status: out.result.status,
+            count: Array.isArray(out.result.results) ? out.result.results.length : 0,
+            errorCode: out.result.errorCode || null,
+          });
+        } catch (_) {}
+      }
+      return out;
+    })
+  );
+
   if (signal && signal.aborted) {
     return { outcome: 'error', searchStatus: 'cancelled',
       _providers: providerResults.map((p) => ({ code: p.code, status: 'error', count: 0, errorCode: 'CANCELLED', durationMs: p.durationMs })),
@@ -269,7 +301,7 @@ async function executeSearch(input, opts = {}) {
   }
   const normalized = allRaw.map(normalizeLead).filter(Boolean);
   const afterDedup = deduplicate(normalized);
-  const afterFilters = applyFilters(afterDedup, criteria.filters);
+  const afterFilters = applyFilters(afterDedup, baseCriteria.filters);
   const limited = afterFilters.slice(0, globalLimit);
   const classified = classifySearchOutcome(providerResults.map((p) => p.result.status), limited.length > 0);
   return {
@@ -304,7 +336,7 @@ function clientHintForOutcome(outcome) {
 }
 
 module.exports = {
-  PROVIDER_CODES, ALLOWED_LIMITS, normalizeLimit, normalizeText, normalizePhone, normalizeWebsite,
+  PROVIDER_CODES, PROVIDER_MAX, ALLOWED_LIMITS, normalizeLimit, providerLimit, normalizeText, normalizePhone, normalizeWebsite,
   normalizeLead, deduplicate, mergeLeads, applyFilters, perProviderLimit, normalizeProviderResult,
   runProviderSafe, classifySearchOutcome, executeSearch, publicLead, clientMessageForOutcome, clientHintForOutcome,
   MODALITIES: { standard: { id: 'standard', providerCodes: PROVIDER_CODES } },
