@@ -4,6 +4,7 @@
  * Cancel: AbortController + status gate before persist (no results if cancelled).
  * Free-search: atomic hold + validated consume in the same TX as result inserts.
  * GLOBAL LOCK ORDER: users → searches.
+ * Incremental provider progress is written to searches.providers_used while status=running.
  */
 function getPool() {
   return require('../db/pool').getPool();
@@ -38,6 +39,48 @@ function mapPublicRow(r, i) {
     rating: r.rating != null ? Number(r.rating) : null, reviewsCount: r.reviews_count,
     category: r.category, lat: r.lat, lng: r.lng, photoUrl: r.raw_payload && r.raw_payload.photoUrl,
   }, i);
+}
+
+function mapProviderUiStatus(status, errorCode) {
+  if (errorCode === 'CANCELLED' || status === 'cancelled') return 'cancelled';
+  if (status === 'ok') return 'completed';
+  if (status === 'empty') return 'no_results';
+  if (status === 'not_configured') return 'not_configured';
+  if (status === 'running' || status === 'pending') return status;
+  return 'failed';
+}
+
+/**
+ * Atomically update one provider entry inside searches.providers_used (JSONB array).
+ * Only updates while status is still running — never overwrites terminal search state.
+ */
+async function updateProviderProgress(pool, searchId, userId, progress) {
+  const code = progress && progress.code;
+  if (!code) return;
+  const uiStatus = mapProviderUiStatus(progress.status, progress.errorCode);
+  const count = typeof progress.count === 'number' ? progress.count : 0;
+  const entry = { code, status: uiStatus, count };
+  if (progress.errorCode) entry.errorCode = progress.errorCode;
+  if (progress.durationMs != null) entry.durationMs = progress.durationMs;
+  try {
+    await pool.query(
+      `UPDATE searches
+       SET providers_used = (
+         SELECT COALESCE(jsonb_agg(
+           CASE
+             WHEN elem->>'code' = $3 THEN $4::jsonb
+             ELSE elem
+           END
+           ORDER BY ord
+         ), '[]'::jsonb)
+         FROM jsonb_array_elements(providers_used) WITH ORDINALITY AS t(elem, ord)
+       )
+       WHERE id = $1 AND user_id = $2 AND status = 'running'`,
+      [searchId, userId, code, JSON.stringify(entry)]
+    );
+  } catch (err) {
+    console.error('[provider-progress]', searchId, code, err && err.message ? err.message : err);
+  }
 }
 
 function startHoldRenewal(userId, holdToken, opts = {}) {
@@ -130,7 +173,11 @@ async function startSearch(opts) {
         [
           opts.userId, opts.query, opts.location,
           JSON.stringify({ ...(opts.filters || {}), limit, holdToken }),
-          JSON.stringify([]),
+          JSON.stringify([
+            { code: 'apify', status: 'pending', count: 0 },
+            { code: 'tomtom', status: 'pending', count: 0 },
+            { code: 'foursquare', status: 'pending', count: 0 },
+          ]),
           String(RETENTION_DAYS),
         ]
       );
@@ -185,7 +232,12 @@ async function runSearchJob(ctx) {
     const runEngine = ctx.executeSearchFn || executeSearch;
     engineResult = await runEngine(
       { query: ctx.query, location: ctx.location, filters: ctx.filters, limit: ctx.limit },
-      { signal: ctx.controller.signal }
+      {
+        signal: ctx.controller.signal,
+        onProviderProgress: (progress) => {
+          updateProviderProgress(pool, ctx.searchId, ctx.userId, progress).catch(() => {});
+        },
+      }
     );
   } catch (err) {
     stopRenewal();
@@ -533,6 +585,8 @@ async function saveLeadsFromResults(userId, resultIds) {
 }
 
 module.exports = {
+  mapProviderUiStatus,
+  updateProviderProgress,
   startHoldRenewal,
   startSearch,
   cancelSearch,
