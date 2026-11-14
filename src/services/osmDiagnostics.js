@@ -14,7 +14,15 @@ const DIAG_TIMEOUT_MS = 8000;
 const NOMINATIM_URL =
   'https://nominatim.openstreetmap.org/search?q=Lisboa%2C%20Portugal&format=json&limit=1';
 
-const OVERPASS_ALTERNATIVE_URL = 'https://overpass.kumi.systems/api/interpreter';
+const OVERPASS_ENDPOINTS = [
+  { target: 'vk_maps', url: 'https://maps.mail.ru/osm/tools/overpass/api/interpreter' },
+  { target: 'overpass_de', url: 'https://overpass-api.de/api/interpreter' },
+  { target: 'overpass_lz4', url: 'https://lz4.overpass-api.de/api/interpreter' },
+  { target: 'overpass_private_coffee', url: 'https://overpass.private.coffee/api/interpreter' },
+];
+
+/** @deprecated kept for tests that reference the old constant */
+const OVERPASS_ALTERNATIVE_URL = OVERPASS_ENDPOINTS[1].url;
 
 /** Minimal Overpass QL — low cost, used only to probe reachability. */
 const TINY_OVERPASS_QL = '[out:json][timeout:5];node(2105374);out ids;';
@@ -24,7 +32,7 @@ function userAgent() {
 }
 
 function primaryOverpassUrl() {
-  return process.env.OSM_OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
+  return process.env.OSM_OVERPASS_URL || OVERPASS_ENDPOINTS[0].url;
 }
 
 function resolveErrorName(err) {
@@ -80,8 +88,6 @@ async function fetchJsonWithTimeout(url, options, timeoutMs = DIAG_TIMEOUT_MS) {
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
 
-    // Error HTTP responses (502/503/…) may return HTML or plain text.
-    // Do not require JSON — probes classify via res.ok / res.status.
     if (!res.ok) {
       try {
         await Promise.race([
@@ -92,14 +98,12 @@ async function fetchJsonWithTimeout(url, options, timeoutMs = DIAG_TIMEOUT_MS) {
         if (timedOut || isAbortError(err) || controller.signal.aborted) {
           throw createTimeoutError();
         }
-        // Ignore body drain failures; status is what matters.
       }
       return { res, data: null };
     }
 
     const data = await Promise.race([
       res.json().catch((parseErr) => {
-        // Abort during body read must remain a timeout, not invalid_response.
         if (timedOut || controller.signal.aborted || isAbortError(parseErr)) {
           throw createTimeoutError();
         }
@@ -303,8 +307,19 @@ async function probeOverpass(target, url) {
 async function runOsmConnectivityDiagnostic() {
   const results = [];
   results.push(await probeNominatim());
-  results.push(await probeOverpass('overpass_primary', primaryOverpassUrl()));
-  results.push(await probeOverpass('overpass_alternative', OVERPASS_ALTERNATIVE_URL));
+
+  const custom = process.env.OSM_OVERPASS_URL && String(process.env.OSM_OVERPASS_URL).trim();
+  const probed = new Set();
+  if (custom) {
+    results.push(await probeOverpass('overpass_custom', custom));
+    probed.add(custom);
+  }
+
+  for (const ep of OVERPASS_ENDPOINTS) {
+    if (probed.has(ep.url)) continue;
+    results.push(await probeOverpass(ep.target, ep.url));
+    probed.add(ep.url);
+  }
 
   return {
     diagnostic: 'osm_connectivity',
@@ -323,6 +338,7 @@ module.exports = {
   DIAG_TIMEOUT_MS,
   NOMINATIM_URL,
   OVERPASS_ALTERNATIVE_URL,
+  OVERPASS_ENDPOINTS,
   primaryOverpassUrl,
   TINY_OVERPASS_QL,
   isValidOverpassPayload,
