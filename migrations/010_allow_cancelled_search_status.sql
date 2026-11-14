@@ -1,28 +1,26 @@
 -- Allow cancelled on searches.status.
--- Identifies the CHECK constraint via PostgreSQL catalog metadata
--- (pg_constraint.conkey + pg_attribute), not by name or free-text heuristics.
 --
--- Expected prior rule (from 003_domain_model.sql):
---   CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed'))
+-- Identifies the single-column status CHECK via catalog metadata
+-- (pg_constraint.conkey + pg_attribute), then validates the expression
+-- semantically by comparing pg_get_expr(conbin, conrelid) to reference
+-- CHECKs created on temporary tables with the exact expected rules.
+--
+-- This rejects expressions that merely contain the same string literals
+-- but add OR TRUE, extra AND conditions, or other semantic differences.
+--
+-- Expected legacy rule (003_domain_model.sql):
+--   CHECK (status IN ('pending','running','completed','partial','failed'))
 -- Target rule:
---   CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed', 'cancelled'))
---
--- Fail closed: if the expected single-column status CHECK is missing or unexpected,
--- raise an exception. Never invent a constraint when the schema does not match.
+--   CHECK (status IN ('pending','running','completed','partial','failed','cancelled'))
 
 DO $$
 DECLARE
   status_attnum   INT;
   matched_count   INT;
   con_name        TEXT;
-  con_def         TEXT;
-  literal_count   INT;
-  has_pending     BOOLEAN;
-  has_running     BOOLEAN;
-  has_completed   BOOLEAN;
-  has_partial     BOOLEAN;
-  has_failed      BOOLEAN;
-  has_cancelled   BOOLEAN;
+  actual_expr     TEXT;
+  expected_old    TEXT;
+  expected_new    TEXT;
 BEGIN
   SELECT a.attnum
     INTO status_attnum
@@ -39,7 +37,6 @@ BEGIN
       'migration 010: column public.searches.status not found — refusing to modify constraints';
   END IF;
 
-  -- CHECK constraints that reference ONLY the status column
   SELECT COUNT(*)
     INTO matched_count
   FROM pg_constraint c
@@ -62,8 +59,8 @@ BEGIN
       matched_count;
   END IF;
 
-  SELECT c.conname, pg_get_constraintdef(c.oid)
-    INTO con_name, con_def
+  SELECT c.conname, pg_get_expr(c.conbin, c.conrelid)
+    INTO con_name, actual_expr
   FROM pg_constraint c
   JOIN pg_class t ON c.conrelid = t.oid
   JOIN pg_namespace n ON t.relnamespace = n.oid
@@ -73,45 +70,63 @@ BEGIN
     AND c.conkey IS NOT NULL
     AND c.conkey = ARRAY[status_attnum]::int2[];
 
-  has_pending   := con_def ~* '''pending''';
-  has_running   := con_def ~* '''running''';
-  has_completed := con_def ~* '''completed''';
-  has_partial   := con_def ~* '''partial''';
-  has_failed    := con_def ~* '''failed''';
-  has_cancelled := con_def ~* '''cancelled''';
+  -- Reference constraints with the exact expected SQL (same column name "status").
+  -- pg_get_expr yields the server-normalized form for reliable comparison.
+  CREATE TEMP TABLE _m010_ref_old (
+    status text NOT NULL,
+    CONSTRAINT _m010_ref_old_chk
+      CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed'))
+  ) ON COMMIT DROP;
 
-  -- Idempotent: already the six-state rule
-  IF has_pending AND has_running AND has_completed AND has_partial AND has_failed AND has_cancelled THEN
-    SELECT COUNT(*) INTO literal_count
-    FROM regexp_matches(con_def, '''([^'']+)''', 'g') AS m(x);
-    IF literal_count = 6 THEN
-      RAISE NOTICE 'migration 010: constraint % already allows the six expected statuses — no-op', con_name;
-      RETURN;
-    END IF;
-    -- Has cancelled plus extras → unexpected
+  CREATE TEMP TABLE _m010_ref_new (
+    status text NOT NULL,
+    CONSTRAINT _m010_ref_new_chk
+      CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed', 'cancelled'))
+  ) ON COMMIT DROP;
+
+  SELECT pg_get_expr(c.conbin, c.conrelid)
+    INTO expected_old
+  FROM pg_constraint c
+  JOIN pg_class t ON c.conrelid = t.oid
+  WHERE t.relname = '_m010_ref_old'
+    AND c.conname = '_m010_ref_old_chk';
+
+  SELECT pg_get_expr(c.conbin, c.conrelid)
+    INTO expected_new
+  FROM pg_constraint c
+  JOIN pg_class t ON c.conrelid = t.oid
+  WHERE t.relname = '_m010_ref_new'
+    AND c.conname = '_m010_ref_new_chk';
+
+  IF expected_old IS NULL OR expected_new IS NULL THEN
     RAISE EXCEPTION
-      'migration 010: constraint % on searches.status has cancelled but unexpected extra literals (% found): %',
-      con_name, literal_count, con_def;
+      'migration 010: failed to build reference CHECK expressions for comparison';
   END IF;
 
-  -- Legacy expected rule: exactly the five original statuses, no cancelled
-  SELECT COUNT(*) INTO literal_count
-  FROM regexp_matches(con_def, '''([^'']+)''', 'g') AS m(x);
-
-  IF NOT (has_pending AND has_running AND has_completed AND has_partial AND has_failed)
-     OR has_cancelled
-     OR literal_count <> 5
-  THEN
-    RAISE EXCEPTION
-      'migration 010: constraint % on searches.status is not the expected legacy rule (five statuses, no cancelled). def=%',
-      con_name, con_def;
+  -- Scenario 2: already the legitimate six-state rule → idempotent no-op
+  IF actual_expr IS NOT DISTINCT FROM expected_new THEN
+    RAISE NOTICE 'migration 010: constraint % already matches the six-state rule — no-op', con_name;
+    DROP TABLE IF EXISTS _m010_ref_old;
+    DROP TABLE IF EXISTS _m010_ref_new;
+    RETURN;
   END IF;
 
-  EXECUTE format('ALTER TABLE public.searches DROP CONSTRAINT %I', con_name);
+  -- Scenario 1: exact legacy five-state rule → replace
+  IF actual_expr IS NOT DISTINCT FROM expected_old THEN
+    EXECUTE format('ALTER TABLE public.searches DROP CONSTRAINT %I', con_name);
 
-  ALTER TABLE public.searches
-    ADD CONSTRAINT searches_status_check
-    CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed', 'cancelled'));
+    ALTER TABLE public.searches
+      ADD CONSTRAINT searches_status_check
+      CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed', 'cancelled'));
 
-  RAISE NOTICE 'migration 010: replaced % with searches_status_check including cancelled', con_name;
+    RAISE NOTICE 'migration 010: replaced % with searches_status_check (six states)', con_name;
+    DROP TABLE IF EXISTS _m010_ref_old;
+    DROP TABLE IF EXISTS _m010_ref_new;
+    RETURN;
+  END IF;
+
+  -- Scenarios 4–6 and any other unexpected expression → fail closed
+  RAISE EXCEPTION
+    'migration 010: constraint % on searches.status does not match the expected legacy or target expression. actual=% | expected_old=% | expected_new=%',
+    con_name, actual_expr, expected_old, expected_new;
 END $$;
