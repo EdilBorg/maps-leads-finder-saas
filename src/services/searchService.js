@@ -51,6 +51,22 @@ function mapProviderUiStatus(status, errorCode) {
 }
 
 /**
+ * Mark only pending/running providers as cancelled; preserve terminal provider states.
+ * Pure function for unit tests and SQL-equivalent logic.
+ */
+function markPendingProvidersCancelled(providers) {
+  if (!Array.isArray(providers)) return [];
+  return providers.map((p) => {
+    if (!p || typeof p !== 'object') return p;
+    const st = p.status;
+    if (st === 'pending' || st === 'running') {
+      return { ...p, status: 'cancelled' };
+    }
+    return p;
+  });
+}
+
+/**
  * Atomically update one provider entry inside searches.providers_used (JSONB array).
  * Only updates while status is still running — never overwrites terminal search state.
  */
@@ -289,7 +305,22 @@ async function runSearchJob(ctx) {
 
     if (engineResult.cancelled || engineResult.searchStatus === 'cancelled') {
       await client.query(
-        `UPDATE searches SET status='cancelled', completed_at=NOW(), error_summary=$2 WHERE id=$1 AND user_id=$3 AND status='running'`,
+        `UPDATE searches SET
+           status='cancelled',
+           completed_at=NOW(),
+           error_summary=$2,
+           providers_used = (
+             SELECT COALESCE(jsonb_agg(
+               CASE
+                 WHEN elem->>'status' IN ('pending', 'running')
+                   THEN jsonb_set(elem, '{status}', '"cancelled"')
+                 ELSE elem
+               END
+               ORDER BY ord
+             ), '[]'::jsonb)
+             FROM jsonb_array_elements(providers_used) WITH ORDINALITY AS t(elem, ord)
+           )
+         WHERE id=$1 AND user_id=$3 AND status='running'`,
         [ctx.searchId, 'cancelled_by_user', ctx.userId]
       );
       await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
@@ -385,7 +416,21 @@ async function cancelSearch(userId, searchId) {
       return { ok: false, reason: 'not_running', status };
     }
     await client.query(
-      `UPDATE searches SET status='cancelled', completed_at=NOW(), error_summary='cancelled_by_user'
+      `UPDATE searches SET
+         status='cancelled',
+         completed_at=NOW(),
+         error_summary='cancelled_by_user',
+         providers_used = (
+           SELECT COALESCE(jsonb_agg(
+             CASE
+               WHEN elem->>'status' IN ('pending', 'running')
+                 THEN jsonb_set(elem, '{status}', '"cancelled"')
+               ELSE elem
+             END
+             ORDER BY ord
+           ), '[]'::jsonb)
+           FROM jsonb_array_elements(providers_used) WITH ORDINALITY AS t(elem, ord)
+         )
        WHERE id=$1 AND user_id=$2 AND status='running'`,
       [searchId, userId]
     );
@@ -586,6 +631,7 @@ async function saveLeadsFromResults(userId, resultIds) {
 
 module.exports = {
   mapProviderUiStatus,
+  markPendingProvidersCancelled,
   updateProviderProgress,
   startHoldRenewal,
   startSearch,
