@@ -127,29 +127,28 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
   /**
    * Run fn under a SAVEPOINT so an expected PostgreSQL error does not abort
    * the outer withRollback() transaction (avoids 25P02 on later queries).
-   * Always rolls back to the savepoint; returns the original error when fn fails.
-   * Throws if fn succeeds unexpectedly.
+   *
+   * Recovery (ROLLBACK TO / RELEASE SAVEPOINT) is outside the fn catch:
+   * a recovery failure is propagated as itself, never returned as the
+   * expected operation failure.
    */
   async function expectQueryFailure(client, fn) {
     const sp = 'm010_expect_fail';
     await client.query(`SAVEPOINT ${sp}`);
+
+    let opError = null;
     try {
       await fn();
-      await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
-      await client.query(`RELEASE SAVEPOINT ${sp}`);
-      throw new Error('expected operation to fail, but it succeeded');
     } catch (err) {
-      try {
-        await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
-      } catch (_) {}
-      try {
-        await client.query(`RELEASE SAVEPOINT ${sp}`);
-      } catch (_) {}
-      if (err && err.message === 'expected operation to fail, but it succeeded') {
-        throw err;
-      }
-      return err;
+      opError = err;
     }
+
+    // Recovery must not be swallowed or mistaken for opError.
+    await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+    await client.query(`RELEASE SAVEPOINT ${sp}`);
+
+    if (opError) return opError;
+    throw new Error('expected operation to fail, but it succeeded');
   }
 
   async function dropStatusOnlyChecks(client) {
