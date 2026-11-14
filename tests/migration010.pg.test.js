@@ -6,6 +6,7 @@
  *
  * Destructive probes run inside BEGIN…ROLLBACK so shared test schema is restored.
  * After a rejected migration, the original probe constraint must still be present.
+ * Expected migration failures run under SAVEPOINT so the outer TX stays usable.
  */
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -121,6 +122,34 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
       client.release();
     }
     if (fnError) throw fnError;
+  }
+
+  /**
+   * Run fn under a SAVEPOINT so an expected PostgreSQL error does not abort
+   * the outer withRollback() transaction (avoids 25P02 on later queries).
+   * Always rolls back to the savepoint; returns the original error when fn fails.
+   * Throws if fn succeeds unexpectedly.
+   */
+  async function expectQueryFailure(client, fn) {
+    const sp = 'm010_expect_fail';
+    await client.query(`SAVEPOINT ${sp}`);
+    try {
+      await fn();
+      await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+      await client.query(`RELEASE SAVEPOINT ${sp}`);
+      throw new Error('expected operation to fail, but it succeeded');
+    } catch (err) {
+      try {
+        await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+      } catch (_) {}
+      try {
+        await client.query(`RELEASE SAVEPOINT ${sp}`);
+      } catch (_) {}
+      if (err && err.message === 'expected operation to fail, but it succeeded') {
+        throw err;
+      }
+      return err;
+    }
   }
 
   async function dropStatusOnlyChecks(client) {
@@ -255,10 +284,10 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
   it('rejects missing status-only CHECK and does not invent one', async () => {
     await withRollback(async (client) => {
       await dropStatusOnlyChecks(client);
-      await assert.rejects(
-        async () => client.query(readMigration010()),
-        (err) => err && /no CHECK constraint found/i.test(String(err.message))
-      );
+      const failErr = await expectQueryFailure(client, async () => {
+        await client.query(readMigration010());
+      });
+      assert.ok(failErr && /no CHECK constraint found/i.test(String(failErr.message)));
       const after = await statusOnlyChecks(client);
       assert.equal(after.length, 0);
     });
@@ -275,10 +304,10 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
             OR TRUE
           )
       `);
-      await assert.rejects(
-        async () => client.query(readMigration010()),
-        (err) => err && /does not match the expected/i.test(String(err.message))
-      );
+      const failErr = await expectQueryFailure(client, async () => {
+        await client.query(readMigration010());
+      });
+      assert.ok(failErr && /does not match the expected/i.test(String(failErr.message)));
       await assertConstraintStillNamed(client, 'searches_status_or_true_chk');
     });
   });
@@ -294,10 +323,10 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
             AND status <> 'failed'
           )
       `);
-      await assert.rejects(
-        async () => client.query(readMigration010()),
-        (err) => err && /does not match the expected/i.test(String(err.message))
-      );
+      const failErr = await expectQueryFailure(client, async () => {
+        await client.query(readMigration010());
+      });
+      assert.ok(failErr && /does not match the expected/i.test(String(failErr.message)));
       await assertConstraintStillNamed(client, 'searches_status_and_extra_chk');
     });
   });
@@ -313,10 +342,10 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
             OR status = 'anything_else'
           )
       `);
-      await assert.rejects(
-        async () => client.query(readMigration010()),
-        (err) => err && /does not match the expected/i.test(String(err.message))
-      );
+      const failErr = await expectQueryFailure(client, async () => {
+        await client.query(readMigration010());
+      });
+      assert.ok(failErr && /does not match the expected/i.test(String(failErr.message)));
       await assertConstraintStillNamed(client, 'searches_status_six_or_chk');
     });
   });
@@ -332,10 +361,10 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
             AND status <> 'cancelled'
           )
       `);
-      await assert.rejects(
-        async () => client.query(readMigration010()),
-        (err) => err && /does not match the expected/i.test(String(err.message))
-      );
+      const failErr = await expectQueryFailure(client, async () => {
+        await client.query(readMigration010());
+      });
+      assert.ok(failErr && /does not match the expected/i.test(String(failErr.message)));
       await assertConstraintStillNamed(client, 'searches_status_six_and_chk');
     });
   });
@@ -351,10 +380,10 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
           ADD CONSTRAINT searches_status_b_chk
           CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed', 'cancelled'));
       `);
-      await assert.rejects(
-        async () => client.query(readMigration010()),
-        (err) => err && /refusing ambiguous/i.test(String(err.message))
-      );
+      const failErr = await expectQueryFailure(client, async () => {
+        await client.query(readMigration010());
+      });
+      assert.ok(failErr && /refusing ambiguous/i.test(String(failErr.message)));
       await assertConstraintStillNamed(client, 'searches_status_a_chk');
       await assertConstraintStillNamed(client, 'searches_status_b_chk');
     });
