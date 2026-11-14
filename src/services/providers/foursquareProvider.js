@@ -34,7 +34,8 @@ function mapItem(p, idx, criteria) {
   const geo = (p.geocodes && p.geocodes.main) || {};
 
   const address =
-    loc.formatted_address ||n    loc.address ||
+    loc.formatted_address ||
+    loc.address ||
     [loc.address, loc.locality, loc.region].filter(Boolean).join(', ') ||
     null;
 
