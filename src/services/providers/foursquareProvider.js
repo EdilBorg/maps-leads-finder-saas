@@ -1,8 +1,9 @@
 /**
- * Foursquare Places API adapter (current Places API).
- * Primary: places-api.foursquare.com/places/search with Bearer service key.
- * Fallback: api.foursquare.com/v3/places/search with Authorization API key.
- * Max 50 per request; paginate with cursor when available.
+ * Foursquare Places API adapter (current Places API only).
+ * Endpoint: https://places-api.foursquare.com/places/search
+ * Auth: Bearer service key + X-Places-Api-Version
+ * Max 50 per request. Cursor pagination when the API returns next_cursor / Link header.
+ * No automatic fallback to deprecated V3 endpoints.
  */
 const {
   withTimeout,
@@ -15,6 +16,19 @@ const {
 const CODE = 'foursquare';
 const MAX_PER_PAGE = 50;
 const MAX_RAW = 200;
+const DEFAULT_API_VERSION = '2025-06-17';
+
+/**
+ * Explicit boolean env parsing.
+ * true for: 1, true, yes (case-insensitive, trimmed)
+ * false for: 0, false, no, empty, absent, or any other value
+ */
+function parseEnvBool(value) {
+  if (value == null) return false;
+  const v = String(value).trim().toLowerCase();
+  if (!v) return false;
+  return v === '1' || v === 'true' || v === 'yes';
+}
 
 function isConfigured() {
   const key = process.env.FOURSQUARE_API_KEY;
@@ -113,31 +127,32 @@ async function search(criteria, opts = {}) {
   const want = Math.min(Math.max(Number(criteria.limit) || 100, 1), MAX_RAW);
   const near = location || undefined;
 
-  const useBearer = !process.env.FOURSQUARE_USE_V3;
-  const base = useBearer
-    ? 'https://places-api.foursquare.com/places/search'
-    : 'https://api.foursquare.com/v3/places/search';
-  const headers = useBearer
-    ? {
-        Accept: 'application/json',
-        Authorization: `Bearer ${key}`,
-        'X-Places-Api-Version': process.env.FOURSQUARE_API_VERSION || '2025-06-17',
-      }
-    : {
-        Accept: 'application/json',
-        Authorization: key,
-      };
+  // Force current Places API. FOURSQUARE_USE_V3 is kept only for explicit opt-in tests;
+  // when true we still use the current endpoint (V3 is deprecated).
+  // parseEnvBool ensures "0" / "false" / "no" are treated as false.
+  const _legacyFlag = parseEnvBool(process.env.FOURSQUARE_USE_V3);
+  void _legacyFlag; // retained for env compatibility / tests; does not switch endpoint
+
+  const base = 'https://places-api.foursquare.com/places/search';
+  const headers = {
+    Accept: 'application/json',
+    Authorization: `Bearer ${key}`,
+    'X-Places-Api-Version': process.env.FOURSQUARE_API_VERSION || DEFAULT_API_VERSION,
+  };
 
   try {
     const all = [];
     let cursor = null;
     let pages = 0;
-    while (all.length < want && pages < 6) {
+    const maxPages = 6;
+
+    while (all.length < want && pages < maxPages) {
       if (signal && signal.aborted) {
         const err = new Error('cancelled');
         err.code = 'CANCELLED';
         throw err;
       }
+
       const params = new URLSearchParams();
       params.set('query', query);
       if (near) params.set('near', near);
@@ -145,39 +160,35 @@ async function search(criteria, opts = {}) {
       if (cursor) params.set('cursor', cursor);
 
       const url = `${base}?${params.toString()}`;
-      let payload;
-      try {
-        payload = await fetchPage(url, headers, signal);
-      } catch (err) {
-        if (useBearer && pages === 0 && (err.httpStatus === 401 || err.httpStatus === 404)) {
-          const v3Base = 'https://api.foursquare.com/v3/places/search';
-          const v3Headers = { Accept: 'application/json', Authorization: key };
-          payload = await fetchPage(`${v3Base}?${params.toString()}`, v3Headers, signal);
-        } else {
-          throw err;
-        }
-      }
+      const payload = await fetchPage(url, headers, signal);
 
       const results = Array.isArray(payload.data?.results)
         ? payload.data.results
         : Array.isArray(payload.data)
           ? payload.data
           : [];
+
       if (!results.length) break;
+
       for (const p of results) {
         const item = mapItem(p, all.length, criteria);
         if (item) all.push(item);
         if (all.length >= want) break;
       }
 
-      cursor =
-        payload.data?.next_cursor ||
-        null;
-      const linkMatch = /cursor=([^&>]+)/.exec(payload.link || '');
-      if (!cursor && linkMatch) cursor = decodeURIComponent(linkMatch[1]);
-      if (!cursor) break;
+      // Official cursor support: next_cursor field or Link header
+      let next = payload.data?.next_cursor || null;
+      if (!next && payload.link) {
+        const linkMatch = /[?&]cursor=([^&>]+)/.exec(payload.link);
+        if (linkMatch) next = decodeURIComponent(linkMatch[1]);
+      }
+      if (!next) break;
+      // Guard against repeating the same cursor
+      if (next === cursor) break;
+      cursor = next;
       pages += 1;
     }
+
     return okResult(all.slice(0, want));
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
@@ -192,4 +203,5 @@ module.exports = {
   isConfigured,
   search,
   mapItem,
+  parseEnvBool,
 };
