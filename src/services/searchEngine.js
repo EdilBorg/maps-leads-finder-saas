@@ -127,8 +127,12 @@ function deduplicate(leads) {
       if (web && web.length >= 5 && byWeb.has(web)) matched = byWeb.get(web);
     }
     if (matched < 0) {
-      const na = 'na:' + normalizeText(lead.name) + '|' + normalizeText(lead.address).slice(0, 48);
-      if (normalizeText(lead.name) && byNameAddr.has(na)) matched = byNameAddr.get(na);
+      const nName = normalizeText(lead.name);
+      const nAddr = normalizeText(lead.address);
+      if (nName && nAddr && nAddr.length >= 4) {
+        const na = 'na:' + nName + '|' + nAddr.slice(0, 48);
+        if (byNameAddr.has(na)) matched = byNameAddr.get(na);
+      }
     }
     if (matched < 0 && lead.name && lead.lat != null && lead.lng != null) {
       const nName = normalizeText(lead.name);
@@ -147,8 +151,13 @@ function deduplicate(leads) {
       if (phone && phone.length >= 8) byPhone.set(phone, matched);
       const web = normalizeWebsite(m.website);
       if (web && web.length >= 5) byWeb.set(web, matched);
-      const na = 'na:' + normalizeText(m.name) + '|' + normalizeText(m.address).slice(0, 48);
-      if (normalizeText(m.name)) byNameAddr.set(na, matched);
+      {
+        const nName = normalizeText(m.name);
+        const nAddr = normalizeText(m.address);
+        if (nName && nAddr && nAddr.length >= 4) {
+          byNameAddr.set('na:' + nName + '|' + nAddr.slice(0, 48), matched);
+        }
+      }
       continue;
     }
     const idx = out.length;
@@ -158,8 +167,13 @@ function deduplicate(leads) {
     if (phone && phone.length >= 8) byPhone.set(phone, idx);
     const web = normalizeWebsite(lead.website);
     if (web && web.length >= 5) byWeb.set(web, idx);
-    const na = 'na:' + normalizeText(lead.name) + '|' + normalizeText(lead.address).slice(0, 48);
-    if (normalizeText(lead.name)) byNameAddr.set(na, idx);
+    {
+      const nName = normalizeText(lead.name);
+      const nAddr = normalizeText(lead.address);
+      if (nName && nAddr && nAddr.length >= 4) {
+        byNameAddr.set('na:' + nName + '|' + nAddr.slice(0, 48), idx);
+      }
+    }
   }
   return out;
 }
@@ -194,10 +208,24 @@ function normalizeProviderResult(raw) {
   const allowed = new Set(['ok', 'empty', 'error', 'not_configured']);
   let status = allowed.has(raw.status) ? raw.status : 'error';
   if (!Array.isArray(raw.results)) {
-    return { status: 'error', results: [], errorCode: 'INVALID_RESPONSE', errorMessage: 'Provider results must be an array' };
+    return {
+      status: 'error',
+      results: [],
+      errorCode: 'INVALID_RESPONSE',
+      errorMessage: 'Provider results must be an array',
+      errorStage: raw.errorStage || null,
+      httpStatus: raw.httpStatus != null ? raw.httpStatus : null,
+    };
   }
   if (status === 'ok' && raw.results.length === 0) status = 'empty';
-  return { status, results: raw.results, errorCode: raw.errorCode || null, errorMessage: raw.errorMessage || null };
+  return {
+    status,
+    results: raw.results,
+    errorCode: raw.errorCode || null,
+    errorMessage: raw.errorMessage || null,
+    errorStage: raw.errorStage || null,
+    httpStatus: raw.httpStatus != null ? raw.httpStatus : null,
+  };
 }
 
 async function runProviderSafe(providerEntry, criteria, signal) {
@@ -291,9 +319,13 @@ async function executeSearch(input, opts = {}) {
       totals: { raw: 0, normalized: 0, afterDedup: 0, afterFilters: 0, returned: 0, limit: globalLimit }, results: [], cancelled: true };
   }
   const internalProviders = providerResults.map((p) => ({
-    code: p.code, status: p.result.status,
+    code: p.code,
+    status: p.result.status,
     count: Array.isArray(p.result.results) ? p.result.results.length : 0,
-    errorCode: p.result.errorCode || null, durationMs: p.durationMs,
+    errorCode: p.result.errorCode || null,
+    errorStage: p.result.errorStage || null,
+    httpStatus: p.result.httpStatus != null ? p.result.httpStatus : null,
+    durationMs: p.durationMs,
   }));
   const allRaw = [];
   for (const p of providerResults) {
