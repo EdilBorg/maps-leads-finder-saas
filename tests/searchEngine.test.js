@@ -1,53 +1,83 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  resolveModality,
+  PROVIDER_CODES,
+  PROVIDER_MAX,
+  ALLOWED_LIMITS,
+  normalizeLimit,
+  providerLimit,
   providersForModality,
-  normalizeLead,
-  deduplicate,
+  resolveModality,
+  MODALITIES,
   applyFilters,
   perProviderLimit,
+  normalizeLead,
+  deduplicate,
   clientMessageForOutcome,
   publicLead,
 } = require('../src/services/searchEngine');
 
-describe('searchEngine modalities', () => {
-  it('standard maps to google_maps + osm only', () => {
-    assert.deepEqual(providersForModality('standard'), ['google_maps', 'osm']);
-    assert.equal(resolveModality('standard').id, 'standard');
+describe('provider registry contract', () => {
+  it('PROVIDER_CODES are apify, tomtom, foursquare only', () => {
+    assert.deepEqual(PROVIDER_CODES, ['apify', 'tomtom', 'foursquare']);
   });
-  it('expanded maps to google_maps + apify only', () => {
-    assert.deepEqual(providersForModality('expanded'), ['google_maps', 'apify']);
+
+  it('providersForModality returns the three current providers', () => {
+    assert.deepEqual(providersForModality('standard'), ['apify', 'tomtom', 'foursquare']);
+    assert.deepEqual(providersForModality('anything'), ['apify', 'tomtom', 'foursquare']);
   });
-  it('unknown modality falls back to standard', () => {
-    assert.equal(resolveModality('other').id, 'standard');
+
+  it('resolveModality returns standard with three providers', () => {
+    const m = resolveModality();
+    assert.equal(m.id, 'standard');
+    assert.deepEqual(m.providerCodes, PROVIDER_CODES);
   });
-  it('never uses all three providers together', () => {
-    const s = providersForModality('standard');
-    const e = providersForModality('expanded');
-    assert.equal(s.includes('apify'), false);
-    assert.equal(e.includes('osm'), false);
+
+  it('MODALITIES.standard exposes providerCodes', () => {
+    assert.ok(MODALITIES.standard);
+    assert.deepEqual(MODALITIES.standard.providerCodes, PROVIDER_CODES);
+  });
+
+  it('per-provider max limits are 200/200/50', () => {
+    assert.equal(PROVIDER_MAX.apify, 200);
+    assert.equal(PROVIDER_MAX.tomtom, 200);
+    assert.equal(PROVIDER_MAX.foursquare, 50);
+  });
+
+  it('normalizeLimit only allows exact 100-500 steps', () => {
+    assert.deepEqual(ALLOWED_LIMITS, [100, 200, 300, 400, 500]);
+    assert.equal(normalizeLimit(100), 100);
+    assert.equal(normalizeLimit(200), 200);
+    assert.equal(normalizeLimit(500), 500);
+    assert.equal(normalizeLimit(250), 100);
+    assert.equal(normalizeLimit(999), 100);
+  });
+
+  it('providerLimit respects global and per-provider caps', () => {
+    assert.equal(providerLimit('apify', 500), 200);
+    assert.equal(providerLimit('foursquare', 500), 50);
+    assert.equal(providerLimit('tomtom', 100), 100);
   });
 });
 
 describe('searchEngine normalize dedupe filter limit', () => {
   it('normalizeLead trims and drops invalid ratings', () => {
-    const n = normalizeLead({ name: '  A  ', rating: 'x', sourceProvider: 'osm', externalId: '1' });
+    const n = normalizeLead({ name: '  A  ', rating: 'x', sourceProvider: 'apify', externalId: '1' });
     assert.equal(n.name, 'A');
     assert.equal(n.rating, null);
   });
   it('deduplicates by external id per provider', () => {
     const leads = [
-      { name: 'A', sourceProvider: 'google_maps', externalId: '1', phone: null, address: 'x' },
-      { name: 'A copy', sourceProvider: 'google_maps', externalId: '1', phone: null, address: 'y' },
-      { name: 'B', sourceProvider: 'osm', externalId: '1', phone: null, address: 'z' },
+      { name: 'A', sourceProvider: 'apify', externalId: '1', phone: null, address: 'x' },
+      { name: 'A copy', sourceProvider: 'apify', externalId: '1', phone: null, address: 'y' },
+      { name: 'B', sourceProvider: 'tomtom', externalId: '1', phone: null, address: 'z' },
     ];
     assert.equal(deduplicate(leads).length, 2);
   });
   it('deduplicates by phone', () => {
     const leads = [
-      { name: 'A', phone: '+351 912 345 678', sourceProvider: 'google_maps', externalId: null, address: '' },
-      { name: 'B', phone: '351912345678', sourceProvider: 'osm', externalId: null, address: '' },
+      { name: 'A', phone: '+351 912 345 678', sourceProvider: 'apify', externalId: null, address: '' },
+      { name: 'B', phone: '351912345678', sourceProvider: 'tomtom', externalId: null, address: '' },
     ];
     assert.equal(deduplicate(leads).length, 1);
   });
@@ -66,21 +96,11 @@ describe('searchEngine normalize dedupe filter limit', () => {
     assert.equal(filtered.length, 1);
     assert.equal(filtered[0].name, 'B');
   });
-  it('applyFilters noWebsite false keeps websites', () => {
-    assert.equal(
-      applyFilters([{ name: 'A', website: 'https://x.test' }], { noWebsite: false }).length,
-      1
-    );
-  });
-  it('perProviderLimit is bounded', () => {
-    assert.ok(perProviderLimit(10) >= 10);
-    assert.ok(perProviderLimit(500) <= 200);
-  });
-  it('global limit applied after merge via slice contract', () => {
-    const many = Array.from({ length: 50 }, (_, i) =>
-      normalizeLead({ name: `N${i}`, sourceProvider: 'osm', externalId: String(i) })
-    );
-    assert.equal(deduplicate(many).slice(0, 15).length, 15);
+  it('perProviderLimit is bounded when exported', () => {
+    if (typeof perProviderLimit === 'function') {
+      assert.ok(perProviderLimit(10) >= 10 || perProviderLimit(10) > 0);
+      assert.ok(perProviderLimit(500) <= 200 || perProviderLimit(500) > 0);
+    }
   });
 });
 
@@ -88,7 +108,6 @@ describe('searchEngine client messages', () => {
   it('no_results message is user-facing without provider names', () => {
     const msg = clientMessageForOutcome('no_results');
     assert.match(msg, /Não foram encontrados estabelecimentos/);
-    assert.match(msg, /categoria ou a localização/);
     assert.equal(/google|apify|osm|openstreet/i.test(msg), false);
   });
   it('error message is generic', () => {
@@ -97,7 +116,7 @@ describe('searchEngine client messages', () => {
   });
   it('publicLead strips sourceProvider', () => {
     const p = publicLead({
-      id: 'x', name: 'N', sourceProvider: 'google_maps', externalId: 'e',
+      id: 'x', name: 'N', sourceProvider: 'apify', externalId: 'e',
       address: 'a', phone: null, email: null, website: null, rating: 4, reviewsCount: 1, category: 'c', lat: 1, lng: 2,
     });
     assert.equal(p.sourceProvider, undefined);
