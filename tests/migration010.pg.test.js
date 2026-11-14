@@ -362,6 +362,11 @@ describe('migration 010 SQL shape', () => {
     assert.match(sql, /IS NOT DISTINCT FROM expected_new/);
   });
 
+  it('scopes reference CHECK lookups to the session temp schema', () => {
+    const hits = sql.match(/n\.oid\s*=\s*pg_my_temp_schema\(\)/g) || [];
+    assert.ok(hits.length >= 2, 'expected pg_my_temp_schema() filter on both reference lookups');
+  });
+
   it('fails closed when no status-only CHECK exists', () => {
     assert.match(sql, /matched_count = 0/);
     assert.match(sql, /refusing to invent one/);
