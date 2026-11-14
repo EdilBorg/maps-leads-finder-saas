@@ -5,6 +5,7 @@
  * Without that, the suite is skipped — never mocked as integration success.
  *
  * Destructive probes run inside BEGIN…ROLLBACK so shared test schema is restored.
+ * After a rejected migration, the original probe constraint must still be present.
  */
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -17,6 +18,10 @@ const MIGRATION_010 = path.join(__dirname, '..', 'migrations', '010_allow_cancel
 
 function readMigration010() {
   return fs.readFileSync(MIGRATION_010, 'utf8');
+}
+
+function quoteIdent(name) {
+  return '"' + String(name).replace(/"/g, '""') + '"';
 }
 
 describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
@@ -74,9 +79,10 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
     return rows[0].id;
   }
 
-  async function statusOnlyCheck() {
-    const { rows } = await pool.query(`
-      SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+  async function statusOnlyChecks(client) {
+    const q = client || pool;
+    const { rows } = await q.query(`
+      SELECT c.conname, pg_get_expr(c.conbin, c.conrelid) AS expr
       FROM pg_constraint c
       JOIN pg_class t ON c.conrelid = t.oid
       JOIN pg_namespace n ON t.relnamespace = n.oid
@@ -88,6 +94,7 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
           (SELECT a.attnum FROM pg_attribute a
            WHERE a.attrelid = t.oid AND a.attname = 'status' AND NOT a.attisdropped)
         ]::int2[]
+      ORDER BY c.conname
     `);
     return rows;
   }
@@ -105,34 +112,27 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
     }
   }
 
-  async function dropStatusOnlyCheck(client) {
-    const { rows } = await client.query(`
-      SELECT c.conname
-      FROM pg_constraint c
-      JOIN pg_class t ON c.conrelid = t.oid
-      JOIN pg_namespace n ON t.relnamespace = n.oid
-      WHERE n.nspname = 'public'
-        AND t.relname = 'searches'
-        AND c.contype = 'c'
-        AND c.conkey IS NOT NULL
-        AND c.conkey = ARRAY[
-          (SELECT a.attnum FROM pg_attribute a
-           WHERE a.attrelid = t.oid AND a.attname = 'status' AND NOT a.attisdropped)
-        ]::int2[]
-    `);
+  async function dropStatusOnlyChecks(client) {
+    const rows = await statusOnlyChecks(client);
     for (const r of rows) {
       await client.query(`ALTER TABLE public.searches DROP CONSTRAINT ${quoteIdent(r.conname)}`);
     }
   }
 
-  function quoteIdent(name) {
-    return '"' + String(name).replace(/"/g, '""') + '"';
+  async function assertConstraintStillNamed(client, name) {
+    const { rows } = await client.query(
+      `SELECT 1 FROM pg_constraint c
+       JOIN pg_class t ON c.conrelid = t.oid
+       JOIN pg_namespace n ON t.relnamespace = n.oid
+       WHERE n.nspname = 'public' AND t.relname = 'searches' AND c.conname = $1`,
+      [name]
+    );
+    assert.equal(rows.length, 1, `expected constraint ${name} to remain after rejected migration`);
   }
 
   it('after full migrate: six valid statuses work and invalid is rejected', async () => {
-    const defs = await statusOnlyCheck();
+    const defs = await statusOnlyChecks();
     assert.ok(defs.length >= 1);
-    assert.ok(defs.some((d) => /cancelled/i.test(d.def)));
 
     const userId = await createUser();
     const states = ['pending', 'running', 'completed', 'partial', 'failed', 'cancelled'];
@@ -173,13 +173,15 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
   });
 
   it('re-running migration 010 is idempotent when six-state rule is installed', async () => {
-    const sql = readMigration010();
-    const before = await statusOnlyCheck();
+    const before = await statusOnlyChecks();
     assert.ok(before.length >= 1);
-    await pool.query(sql);
-    const after = await statusOnlyCheck();
+    await pool.query(readMigration010());
+    const after = await statusOnlyChecks();
     assert.equal(after.length, before.length);
-    assert.ok(after.every((d) => /cancelled/i.test(d.def)));
+    assert.deepEqual(
+      after.map((r) => r.expr).sort(),
+      before.map((r) => r.expr).sort()
+    );
   });
 
   it('does not alter existing rows when re-applied', async () => {
@@ -187,7 +189,7 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
     const ins = await pool.query(
       `INSERT INTO searches (user_id, query, location, status, total_raw)
        VALUES ($1, 'keep-me', 'loc', 'completed', 3)
-       RETURNING id, query, status, total_raw`,
+       RETURNING id`,
       [userId]
     );
     ownedSearchIds.push(ins.rows[0].id);
@@ -203,36 +205,30 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
     assert.equal(Number(rows[0].total_raw), 3);
   });
 
-  it('migrates legacy five-state CHECK to six-state and preserves pre-existing rows', async () => {
+  it('migrates exact legacy five-state CHECK to six-state and preserves rows', async () => {
     await withRollback(async (client) => {
-      await dropStatusOnlyCheck(client);
+      await dropStatusOnlyChecks(client);
       await client.query(`
         ALTER TABLE public.searches
           ADD CONSTRAINT searches_status_legacy_chk
           CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed'))
       `);
 
-      // Pre-existing row under legacy rule
       const u = await client.query(
         `INSERT INTO users (email, password_hash, email_verified_at)
          VALUES ($1, 'x', NOW()) RETURNING id`,
         [`m010-legacy-${Date.now()}@example.test`]
       );
-      const userId = u.rows[0].id;
       const ins = await client.query(
         `INSERT INTO searches (user_id, query, location, status, total_raw)
          VALUES ($1, 'pre-migration', 'loc', 'completed', 7)
          RETURNING id`,
-        [userId]
+        [u.rows[0].id]
       );
 
       await client.query(readMigration010());
 
-      // cancelled now accepted
-      await client.query(
-        `UPDATE searches SET status = 'cancelled' WHERE id = $1`,
-        [ins.rows[0].id]
-      );
+      await client.query(`UPDATE searches SET status = 'cancelled' WHERE id = $1`, [ins.rows[0].id]);
       const { rows } = await client.query(
         `SELECT query, status, total_raw FROM searches WHERE id = $1`,
         [ins.rows[0].id]
@@ -240,128 +236,114 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
       assert.equal(rows[0].query, 'pre-migration');
       assert.equal(rows[0].status, 'cancelled');
       assert.equal(Number(rows[0].total_raw), 7);
-
-      const defs = await client.query(`
-        SELECT pg_get_constraintdef(c.oid) AS def
-        FROM pg_constraint c
-        JOIN pg_class t ON c.conrelid = t.oid
-        JOIN pg_namespace n ON t.relnamespace = n.oid
-        WHERE n.nspname = 'public' AND t.relname = 'searches' AND c.contype = 'c'
-          AND c.conkey = ARRAY[
-            (SELECT a.attnum FROM pg_attribute a
-             WHERE a.attrelid = t.oid AND a.attname = 'status' AND NOT a.attisdropped)
-          ]::int2[]
-      `);
-      assert.ok(defs.rows.some((r) => /cancelled/i.test(r.def)));
     });
   });
 
-  it('fails when status column has no exclusive CHECK', async () => {
+  it('rejects missing status-only CHECK and does not invent one', async () => {
     await withRollback(async (client) => {
-      await dropStatusOnlyCheck(client);
+      await dropStatusOnlyChecks(client);
       await assert.rejects(
-        async () => {
-          await client.query(readMigration010());
-        },
-        (err) =>
-          err &&
-          /migration 010/i.test(String(err.message)) &&
-          /no CHECK constraint found/i.test(String(err.message))
+        async () => client.query(readMigration010()),
+        (err) => err && /no CHECK constraint found/i.test(String(err.message))
       );
+      const after = await statusOnlyChecks(client);
+      assert.equal(after.length, 0);
     });
   });
 
-  it('fails when status CHECK definition is unexpected', async () => {
+  it('rejects legacy-looking CHECK with OR TRUE and leaves it intact', async () => {
     await withRollback(async (client) => {
-      await dropStatusOnlyCheck(client);
+      await dropStatusOnlyChecks(client);
       await client.query(`
         ALTER TABLE public.searches
-          ADD CONSTRAINT searches_status_weird_chk
-          CHECK (status IN ('pending', 'weird_only'))
+          ADD CONSTRAINT searches_status_or_true_chk
+          CHECK (
+            status IN ('pending', 'running', 'completed', 'partial', 'failed')
+            OR TRUE
+          )
       `);
       await assert.rejects(
-        async () => {
-          await client.query(readMigration010());
-        },
-        (err) =>
-          err &&
-          /migration 010/i.test(String(err.message)) &&
-          /not the expected legacy rule/i.test(String(err.message))
+        async () => client.query(readMigration010()),
+        (err) => err && /does not match the expected/i.test(String(err.message))
       );
+      await assertConstraintStillNamed(client, 'searches_status_or_true_chk');
     });
   });
 
-  it('preserves non-status CHECKs while replacing status rule (in-transaction)', async () => {
+  it('rejects legacy-looking CHECK with extra AND and leaves it intact', async () => {
     await withRollback(async (client) => {
-      await dropStatusOnlyCheck(client);
+      await dropStatusOnlyChecks(client);
       await client.query(`
         ALTER TABLE public.searches
-          ADD CONSTRAINT searches_status_legacy_chk
-          CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed'))
-      `);
-
-      const beforeOthers = await client.query(`
-        SELECT COUNT(*)::int AS c
-        FROM pg_constraint c
-        JOIN pg_class t ON c.conrelid = t.oid
-        JOIN pg_namespace n ON t.relnamespace = n.oid
-        WHERE n.nspname = 'public' AND t.relname = 'searches' AND c.contype = 'c'
-          AND NOT (
-            c.conkey IS NOT NULL AND c.conkey = ARRAY[
-              (SELECT a.attnum FROM pg_attribute a
-               WHERE a.attrelid = t.oid AND a.attname = 'status' AND NOT a.attisdropped)
-            ]::int2[]
+          ADD CONSTRAINT searches_status_and_extra_chk
+          CHECK (
+            status IN ('pending', 'running', 'completed', 'partial', 'failed')
+            AND status <> 'failed'
           )
       `);
+      await assert.rejects(
+        async () => client.query(readMigration010()),
+        (err) => err && /does not match the expected/i.test(String(err.message))
+      );
+      await assertConstraintStillNamed(client, 'searches_status_and_extra_chk');
+    });
+  });
 
-      await client.query(readMigration010());
-
-      const afterOthers = await client.query(`
-        SELECT COUNT(*)::int AS c
-        FROM pg_constraint c
-        JOIN pg_class t ON c.conrelid = t.oid
-        JOIN pg_namespace n ON t.relnamespace = n.oid
-        WHERE n.nspname = 'public' AND t.relname = 'searches' AND c.contype = 'c'
-          AND NOT (
-            c.conkey IS NOT NULL AND c.conkey = ARRAY[
-              (SELECT a.attnum FROM pg_attribute a
-               WHERE a.attrelid = t.oid AND a.attname = 'status' AND NOT a.attisdropped)
-            ]::int2[]
+  it('rejects six-state CHECK with extra OR allowing other values', async () => {
+    await withRollback(async (client) => {
+      await dropStatusOnlyChecks(client);
+      await client.query(`
+        ALTER TABLE public.searches
+          ADD CONSTRAINT searches_status_six_or_chk
+          CHECK (
+            status IN ('pending', 'running', 'completed', 'partial', 'failed', 'cancelled')
+            OR status = 'anything_else'
           )
       `);
-      assert.equal(afterOthers.rows[0].c, beforeOthers.rows[0].c);
+      await assert.rejects(
+        async () => client.query(readMigration010()),
+        (err) => err && /does not match the expected/i.test(String(err.message))
+      );
+      await assertConstraintStillNamed(client, 'searches_status_six_or_chk');
+    });
+  });
 
-      // total_raw still enforced
-      let rejected = false;
-      try {
-        await client.query(
-          `INSERT INTO searches (user_id, query, status, total_raw)
-           VALUES (
-             (SELECT id FROM users LIMIT 1),
-             'x', 'pending', -5
-           )`
-        );
-      } catch (err) {
-        rejected = err && (err.code === '23514' || /check|constraint/i.test(String(err.message)));
-      }
-      // If no user exists in TX, insert one first
-      if (!rejected) {
-        const u = await client.query(
-          `INSERT INTO users (email, password_hash, email_verified_at)
-           VALUES ($1, 'x', NOW()) RETURNING id`,
-          [`m010-chk-${Date.now()}@example.test`]
-        );
-        await assert.rejects(
-          async () => {
-            await client.query(
-              `INSERT INTO searches (user_id, query, status, total_raw)
-               VALUES ($1, 'x', 'pending', -5)`,
-              [u.rows[0].id]
-            );
-          },
-          (err) => err && (err.code === '23514' || /check|constraint/i.test(String(err.message)))
-        );
-      }
+  it('rejects six-state CHECK with extra AND that restricts values', async () => {
+    await withRollback(async (client) => {
+      await dropStatusOnlyChecks(client);
+      await client.query(`
+        ALTER TABLE public.searches
+          ADD CONSTRAINT searches_status_six_and_chk
+          CHECK (
+            status IN ('pending', 'running', 'completed', 'partial', 'failed', 'cancelled')
+            AND status <> 'cancelled'
+          )
+      `);
+      await assert.rejects(
+        async () => client.query(readMigration010()),
+        (err) => err && /does not match the expected/i.test(String(err.message))
+      );
+      await assertConstraintStillNamed(client, 'searches_status_six_and_chk');
+    });
+  });
+
+  it('rejects two exclusive status CHECKs as ambiguous', async () => {
+    await withRollback(async (client) => {
+      await dropStatusOnlyChecks(client);
+      await client.query(`
+        ALTER TABLE public.searches
+          ADD CONSTRAINT searches_status_a_chk
+          CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed'));
+        ALTER TABLE public.searches
+          ADD CONSTRAINT searches_status_b_chk
+          CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed', 'cancelled'));
+      `);
+      await assert.rejects(
+        async () => client.query(readMigration010()),
+        (err) => err && /refusing ambiguous/i.test(String(err.message))
+      );
+      await assertConstraintStillNamed(client, 'searches_status_a_chk');
+      await assertConstraintStillNamed(client, 'searches_status_b_chk');
     });
   });
 });
@@ -370,23 +352,25 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
 describe('migration 010 SQL shape', () => {
   const sql = readMigration010();
 
-  it('uses pg_attribute / conkey for discovery', () => {
+  it('uses catalog metadata and pg_get_expr reference comparison', () => {
     assert.match(sql, /pg_attribute/);
     assert.match(sql, /conkey/);
-    assert.match(sql, /attname = 'status'/);
+    assert.match(sql, /pg_get_expr\(\s*c\.conbin/);
+    assert.match(sql, /_m010_ref_old/);
+    assert.match(sql, /_m010_ref_new/);
+    assert.match(sql, /IS NOT DISTINCT FROM expected_old/);
+    assert.match(sql, /IS NOT DISTINCT FROM expected_new/);
   });
 
   it('fails closed when no status-only CHECK exists', () => {
     assert.match(sql, /matched_count = 0/);
     assert.match(sql, /refusing to invent one/);
-    assert.equal(/ADD CONSTRAINT searches_status_check[\s\S]*matched_count = 0/.test(sql), false);
   });
 
-  it('validates full legacy five-state set before drop', () => {
-    assert.match(sql, /literal_count/);
-    assert.match(sql, /has_partial/);
-    assert.match(sql, /has_failed/);
-    assert.match(sql, /not the expected legacy rule/);
+  it('does not use literal-count or free-text cancelled detection as the decision', () => {
+    assert.equal(/literal_count/.test(sql), false);
+    assert.equal(/has_cancelled/.test(sql), false);
+    assert.equal(/ILIKE '%cancelled%'/.test(sql), false);
   });
 
   it('targets the six allowed statuses including cancelled', () => {
