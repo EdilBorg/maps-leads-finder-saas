@@ -1,13 +1,33 @@
 (function () {
   'use strict';
-  const titles = { dashboard: 'Dashboard', search: 'Nova pesquisa', results: 'Resultados', history: 'Histórico', leads: 'Leads guardados', settings: 'Configurações' };
-  let currentResults = [], currentSearchMeta = null, csrfToken = null;
+  const titles = {
+    dashboard: 'Dashboard',
+    search: 'Nova pesquisa',
+    results: 'Resultados',
+    history: 'Histórico',
+    leads: 'Leads guardados',
+    settings: 'Configurações',
+  };
+  const PAGE_SIZE = 28;
+  let currentResults = [];
+  let currentSearchMeta = null;
+  let csrfToken = null;
   let activePollTimer = null;
   let activeSearchId = null;
   let cancelRequested = false;
+  let pendingCancel = false;
+  let resultsPage = 1;
+  let currentUser = null;
+  let authState = 'loading';
+
   const $ = (s, r) => (r || document).querySelector(s);
   const $all = (s, r) => Array.from((r || document).querySelectorAll(s));
   function esc(s) { return s == null ? '' : String(s); }
+  function displayOrNa(v) {
+    if (v == null || String(v).trim() === '') return 'Não disponível';
+    return String(v);
+  }
+
   function maskEmail(email) {
     const value = String(email == null ? '' : email).trim();
     const at = value.indexOf('@');
@@ -18,6 +38,7 @@
     const visible = local.slice(0, Math.min(2, local.length));
     return visible + '****@' + domain;
   }
+
   async function ensureCsrf() {
     if (csrfToken) return csrfToken;
     const res = await fetch('/api/auth/csrf', { credentials: 'same-origin' });
@@ -26,6 +47,7 @@
     csrfToken = data.csrfToken;
     return csrfToken;
   }
+
   async function api(path, options = {}) {
     const opts = { credentials: 'same-origin', headers: { Accept: 'application/json', ...(options.headers || {}) }, ...options };
     if (opts.body && typeof opts.body === 'object' && !(opts.body instanceof FormData)) {
@@ -37,6 +59,7 @@
     try { data = await res.json(); } catch (_) {}
     return { res, data };
   }
+
   function navigate(view) {
     $all('.view').forEach((el) => el.classList.remove('active'));
     const section = $('#view-' + view);
@@ -59,30 +82,66 @@
     if (view === 'results') renderResultsState();
     if (view === 'settings') loadSettings();
   }
+
   function setStatus(msg, isError) {
     const el = $('#search-status');
     if (!el) return;
     el.textContent = msg || '';
     el.style.color = isError ? 'var(--color-coral-red)' : 'var(--color-fog)';
   }
+
   function stopPolling() {
-    if (activePollTimer) {
-      clearTimeout(activePollTimer);
-      activePollTimer = null;
-    }
+    if (activePollTimer) { clearTimeout(activePollTimer); activePollTimer = null; }
   }
+
   function setProgress(visible, text) {
     const box = $('#results-progress');
     const t = $('#results-progress-text');
     if (box) box.hidden = !visible;
     if (t && text != null) t.textContent = text;
   }
+
   function setSummary(visible, text) {
     const box = $('#results-summary');
     const t = $('#results-summary-text');
     if (box) box.hidden = !visible;
     if (t && text != null) t.textContent = text;
   }
+
+  function renderProviderStatus(providers) {
+    let host = $('#provider-status-list');
+    const progressBox = $('#results-progress');
+    if (!host && progressBox) {
+      host = document.createElement('div');
+      host.id = 'provider-status-list';
+      host.className = 'provider-status-list';
+      progressBox.appendChild(host);
+    }
+    if (!host) return;
+    host.innerHTML = '';
+    if (!Array.isArray(providers) || !providers.length) return;
+    const labels = { apify: 'Apify', tomtom: 'TomTom', foursquare: 'Foursquare' };
+    const statusLabel = {
+      ok: 'Concluído', empty: 'Sem resultados', error: 'Erro', failed: 'Erro',
+      not_configured: 'Não configurado', cancelled: 'Cancelado', running: 'Em execução', pending: 'A aguardar',
+    };
+    providers.forEach((p) => {
+      const code = p.code || p.provider || 'unknown';
+      const st = (p.status || 'pending').toLowerCase();
+      const chip = document.createElement('span');
+      chip.className = 'provider-status-chip ' + st;
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      chip.appendChild(dot);
+      let label = (labels[code] || code) + ' — ' + (statusLabel[st] || st);
+      if (typeof p.count === 'number' && (st === 'ok' || st === 'empty' || st === 'completed')) {
+        label = (labels[code] || code) + ' — ' + p.count + ' resultados — ' + (statusLabel[st] || st);
+      }
+      chip.appendChild(document.createTextNode(label));
+      host.appendChild(chip);
+    });
+  }
+
   function normalizePhoneForWa(phone) {
     if (!phone) return '';
     let p = String(phone).replace(/[^\d+]/g, '');
@@ -90,10 +149,20 @@
     if (!p.startsWith('+') && p.length >= 9) p = '+' + p;
     return p;
   }
+
   function generateContactMessage(lead) {
     const name = (lead && lead.name) || 'empresa';
-    return 'Olá, vi o vosso contacto e gostaria de saber mais sobre os vossos serviços. É possível falar um momento? (mensagem gerada via Maps Leads Finder)';
+    const cat = (lead && lead.category) || '';
+    const loc = (lead && lead.address) || '';
+    let msg = 'Olá';
+    if (name && name !== 'empresa') msg += ', ' + name;
+    msg += '. Vi o vosso contacto';
+    if (cat) msg += ' (' + cat + ')';
+    if (loc) msg += ' em ' + loc;
+    msg += ' e gostaria de saber mais sobre os vossos serviços. É possível falar um momento?';
+    return msg;
   }
+
   function openContactModal(lead) {
     const modal = $('#contact-modal');
     if (!modal) return;
@@ -103,25 +172,52 @@
     if (ta) ta.value = generateContactMessage(lead);
     modal.dataset.phone = lead.phone || '';
     modal.dataset.name = lead.name || '';
+    modal.dataset.category = lead.category || '';
     modal.hidden = false;
   }
+
   function closeContactModal() {
     const modal = $('#contact-modal');
     if (modal) modal.hidden = true;
   }
+
   function openWhatsApp() {
     const modal = $('#contact-modal');
     const ta = $('#contact-message');
     if (!modal) return;
     const phone = normalizePhoneForWa(modal.dataset.phone || '');
     const text = (ta && ta.value) || '';
-    if (!phone) {
-      setStatus('Sem número de telefone para WhatsApp.', true);
+    if (!phone || phone.replace(/\D/g, '').length < 8) {
+      setStatus('Sem número de telefone válido para WhatsApp.', true);
       return;
     }
     const url = 'https://wa.me/' + phone.replace(/\D/g, '') + '?text=' + encodeURIComponent(text);
     window.open(url, '_blank', 'noopener');
   }
+
+  function totalPages() { return Math.max(1, Math.ceil(currentResults.length / PAGE_SIZE)); }
+
+  function renderPagination() {
+    const el = $('#results-pagination');
+    if (!el) return;
+    const total = currentResults.length;
+    const pages = totalPages();
+    if (total <= PAGE_SIZE) { el.hidden = true; el.innerHTML = ''; return; }
+    el.hidden = false;
+    el.innerHTML = '';
+    const prev = document.createElement('button');
+    prev.type = 'button'; prev.className = 'btn btn-ghost btn-sm'; prev.textContent = 'Anterior';
+    prev.disabled = resultsPage <= 1;
+    prev.addEventListener('click', () => { if (resultsPage > 1) { resultsPage -= 1; renderResultsState(); } });
+    const info = document.createElement('span');
+    info.textContent = 'Página ' + resultsPage + ' / ' + pages + ' · ' + total + ' resultado' + (total === 1 ? '' : 's');
+    const next = document.createElement('button');
+    next.type = 'button'; next.className = 'btn btn-ghost btn-sm'; next.textContent = 'Seguinte';
+    next.disabled = resultsPage >= pages;
+    next.addEventListener('click', () => { if (resultsPage < pages) { resultsPage += 1; renderResultsState(); } });
+    el.appendChild(prev); el.appendChild(info); el.appendChild(next);
+  }
+
   function renderResultsState() {
     const grid = $('#results-cards');
     const empty = $('#results-empty');
@@ -132,32 +228,34 @@
       if (empty) {
         empty.hidden = false;
         const msg = (currentSearchMeta && currentSearchMeta.message) || 'Sem resultados para mostrar.';
-        const h = empty.querySelector('h3');
-        const p = empty.querySelector('p');
+        const h = empty.querySelector('h3'); const p = empty.querySelector('p');
         if (h) h.textContent = 'Sem resultados';
         if (p) p.textContent = msg;
       }
       if (count) count.textContent = '0 resultados';
+      renderPagination();
       return;
     }
     if (empty) empty.hidden = true;
     if (count) count.textContent = currentResults.length + ' resultado' + (currentResults.length === 1 ? '' : 's');
+    const pages = totalPages();
+    if (resultsPage > pages) resultsPage = pages;
+    if (resultsPage < 1) resultsPage = 1;
+    const start = (resultsPage - 1) * PAGE_SIZE;
+    const pageItems = currentResults.slice(start, start + PAGE_SIZE);
     const frag = document.createDocumentFragment();
-    currentResults.forEach((r) => {
+    pageItems.forEach((r) => {
       const card = document.createElement('article');
       card.className = 'result-card';
       const photo = document.createElement('div');
       photo.className = 'result-card-photo';
       if (r.photoUrl || r.image) {
         const img = document.createElement('img');
-        img.src = r.photoUrl || r.image;
-        img.alt = '';
-        img.loading = 'lazy';
+        img.src = r.photoUrl || r.image; img.alt = ''; img.loading = 'lazy';
         photo.appendChild(img);
       } else {
         const ph = document.createElement('span');
-        ph.className = 'photo-placeholder';
-        ph.textContent = 'Sem foto';
+        ph.className = 'photo-placeholder'; ph.textContent = 'Sem foto';
         photo.appendChild(ph);
       }
       card.appendChild(photo);
@@ -170,45 +268,78 @@
       function line(text) {
         const d = document.createElement('div');
         d.className = 'result-card-line';
-        d.textContent = esc(text == null || text === '' ? '—' : text);
+        d.textContent = esc(displayOrNa(text));
         return d;
       }
+      body.appendChild(line(r.category));
       body.appendChild(line(r.address));
       body.appendChild(line(r.phone));
-      body.appendChild(line(r.email));
       body.appendChild(line(r.website));
-      if (r.rating != null) body.appendChild(line('★ ' + r.rating + (r.reviews != null ? ' (' + r.reviews + ')' : '')));
       card.appendChild(body);
       const actions = document.createElement('div');
       actions.className = 'result-card-actions';
       const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.className = 'result-check';
-      cb.value = r.id || '';
+      cb.type = 'checkbox'; cb.className = 'result-check'; cb.value = r.id || '';
       cb.setAttribute('aria-label', 'Selecionar ' + (r.name || ''));
       actions.appendChild(cb);
-      if (r.phone) {
-        const wa = document.createElement('button');
-        wa.type = 'button';
-        wa.className = 'btn btn-primary btn-sm';
-        wa.textContent = 'WhatsApp';
-        wa.addEventListener('click', () => openContactModal(r));
-        actions.appendChild(wa);
-      }
+      const contactBtn = document.createElement('button');
+      contactBtn.type = 'button'; contactBtn.className = 'btn btn-primary btn-sm';
+      contactBtn.textContent = 'Contactar';
+      if (!r.phone) { contactBtn.disabled = true; contactBtn.title = 'Sem telefone'; }
+      else contactBtn.addEventListener('click', () => openContactModal(r));
+      actions.appendChild(contactBtn);
       if (r.website) {
         const web = document.createElement('a');
         web.className = 'btn btn-ghost btn-sm';
         web.href = r.website.startsWith('http') ? r.website : 'https://' + r.website;
-        web.target = '_blank';
-        web.rel = 'noopener';
-        web.textContent = 'Site';
+        web.target = '_blank'; web.rel = 'noopener'; web.textContent = 'Site';
         actions.appendChild(web);
       }
       card.appendChild(actions);
       frag.appendChild(card);
     });
     grid.appendChild(frag);
+    renderPagination();
   }
+
+  function resetSearchUiButtons() {
+    const btn = $('#btn-search');
+    if (btn) { btn.disabled = false; btn.textContent = 'Pesquisar'; }
+    const cancelBtn = $('#btn-cancel-search');
+    if (cancelBtn) cancelBtn.hidden = true;
+  }
+
+  async function sendCancel(searchId) {
+    try {
+      const token = await ensureCsrf();
+      await api('/api/searches/' + searchId + '/cancel', {
+        method: 'POST', headers: { 'X-CSRF-Token': token }, body: {},
+      });
+    } catch (_) {}
+  }
+
+  async function cancelActiveSearch() {
+    cancelRequested = true;
+    pendingCancel = true;
+    stopPolling();
+    setStatus('A cancelar…');
+    setProgress(true, 'Cancelamento solicitado…');
+    if (activeSearchId) {
+      await sendCancel(activeSearchId);
+      currentResults = [];
+      currentSearchMeta = { searchId: activeSearchId, status: 'cancelled', message: 'Pesquisa cancelada. Nenhum resultado foi guardado.' };
+      setStatus('Pesquisa cancelada.', false);
+      setProgress(false);
+      setSummary(true, 'Pesquisa cancelada. Nenhum resultado foi persistido.');
+      renderResultsState();
+      activeSearchId = null;
+      pendingCancel = false;
+      resetSearchUiButtons();
+      return;
+    }
+    setStatus('Cancelamento pendente…');
+  }
+
   async function pollStatus(searchId) {
     if (cancelRequested || searchId !== activeSearchId) return;
     try {
@@ -217,11 +348,12 @@
         setProgress(false);
         setStatus('Não foi possível obter o estado da pesquisa.', true);
         stopPolling();
+        resetSearchUiButtons();
         return;
       }
       const status = data.status || '';
-      const progressText = data.message || data.progress || ('Estado: ' + status);
-      setProgress(true, progressText);
+      if (Array.isArray(data.providers) && data.providers.length) renderProviderStatus(data.providers);
+      setProgress(true, data.message || data.progress || ('Estado: ' + status));
       if (status === 'running' || status === 'pending' || status === 'queued') {
         activePollTimer = setTimeout(() => pollStatus(searchId), 1500);
         return;
@@ -233,71 +365,44 @@
         currentSearchMeta = { searchId, status: 'cancelled', message: 'Pesquisa cancelada. Nenhum resultado foi guardado.' };
         setStatus('Pesquisa cancelada.', false);
         setSummary(true, 'Pesquisa cancelada pelo utilizador. Nenhum resultado foi persistido.');
+        if (Array.isArray(data.providers)) renderProviderStatus(data.providers);
         renderResultsState();
+        resetSearchUiButtons();
+        activeSearchId = null;
         return;
       }
       if (status === 'failed' || status === 'error') {
         currentResults = [];
-        currentSearchMeta = { searchId, status, message: data.message || 'A pesquisa falhou.' };
-        setStatus(data.message || 'A pesquisa falhou.', true);
-        setSummary(true, data.message || 'A pesquisa falhou.');
+        currentSearchMeta = { searchId, status, message: data.errorSummary || data.message || 'A pesquisa falhou.' };
+        setStatus(data.errorSummary || data.message || 'A pesquisa falhou.', true);
+        setSummary(true, data.errorSummary || data.message || 'A pesquisa falhou.');
+        if (Array.isArray(data.providers)) renderProviderStatus(data.providers);
         renderResultsState();
+        resetSearchUiButtons();
+        activeSearchId = null;
         return;
       }
-      // completed / success
       const { res: r2, data: d2 } = await api('/api/searches/' + searchId + '/results');
-      if (!r2.ok) {
-        setStatus('Não foi possível carregar os resultados.', true);
-        return;
-      }
+      if (!r2.ok) { setStatus('Não foi possível carregar os resultados.', true); resetSearchUiButtons(); return; }
       currentResults = d2.results || [];
-      currentSearchMeta = {
-        searchId,
-        status: (d2.search && d2.search.status) || status,
-        message: d2.message || '',
-        outcome: currentResults.length ? 'results' : 'empty',
-      };
-      const msg = currentResults.length
-        ? currentResults.length + ' resultado(s) encontrados.'
-        : (d2.message || 'Nenhum resultado encontrado.');
+      resultsPage = 1;
+      currentSearchMeta = { searchId, status: (d2.search && d2.search.status) || status, message: d2.message || '', outcome: currentResults.length ? 'results' : 'empty' };
+      if (Array.isArray(d2.providers)) renderProviderStatus(d2.providers);
+      else if (Array.isArray(data.providers)) renderProviderStatus(data.providers);
+      const msg = currentResults.length ? currentResults.length + ' resultado(s) encontrados.' : (d2.message || 'Nenhum resultado encontrado.');
       setStatus(msg, false);
       setSummary(true, msg);
       renderResultsState();
+      resetSearchUiButtons();
+      activeSearchId = null;
     } catch (_) {
-      if (!cancelRequested) {
-        setStatus('Erro de rede ao consultar o estado.', true);
-      }
+      if (!cancelRequested) setStatus('Erro de rede ao consultar o estado.', true);
       stopPolling();
       setProgress(false);
+      resetSearchUiButtons();
     }
   }
-  async function cancelActiveSearch() {
-    if (!activeSearchId) return;
-    cancelRequested = true;
-    stopPolling();
-    try {
-      const token = await ensureCsrf();
-      await api('/api/searches/' + activeSearchId + '/cancel', {
-        method: 'POST',
-        headers: { 'X-CSRF-Token': token },
-        body: {},
-      });
-    } catch (_) {}
-    currentResults = [];
-    currentSearchMeta = { searchId: activeSearchId, status: 'cancelled', message: 'Pesquisa cancelada.' };
-    setStatus('Pesquisa cancelada.', false);
-    setProgress(false);
-    setSummary(true, 'Pesquisa cancelada. Nenhum resultado foi guardado.');
-    renderResultsState();
-    activeSearchId = null;
-    const btn = $('#btn-search');
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = 'Pesquisar';
-    }
-    const cancelBtn = $('#btn-cancel-search');
-    if (cancelBtn) cancelBtn.hidden = true;
-  }
+
   async function submitSearch(ev) {
     ev.preventDefault();
     const query = ($('#query') || {}).value || '';
@@ -308,29 +413,24 @@
     const hasEmail = !!document.querySelector('input[name="hasEmail"]:checked');
     const noWebsite = !!document.querySelector('input[name="noWebsite"]:checked');
     const minReviews = !!document.querySelector('input[name="minReviews"]:checked');
-    if (!String(query).trim() || !String(location).trim()) {
-      setStatus('Preenche categoria e localização.', true);
-      return;
-    }
+    if (!String(query).trim() || !String(location).trim()) { setStatus('Preenche categoria e localização.', true); return; }
     stopPolling();
     cancelRequested = false;
+    pendingCancel = false;
     activeSearchId = null;
     currentResults = [];
+    resultsPage = 1;
     currentSearchMeta = null;
     setSummary(false, '');
     setProgress(false);
+    renderProviderStatus([]);
     const btn = $('#btn-search');
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = 'A iniciar…';
-    }
+    if (btn) { btn.disabled = true; btn.textContent = 'A iniciar…'; }
     let cancelBtn = $('#btn-cancel-search');
     if (!cancelBtn) {
       cancelBtn = document.createElement('button');
-      cancelBtn.type = 'button';
-      cancelBtn.id = 'btn-cancel-search';
-      cancelBtn.className = 'btn btn-ghost';
-      cancelBtn.textContent = 'Cancelar';
+      cancelBtn.type = 'button'; cancelBtn.id = 'btn-cancel-search';
+      cancelBtn.className = 'btn btn-ghost'; cancelBtn.textContent = 'Cancelar';
       cancelBtn.addEventListener('click', cancelActiveSearch);
       const toolbarLeft = btn && btn.parentElement;
       if (toolbarLeft) toolbarLeft.appendChild(cancelBtn);
@@ -339,46 +439,38 @@
     setStatus('A iniciar pesquisa…');
     navigate('results');
     setProgress(true, 'A iniciar pesquisa nos fornecedores…');
+    renderProviderStatus([
+      { code: 'apify', status: 'pending' },
+      { code: 'tomtom', status: 'pending' },
+      { code: 'foursquare', status: 'pending' },
+    ]);
     try {
       const token = await ensureCsrf();
       const { res, data } = await api('/api/searches', {
         method: 'POST',
         headers: { 'X-CSRF-Token': token },
         body: {
-          query: String(query).trim(),
-          location: String(location).trim(),
-          limit,
-          minRating: minRating || null,
-          hasPhone,
-          hasEmail,
-          noWebsite,
-          minReviews,
+          query: String(query).trim(), location: String(location).trim(), limit,
+          minRating: minRating || null, hasPhone, hasEmail, noWebsite, minReviews,
         },
       });
-      if (res.status === 401) {
-        setStatus('Inicia sessão para pesquisar.', true);
-        setProgress(false);
-        return;
-      }
-      if (res.status === 403 && data && data.code === 'EMAIL_NOT_VERIFIED') {
-        setStatus('Verifica o teu email antes de pesquisar.', true);
-        setProgress(false);
-        return;
-      }
-      if (res.status === 402 || (data && data.code === 'QUOTA')) {
-        setStatus((data && data.error) || 'Quota esgotada.', true);
-        setProgress(false);
-        return;
-      }
-      if (!res.ok) {
-        setStatus((data && data.error) || 'Falha na pesquisa.', true);
-        setProgress(false);
-        return;
-      }
+      if (res.status === 401) { setStatus('Inicia sessão para pesquisar.', true); setProgress(false); resetSearchUiButtons(); return; }
+      if (res.status === 403 && data && data.code === 'EMAIL_NOT_VERIFIED') { setStatus('Verifica o teu email antes de pesquisar.', true); setProgress(false); resetSearchUiButtons(); return; }
+      if (res.status === 402 || (data && data.code === 'QUOTA')) { setStatus((data && data.error) || 'Quota esgotada.', true); setProgress(false); resetSearchUiButtons(); return; }
+      if (!res.ok) { setStatus((data && data.error) || 'Falha na pesquisa.', true); setProgress(false); resetSearchUiButtons(); return; }
       const searchId = data.searchId || data.id;
-      if (!searchId) {
-        setStatus('Resposta inválida do servidor.', true);
+      if (!searchId) { setStatus('Resposta inválida do servidor.', true); setProgress(false); resetSearchUiButtons(); return; }
+      if (pendingCancel || cancelRequested) {
+        await sendCancel(searchId);
+        currentResults = [];
+        currentSearchMeta = { searchId, status: 'cancelled', message: 'Pesquisa cancelada. Nenhum resultado foi guardado.' };
+        setStatus('Pesquisa cancelada.', false);
         setProgress(false);
+        setSummary(true, 'Pesquisa cancelada. Nenhum resultado foi persistido.');
+        renderResultsState();
+        activeSearchId = null;
+        pendingCancel = false;
+        resetSearchUiButtons();
         return;
       }
       activeSearchId = searchId;
@@ -386,40 +478,32 @@
       setStatus('Pesquisa em curso…');
       setProgress(true, data.message || 'A recolher dados de múltiplos fornecedores…');
       if (btn) btn.textContent = 'A pesquisar…';
-      // If already completed synchronously
       if (data.status === 'completed' || data.results) {
         currentResults = data.results || [];
-        currentSearchMeta = {
-          searchId,
-          status: 'completed',
-          message: data.message || '',
-          outcome: currentResults.length ? 'results' : 'empty',
-        };
+        resultsPage = 1;
+        currentSearchMeta = { searchId, status: 'completed', message: data.message || '', outcome: currentResults.length ? 'results' : 'empty' };
         setProgress(false);
-        const msg = currentResults.length
-          ? currentResults.length + ' resultado(s).'
-          : (data.message || 'Nenhum resultado.');
+        const msg = currentResults.length ? currentResults.length + ' resultado(s).' : (data.message || 'Nenhum resultado.');
         setStatus(msg, false);
         setSummary(true, msg);
         renderResultsState();
+        resetSearchUiButtons();
+        activeSearchId = null;
         return;
       }
       pollStatus(searchId);
     } catch (_) {
       setStatus('Não foi possível realizar a pesquisa. Tenta novamente.', true);
       setProgress(false);
-    } finally {
-      if (btn && !activeSearchId) {
-        btn.disabled = false;
-        btn.textContent = 'Pesquisar';
-      }
-      if (cancelBtn && !activeSearchId) cancelBtn.hidden = true;
+      resetSearchUiButtons();
     }
   }
+
   function formatDate(v) {
     if (!v) return '—';
     try { return new Date(v).toLocaleString('pt-PT'); } catch (_) { return String(v); }
   }
+
   async function loadDashboard() {
     const { res, data } = await api('/api/searches/dashboard');
     if (!res.ok) {
@@ -463,6 +547,7 @@
     wrap.appendChild(table);
     box.appendChild(wrap);
   }
+
   async function loadHistory() {
     const body = $('#history-body'); if (!body) return; body.innerHTML = '';
     const { res, data } = await api('/api/searches?limit=50');
@@ -486,16 +571,18 @@
       body.appendChild(tr);
     });
   }
+
   async function openSearch(id) {
     const { res, data } = await api('/api/searches/' + id + '/results');
     if (!res.ok) return;
     currentResults = data.results || [];
+    resultsPage = 1;
     currentSearchMeta = { searchId: id, status: data.search && data.search.status };
-    setSummary(false, '');
-    setProgress(false);
+    if (Array.isArray(data.providers)) renderProviderStatus(data.providers);
     renderResultsState();
     navigate('results');
   }
+
   async function loadLeads() {
     const body = $('#leads-body'); if (!body) return; body.innerHTML = '';
     const { res, data } = await api('/api/searches/leads/saved');
@@ -515,6 +602,7 @@
       body.appendChild(tr);
     });
   }
+
   async function saveSelectedLeads() {
     const ids = $all('.result-check:checked').map((c) => c.value).filter(Boolean);
     if (!ids.length) { setStatus('Seleciona resultados para guardar.', true); return; }
@@ -525,18 +613,14 @@
       setStatus(((data.saved || []).length) + ' lead(s) guardado(s).');
     } catch (_) { setStatus('Falha ao guardar leads.', true); }
   }
-  let currentUser = null;
-  let authState = 'loading';
 
   function setAuthState(state) {
     authState = state;
     const actions = document.querySelector('.topbar-actions');
     if (actions) actions.setAttribute('data-auth-state', state);
   }
-
   function setGuestUi() {
-    currentUser = null;
-    setAuthState('guest');
+    currentUser = null; setAuthState('guest');
     const guest = document.getElementById('guest-actions');
     const user = document.getElementById('user-actions');
     if (guest) guest.hidden = false;
@@ -544,10 +628,8 @@
     const badge = document.getElementById('auth-badge');
     if (badge) { badge.textContent = ''; badge.removeAttribute('title'); }
   }
-
   function setAuthedUi(user) {
-    currentUser = user;
-    setAuthState('authenticated');
+    currentUser = user; setAuthState('authenticated');
     const guest = document.getElementById('guest-actions');
     const userBox = document.getElementById('user-actions');
     if (guest) guest.hidden = true;
@@ -562,18 +644,12 @@
       logout.onclick = async () => {
         try {
           const token = await ensureCsrf();
-          await fetch('/api/auth/logout', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'X-CSRF-Token': token, 'Content-Type': 'application/json' },
-            body: '{}',
-          });
+          await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': token, 'Content-Type': 'application/json' }, body: '{}' });
         } catch (_) {}
         window.location.href = '/pages/login.html';
       };
     }
   }
-
   function setAuthErrorUi() {
     setAuthState('error');
     const guest = document.getElementById('guest-actions');
@@ -581,7 +657,6 @@
     if (guest) guest.hidden = true;
     if (user) user.hidden = true;
   }
-
   async function refreshAuthUi() {
     setAuthState('loading');
     const guest = document.getElementById('guest-actions');
@@ -590,22 +665,12 @@
     if (user) user.hidden = true;
     try {
       const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
-      if (res.status === 401) {
-        setGuestUi();
-        return;
-      }
-      if (!res.ok) {
-        setAuthErrorUi();
-        return;
-      }
+      if (res.status === 401) { setGuestUi(); return; }
+      if (!res.ok) { setAuthErrorUi(); return; }
       const data = await res.json();
-      if (data && data.user) setAuthedUi(data.user);
-      else setGuestUi();
-    } catch (_) {
-      setAuthErrorUi();
-    }
+      if (data && data.user) setAuthedUi(data.user); else setGuestUi();
+    } catch (_) { setAuthErrorUi(); }
   }
-
   function loadSettings() {
     const nameEl = document.getElementById('settings-name');
     const emailEl = document.getElementById('settings-email');
@@ -613,16 +678,13 @@
     if (!currentUser) {
       if (nameEl) nameEl.textContent = '—';
       if (emailEl) emailEl.textContent = '—';
-      if (verEl) verEl.textContent = authState === 'error'
-        ? 'Não foi possível verificar a sessão.'
-        : 'Inicie sessão para ver os dados da conta.';
+      if (verEl) verEl.textContent = authState === 'error' ? 'Não foi possível verificar a sessão.' : 'Inicie sessão para ver os dados da conta.';
       return;
     }
     if (nameEl) nameEl.textContent = currentUser.name || '—';
     if (emailEl) emailEl.textContent = currentUser.email || '—';
     if (verEl) verEl.textContent = currentUser.emailVerified ? 'Confirmado' : 'Por confirmar';
   }
-
   function initPasswordResetRequest() {
     const showBtn = document.getElementById('btn-show-reset-password');
     const panel = document.getElementById('reset-password-panel');
@@ -631,82 +693,44 @@
     const err = document.getElementById('reset-password-error');
     const ok = document.getElementById('reset-password-ok');
     const emailEl = document.getElementById('reset-password-email');
-
     function hideMessages() {
       if (err) { err.classList.remove('visible'); err.textContent = ''; }
       if (ok) { ok.classList.remove('visible'); ok.textContent = ''; }
     }
-
     if (showBtn && panel) {
       showBtn.addEventListener('click', () => {
-        panel.hidden = false;
-        showBtn.hidden = true;
-        hideMessages();
-        if (emailEl) {
-          emailEl.textContent = (currentUser && currentUser.email) ? maskEmail(currentUser.email) : '—';
-        }
+        panel.hidden = false; showBtn.hidden = true; hideMessages();
+        if (emailEl) emailEl.textContent = (currentUser && currentUser.email) ? maskEmail(currentUser.email) : '—';
       });
     }
     if (cancelBtn && panel && showBtn) {
-      cancelBtn.addEventListener('click', () => {
-        panel.hidden = true;
-        showBtn.hidden = false;
-        hideMessages();
-      });
+      cancelBtn.addEventListener('click', () => { panel.hidden = true; showBtn.hidden = false; hideMessages(); });
     }
     if (sendBtn) {
       sendBtn.addEventListener('click', async () => {
         hideMessages();
         if (!currentUser || !currentUser.email) {
-          if (err) {
-            err.textContent = 'Inicie sessão para solicitar a recuperação.';
-            err.classList.add('visible');
-          }
+          if (err) { err.textContent = 'Inicie sessão para solicitar a recuperação.'; err.classList.add('visible'); }
           return;
         }
-        sendBtn.disabled = true;
-        sendBtn.textContent = 'A enviar…';
+        sendBtn.disabled = true; sendBtn.textContent = 'A enviar…';
         try {
           const token = await ensureCsrf();
           const { res, data } = await api('/api/auth/forgot-password', {
-            method: 'POST',
-            headers: { 'X-CSRF-Token': token },
-            body: { email: currentUser.email },
+            method: 'POST', headers: { 'X-CSRF-Token': token }, body: { email: currentUser.email },
           });
-          if (res.status === 401) {
-            if (err) {
-              err.textContent = 'Sessão expirada. Inicie sessão novamente.';
-              err.classList.add('visible');
-            }
-            return;
-          }
-          if (res.status === 403) {
-            if (err) {
-              err.textContent = (data && data.error) || 'Pedido rejeitado (CSRF ou permissões).';
-              err.classList.add('visible');
-            }
-            return;
-          }
           if (!res.ok) {
-            if (err) {
-              err.textContent = (data && data.error) || 'Não foi possível enviar o pedido.';
-              err.classList.add('visible');
-            }
+            if (err) { err.textContent = (data && data.error) || 'Não foi possível enviar o pedido.'; err.classList.add('visible'); }
             return;
           }
           if (ok) {
-            ok.textContent = (data && data.message)
-              || 'Se o email estiver associado a uma conta, enviámos instruções de recuperação.';
+            ok.textContent = (data && data.message) || 'Se o email estiver associado a uma conta, enviámos instruções de recuperação.';
             ok.classList.add('visible');
           }
         } catch (_) {
-          if (err) {
-            err.textContent = 'Erro de rede. Tenta novamente.';
-            err.classList.add('visible');
-          }
+          if (err) { err.textContent = 'Erro de rede. Tenta novamente.'; err.classList.add('visible'); }
         } finally {
-          sendBtn.disabled = false;
-          sendBtn.textContent = 'Enviar link de recuperação';
+          sendBtn.disabled = false; sendBtn.textContent = 'Enviar link de recuperação';
         }
       });
     }
@@ -715,29 +739,12 @@
   function init() {
     const form = $('#search-form');
     if (form) form.addEventListener('submit', submitSearch);
-    const selectAll = $('#select-all');
-    if (selectAll) {
-      selectAll.addEventListener('change', () => {
-        $all('.result-check').forEach((c) => { c.checked = selectAll.checked; });
+    $all('.nav-item').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const view = btn.getAttribute('data-view');
+        if (view && !btn.disabled) navigate(view);
       });
-    }
-    const saveBtn = $('#btn-save-leads');
-    if (saveBtn) saveBtn.addEventListener('click', saveSelectedLeads);
-    $all('[data-close-modal]').forEach((el) => {
-      el.addEventListener('click', closeContactModal);
     });
-    const regen = $('#btn-regen-message');
-    if (regen) {
-      regen.addEventListener('click', () => {
-        const modal = $('#contact-modal');
-        const ta = $('#contact-message');
-        if (ta && modal) {
-          ta.value = generateContactMessage({ name: modal.dataset.name, phone: modal.dataset.phone });
-        }
-      });
-    }
-    const waBtn = $('#btn-open-whatsapp');
-    if (waBtn) waBtn.addEventListener('click', openWhatsApp);
     const mobileToggle = $('#mobile-toggle');
     const sidebar = $('#sidebar');
     const overlay = $('#sidebar-overlay');
@@ -745,9 +752,8 @@
       mobileToggle.addEventListener('click', () => {
         sidebar.classList.toggle('open');
         if (overlay) {
-          const open = sidebar.classList.contains('open');
-          overlay.classList.toggle('open', open);
-          overlay.setAttribute('aria-hidden', open ? 'false' : 'true');
+          overlay.classList.toggle('open');
+          overlay.setAttribute('aria-hidden', sidebar.classList.contains('open') ? 'false' : 'true');
         }
       });
     }
@@ -758,16 +764,35 @@
         overlay.setAttribute('aria-hidden', 'true');
       });
     }
-    $all('.nav-item').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const view = btn.getAttribute('data-view');
-        if (view && !btn.disabled) navigate(view);
+    const selectAll = $('#select-all');
+    if (selectAll) {
+      selectAll.addEventListener('change', () => {
+        $all('.result-check').forEach((c) => { c.checked = selectAll.checked; });
       });
-    });
+    }
+    const saveBtn = $('#btn-save-leads');
+    if (saveBtn) saveBtn.addEventListener('click', saveSelectedLeads);
+    $all('[data-close-modal]').forEach((el) => { el.addEventListener('click', closeContactModal); });
+    const btnWa = $('#btn-open-whatsapp');
+    if (btnWa) btnWa.addEventListener('click', openWhatsApp);
+    const btnRegen = $('#btn-regen-message');
+    if (btnRegen) {
+      btnRegen.addEventListener('click', () => {
+        const modal = $('#contact-modal');
+        const ta = $('#contact-message');
+        if (!modal || !ta) return;
+        ta.value = generateContactMessage({ name: modal.dataset.name, category: modal.dataset.category, phone: modal.dataset.phone });
+      });
+    }
     initPasswordResetRequest();
     const hash = (location.hash || '#dashboard').replace('#', '');
     navigate(titles[hash] ? hash : 'dashboard');
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => { init(); refreshAuthUi(); });
-  else { init(); refreshAuthUi(); }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => { init(); refreshAuthUi(); });
+  } else {
+    init();
+    refreshAuthUi();
+  }
 })();
