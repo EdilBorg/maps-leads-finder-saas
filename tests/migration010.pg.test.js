@@ -6,6 +6,10 @@
  *
  * Destructive probes run inside BEGIN…ROLLBACK so shared test schema is restored.
  * After a rejected migration, the original probe constraint must still be present.
+ *
+ * Fixture isolation: before installing artificial status CHECKs, owned searches
+ * created earlier in the suite are deleted on the same transaction client so
+ * residual rows (e.g. status='cancelled') cannot block ADD CONSTRAINT.
  */
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -80,6 +84,17 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
     return rows[0].id;
   }
 
+  /**
+   * Delete only searches created by this suite (ownedSearchIds), via the
+   * transaction client. Does not touch users or unrelated rows.
+   */
+  async function removeOwnedSearches(client) {
+    if (!ownedSearchIds.length) return;
+    await client.query(`DELETE FROM public.searches WHERE id = ANY($1::uuid[])`, [
+      ownedSearchIds.slice(),
+    ]);
+  }
+
   async function statusOnlyChecks(client) {
     const q = client || pool;
     const { rows } = await q.query(`
@@ -102,15 +117,23 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
 
   async function withRollback(fn) {
     const client = await pool.connect();
+    let fnError = null;
     try {
       await client.query('BEGIN');
-      await fn(client);
+      try {
+        await fn(client);
+      } catch (err) {
+        fnError = err;
+      }
     } finally {
       try {
         await client.query('ROLLBACK');
-      } catch (_) {}
+      } catch (_) {
+        // keep original fnError if present
+      }
       client.release();
     }
+    if (fnError) throw fnError;
   }
 
   async function dropStatusOnlyChecks(client) {
@@ -208,6 +231,7 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
 
   it('migrates exact legacy five-state CHECK to six-state and preserves rows', async () => {
     await withRollback(async (client) => {
+      await removeOwnedSearches(client);
       await dropStatusOnlyChecks(client);
       await client.query(`
         ALTER TABLE public.searches
@@ -243,6 +267,7 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
 
   it('rejects missing status-only CHECK and does not invent one', async () => {
     await withRollback(async (client) => {
+      await removeOwnedSearches(client);
       await dropStatusOnlyChecks(client);
       await assert.rejects(
         async () => client.query(readMigration010()),
@@ -255,6 +280,7 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
 
   it('rejects legacy-looking CHECK with OR TRUE and leaves it intact', async () => {
     await withRollback(async (client) => {
+      await removeOwnedSearches(client);
       await dropStatusOnlyChecks(client);
       await client.query(`
         ALTER TABLE public.searches
@@ -274,6 +300,7 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
 
   it('rejects legacy-looking CHECK with extra AND and leaves it intact', async () => {
     await withRollback(async (client) => {
+      await removeOwnedSearches(client);
       await dropStatusOnlyChecks(client);
       await client.query(`
         ALTER TABLE public.searches
@@ -293,6 +320,7 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
 
   it('rejects six-state CHECK with extra OR allowing other values', async () => {
     await withRollback(async (client) => {
+      await removeOwnedSearches(client);
       await dropStatusOnlyChecks(client);
       await client.query(`
         ALTER TABLE public.searches
@@ -312,6 +340,7 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
 
   it('rejects six-state CHECK with extra AND that restricts values', async () => {
     await withRollback(async (client) => {
+      await removeOwnedSearches(client);
       await dropStatusOnlyChecks(client);
       await client.query(`
         ALTER TABLE public.searches
@@ -331,6 +360,7 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
 
   it('rejects two exclusive status CHECKs as ambiguous', async () => {
     await withRollback(async (client) => {
+      await removeOwnedSearches(client);
       await dropStatusOnlyChecks(client);
       await client.query(`
         ALTER TABLE public.searches
