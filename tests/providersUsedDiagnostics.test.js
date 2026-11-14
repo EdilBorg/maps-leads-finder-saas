@@ -21,28 +21,28 @@ describe('providers_used persistence contract', () => {
   it('diagnostic fields survive JSONB round-trip used in production', () => {
     const _providers = [
       {
-        code: 'osm',
+        code: 'apify',
         status: 'error',
         count: 0,
         errorCode: 'HTTP_ERROR',
-        errorStage: 'geocode',
+        errorStage: 'fetch',
         httpStatus: 403,
         durationMs: 120,
       },
       {
-        code: 'osm',
+        code: 'tomtom',
         status: 'error',
         count: 0,
         errorCode: 'HTTP_ERROR',
-        errorStage: 'overpass',
+        errorStage: 'search',
         httpStatus: 502,
         durationMs: 900,
       },
     ];
     const persisted = JSON.parse(JSON.stringify(_providers));
-    assert.equal(persisted[0].errorStage, 'geocode');
+    assert.equal(persisted[0].errorStage, 'fetch');
     assert.equal(persisted[0].httpStatus, 403);
-    assert.equal(persisted[1].errorStage, 'overpass');
+    assert.equal(persisted[1].errorStage, 'search');
     assert.equal(persisted[1].httpStatus, 502);
   });
 });
