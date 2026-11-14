@@ -2,6 +2,9 @@
   'use strict';
   const titles = { dashboard: 'Dashboard', search: 'Nova pesquisa', results: 'Resultados', history: 'Histórico', leads: 'Leads guardados', settings: 'Configurações' };
   let currentResults = [], currentSearchMeta = null, csrfToken = null;
+  let activePollTimer = null;
+  let activeSearchId = null;
+  let cancelRequested = false;
   const $ = (s, r) => (r || document).querySelector(s);
   const $all = (s, r) => Array.from((r || document).querySelectorAll(s));
   function esc(s) { return s == null ? '' : String(s); }
@@ -56,37 +59,83 @@
     if (view === 'results') renderResultsState();
     if (view === 'settings') loadSettings();
   }
-  function initModalities() {
-    const grid = $('#modality-grid');
-    if (!grid) return;
-    $all('.modality-card', grid).forEach((card) => {
-      const input = card.querySelector('input[type="radio"]');
-      card.addEventListener('click', (e) => {
-        e.preventDefault();
-        $all('.modality-card', grid).forEach((c) => c.classList.remove('selected'));
-        card.classList.add('selected');
-        if (input) input.checked = true;
-      });
-    });
-  }
-  function selectedModality() {
-    const checked = document.querySelector('input[name="modality"]:checked');
-    return checked && checked.value === 'expanded' ? 'expanded' : 'standard';
-  }
   function setStatus(msg, isError) {
     const el = $('#search-status');
     if (!el) return;
     el.textContent = msg || '';
     el.style.color = isError ? 'var(--color-coral-red)' : 'var(--color-fog)';
   }
+  function stopPolling() {
+    if (activePollTimer) {
+      clearTimeout(activePollTimer);
+      activePollTimer = null;
+    }
+  }
+  function setProgress(visible, text) {
+    const box = $('#results-progress');
+    const t = $('#results-progress-text');
+    if (box) box.hidden = !visible;
+    if (t && text != null) t.textContent = text;
+  }
+  function setSummary(visible, text) {
+    const box = $('#results-summary');
+    const t = $('#results-summary-text');
+    if (box) box.hidden = !visible;
+    if (t && text != null) t.textContent = text;
+  }
+  function normalizePhoneForWa(phone) {
+    if (!phone) return '';
+    let p = String(phone).replace(/[^\d+]/g, '');
+    if (p.startsWith('00')) p = '+' + p.slice(2);
+    if (!p.startsWith('+') && p.length >= 9) p = '+' + p;
+    return p;
+  }
+  function generateContactMessage(lead) {
+    const name = (lead && lead.name) || 'empresa';
+    return 'Olá, vi o vosso contacto e gostaria de saber mais sobre os vossos serviços. É possível falar um momento? (mensagem gerada via Maps Leads Finder)';
+  }
+  function openContactModal(lead) {
+    const modal = $('#contact-modal');
+    if (!modal) return;
+    const place = $('#contact-modal-place');
+    const ta = $('#contact-message');
+    if (place) place.textContent = (lead.name || 'Lead') + (lead.phone ? ' · ' + lead.phone : '');
+    if (ta) ta.value = generateContactMessage(lead);
+    modal.dataset.phone = lead.phone || '';
+    modal.dataset.name = lead.name || '';
+    modal.hidden = false;
+  }
+  function closeContactModal() {
+    const modal = $('#contact-modal');
+    if (modal) modal.hidden = true;
+  }
+  function openWhatsApp() {
+    const modal = $('#contact-modal');
+    const ta = $('#contact-message');
+    if (!modal) return;
+    const phone = normalizePhoneForWa(modal.dataset.phone || '');
+    const text = (ta && ta.value) || '';
+    if (!phone) {
+      setStatus('Sem número de telefone para WhatsApp.', true);
+      return;
+    }
+    const url = 'https://wa.me/' + phone.replace(/\D/g, '') + '?text=' + encodeURIComponent(text);
+    window.open(url, '_blank', 'noopener');
+  }
   function renderResultsState() {
-    const body = $('#results-body'), empty = $('#results-empty'), count = $('#results-count');
-    if (!body) return;
-    body.innerHTML = '';
+    const grid = $('#results-cards');
+    const empty = $('#results-empty');
+    const count = $('#results-count');
+    if (!grid) return;
+    grid.innerHTML = '';
     if (!currentResults.length) {
       if (empty) {
         empty.hidden = false;
-        empty.textContent = (currentSearchMeta && currentSearchMeta.message) || 'Sem resultados para mostrar.';
+        const msg = (currentSearchMeta && currentSearchMeta.message) || 'Sem resultados para mostrar.';
+        const h = empty.querySelector('h3');
+        const p = empty.querySelector('p');
+        if (h) h.textContent = 'Sem resultados';
+        if (p) p.textContent = msg;
       }
       if (count) count.textContent = '0 resultados';
       return;
@@ -95,22 +144,159 @@
     if (count) count.textContent = currentResults.length + ' resultado' + (currentResults.length === 1 ? '' : 's');
     const frag = document.createDocumentFragment();
     currentResults.forEach((r) => {
-      const tr = document.createElement('tr');
-      const tdCheck = document.createElement('td');
+      const card = document.createElement('article');
+      card.className = 'result-card';
+      const photo = document.createElement('div');
+      photo.className = 'result-card-photo';
+      if (r.photoUrl || r.image) {
+        const img = document.createElement('img');
+        img.src = r.photoUrl || r.image;
+        img.alt = '';
+        img.loading = 'lazy';
+        photo.appendChild(img);
+      } else {
+        const ph = document.createElement('span');
+        ph.className = 'photo-placeholder';
+        ph.textContent = 'Sem foto';
+        photo.appendChild(ph);
+      }
+      card.appendChild(photo);
+      const body = document.createElement('div');
+      body.className = 'result-card-body';
+      const name = document.createElement('div');
+      name.className = 'result-card-name';
+      name.textContent = esc(r.name || '—');
+      body.appendChild(name);
+      function line(text) {
+        const d = document.createElement('div');
+        d.className = 'result-card-line';
+        d.textContent = esc(text == null || text === '' ? '—' : text);
+        return d;
+      }
+      body.appendChild(line(r.address));
+      body.appendChild(line(r.phone));
+      body.appendChild(line(r.email));
+      body.appendChild(line(r.website));
+      if (r.rating != null) body.appendChild(line('★ ' + r.rating + (r.reviews != null ? ' (' + r.reviews + ')' : '')));
+      card.appendChild(body);
+      const actions = document.createElement('div');
+      actions.className = 'result-card-actions';
       const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.className = 'result-check'; cb.value = r.id || '';
-      tdCheck.appendChild(cb);
-      tr.appendChild(tdCheck);
-      function cell(text) { const td = document.createElement('td'); td.textContent = esc(text == null ? '—' : text); return td; }
-      tr.appendChild(cell(r.name));
-      tr.appendChild(cell(r.address));
-      tr.appendChild(cell(r.phone));
-      tr.appendChild(cell(r.email));
-      tr.appendChild(cell(r.website));
-      tr.appendChild(cell(r.rating != null ? r.rating : '—'));
-      frag.appendChild(tr);
+      cb.type = 'checkbox';
+      cb.className = 'result-check';
+      cb.value = r.id || '';
+      cb.setAttribute('aria-label', 'Selecionar ' + (r.name || ''));
+      actions.appendChild(cb);
+      if (r.phone) {
+        const wa = document.createElement('button');
+        wa.type = 'button';
+        wa.className = 'btn btn-primary btn-sm';
+        wa.textContent = 'WhatsApp';
+        wa.addEventListener('click', () => openContactModal(r));
+        actions.appendChild(wa);
+      }
+      if (r.website) {
+        const web = document.createElement('a');
+        web.className = 'btn btn-ghost btn-sm';
+        web.href = r.website.startsWith('http') ? r.website : 'https://' + r.website;
+        web.target = '_blank';
+        web.rel = 'noopener';
+        web.textContent = 'Site';
+        actions.appendChild(web);
+      }
+      card.appendChild(actions);
+      frag.appendChild(card);
     });
-    body.appendChild(frag);
+    grid.appendChild(frag);
+  }
+  async function pollStatus(searchId) {
+    if (cancelRequested || searchId !== activeSearchId) return;
+    try {
+      const { res, data } = await api('/api/searches/' + searchId + '/status');
+      if (!res.ok) {
+        setProgress(false);
+        setStatus('Não foi possível obter o estado da pesquisa.', true);
+        stopPolling();
+        return;
+      }
+      const status = data.status || '';
+      const progressText = data.message || data.progress || ('Estado: ' + status);
+      setProgress(true, progressText);
+      if (status === 'running' || status === 'pending' || status === 'queued') {
+        activePollTimer = setTimeout(() => pollStatus(searchId), 1500);
+        return;
+      }
+      stopPolling();
+      setProgress(false);
+      if (status === 'cancelled') {
+        currentResults = [];
+        currentSearchMeta = { searchId, status: 'cancelled', message: 'Pesquisa cancelada. Nenhum resultado foi guardado.' };
+        setStatus('Pesquisa cancelada.', false);
+        setSummary(true, 'Pesquisa cancelada pelo utilizador. Nenhum resultado foi persistido.');
+        renderResultsState();
+        return;
+      }
+      if (status === 'failed' || status === 'error') {
+        currentResults = [];
+        currentSearchMeta = { searchId, status, message: data.message || 'A pesquisa falhou.' };
+        setStatus(data.message || 'A pesquisa falhou.', true);
+        setSummary(true, data.message || 'A pesquisa falhou.');
+        renderResultsState();
+        return;
+      }
+      // completed / success
+      const { res: r2, data: d2 } = await api('/api/searches/' + searchId + '/results');
+      if (!r2.ok) {
+        setStatus('Não foi possível carregar os resultados.', true);
+        return;
+      }
+      currentResults = d2.results || [];
+      currentSearchMeta = {
+        searchId,
+        status: (d2.search && d2.search.status) || status,
+        message: d2.message || '',
+        outcome: currentResults.length ? 'results' : 'empty',
+      };
+      const msg = currentResults.length
+        ? currentResults.length + ' resultado(s) encontrados.'
+        : (d2.message || 'Nenhum resultado encontrado.');
+      setStatus(msg, false);
+      setSummary(true, msg);
+      renderResultsState();
+    } catch (_) {
+      if (!cancelRequested) {
+        setStatus('Erro de rede ao consultar o estado.', true);
+      }
+      stopPolling();
+      setProgress(false);
+    }
+  }
+  async function cancelActiveSearch() {
+    if (!activeSearchId) return;
+    cancelRequested = true;
+    stopPolling();
+    try {
+      const token = await ensureCsrf();
+      await api('/api/searches/' + activeSearchId + '/cancel', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': token },
+        body: {},
+      });
+    } catch (_) {}
+    currentResults = [];
+    currentSearchMeta = { searchId: activeSearchId, status: 'cancelled', message: 'Pesquisa cancelada.' };
+    setStatus('Pesquisa cancelada.', false);
+    setProgress(false);
+    setSummary(true, 'Pesquisa cancelada. Nenhum resultado foi guardado.');
+    renderResultsState();
+    activeSearchId = null;
+    const btn = $('#btn-search');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Pesquisar';
+    }
+    const cancelBtn = $('#btn-cancel-search');
+    if (cancelBtn) cancelBtn.hidden = true;
   }
   async function submitSearch(ev) {
     ev.preventDefault();
@@ -122,29 +308,112 @@
     const hasEmail = !!document.querySelector('input[name="hasEmail"]:checked');
     const noWebsite = !!document.querySelector('input[name="noWebsite"]:checked');
     const minReviews = !!document.querySelector('input[name="minReviews"]:checked');
-    if (!String(query).trim() || !String(location).trim()) { setStatus('Preenche categoria e localização.', true); return; }
+    if (!String(query).trim() || !String(location).trim()) {
+      setStatus('Preenche categoria e localização.', true);
+      return;
+    }
+    stopPolling();
+    cancelRequested = false;
+    activeSearchId = null;
+    currentResults = [];
+    currentSearchMeta = null;
+    setSummary(false, '');
+    setProgress(false);
     const btn = $('#btn-search');
-    if (btn) btn.disabled = true;
-    setStatus('A pesquisar…');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'A iniciar…';
+    }
+    let cancelBtn = $('#btn-cancel-search');
+    if (!cancelBtn) {
+      cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.id = 'btn-cancel-search';
+      cancelBtn.className = 'btn btn-ghost';
+      cancelBtn.textContent = 'Cancelar';
+      cancelBtn.addEventListener('click', cancelActiveSearch);
+      const toolbarLeft = btn && btn.parentElement;
+      if (toolbarLeft) toolbarLeft.appendChild(cancelBtn);
+    }
+    cancelBtn.hidden = false;
+    setStatus('A iniciar pesquisa…');
+    navigate('results');
+    setProgress(true, 'A iniciar pesquisa nos fornecedores…');
     try {
       const token = await ensureCsrf();
       const { res, data } = await api('/api/searches', {
         method: 'POST',
         headers: { 'X-CSRF-Token': token },
-        body: { query: String(query).trim(), location: String(location).trim(), modality: selectedModality(), limit, minRating, hasPhone, hasEmail, noWebsite, minReviews },
+        body: {
+          query: String(query).trim(),
+          location: String(location).trim(),
+          limit,
+          minRating: minRating || null,
+          hasPhone,
+          hasEmail,
+          noWebsite,
+          minReviews,
+        },
       });
-      if (res.status === 401) { setStatus('Inicia sessão para pesquisar.', true); return; }
-      if (res.status === 403 && data && data.code === 'EMAIL_NOT_VERIFIED') { setStatus('Verifica o teu email antes de pesquisar.', true); return; }
-      if (!res.ok) { setStatus((data && data.error) || 'Falha na pesquisa.', true); return; }
-      currentResults = data.results || [];
-      currentSearchMeta = { searchId: data.searchId, status: data.status, outcome: data.outcome, message: data.message };
-      setStatus(data.outcome === 'results' ? currentResults.length + ' resultado(s).' : data.message || '');
-      renderResultsState();
-      navigate('results');
+      if (res.status === 401) {
+        setStatus('Inicia sessão para pesquisar.', true);
+        setProgress(false);
+        return;
+      }
+      if (res.status === 403 && data && data.code === 'EMAIL_NOT_VERIFIED') {
+        setStatus('Verifica o teu email antes de pesquisar.', true);
+        setProgress(false);
+        return;
+      }
+      if (res.status === 402 || (data && data.code === 'QUOTA')) {
+        setStatus((data && data.error) || 'Quota esgotada.', true);
+        setProgress(false);
+        return;
+      }
+      if (!res.ok) {
+        setStatus((data && data.error) || 'Falha na pesquisa.', true);
+        setProgress(false);
+        return;
+      }
+      const searchId = data.searchId || data.id;
+      if (!searchId) {
+        setStatus('Resposta inválida do servidor.', true);
+        setProgress(false);
+        return;
+      }
+      activeSearchId = searchId;
+      currentSearchMeta = { searchId, status: data.status || 'running' };
+      setStatus('Pesquisa em curso…');
+      setProgress(true, data.message || 'A recolher dados de múltiplos fornecedores…');
+      if (btn) btn.textContent = 'A pesquisar…';
+      // If already completed synchronously
+      if (data.status === 'completed' || data.results) {
+        currentResults = data.results || [];
+        currentSearchMeta = {
+          searchId,
+          status: 'completed',
+          message: data.message || '',
+          outcome: currentResults.length ? 'results' : 'empty',
+        };
+        setProgress(false);
+        const msg = currentResults.length
+          ? currentResults.length + ' resultado(s).'
+          : (data.message || 'Nenhum resultado.');
+        setStatus(msg, false);
+        setSummary(true, msg);
+        renderResultsState();
+        return;
+      }
+      pollStatus(searchId);
     } catch (_) {
       setStatus('Não foi possível realizar a pesquisa. Tenta novamente.', true);
+      setProgress(false);
     } finally {
-      if (btn) btn.disabled = false;
+      if (btn && !activeSearchId) {
+        btn.disabled = false;
+        btn.textContent = 'Pesquisar';
+      }
+      if (cancelBtn && !activeSearchId) cancelBtn.hidden = true;
     }
   }
   function formatDate(v) {
@@ -222,6 +491,8 @@
     if (!res.ok) return;
     currentResults = data.results || [];
     currentSearchMeta = { searchId: id, status: data.search && data.search.status };
+    setSummary(false, '');
+    setProgress(false);
     renderResultsState();
     navigate('results');
   }
@@ -430,7 +701,7 @@
           }
         } catch (_) {
           if (err) {
-            err.textContent = 'Erro de rede. Tente novamente.';
+            err.textContent = 'Erro de rede. Tenta novamente.';
             err.classList.add('visible');
           }
         } finally {
@@ -442,44 +713,57 @@
   }
 
   function init() {
-    $all('.nav-item').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        if (btn.disabled) return;
-        const view = btn.getAttribute('data-view');
-        if (view && titles[view]) navigate(view);
+    const form = $('#search-form');
+    if (form) form.addEventListener('submit', submitSearch);
+    const selectAll = $('#select-all');
+    if (selectAll) {
+      selectAll.addEventListener('change', () => {
+        $all('.result-check').forEach((c) => { c.checked = selectAll.checked; });
       });
+    }
+    const saveBtn = $('#btn-save-leads');
+    if (saveBtn) saveBtn.addEventListener('click', saveSelectedLeads);
+    $all('[data-close-modal]').forEach((el) => {
+      el.addEventListener('click', closeContactModal);
     });
-    const menuBtn = $('#btn-menu') || $('#mobile-toggle');
+    const regen = $('#btn-regen-message');
+    if (regen) {
+      regen.addEventListener('click', () => {
+        const modal = $('#contact-modal');
+        const ta = $('#contact-message');
+        if (ta && modal) {
+          ta.value = generateContactMessage({ name: modal.dataset.name, phone: modal.dataset.phone });
+        }
+      });
+    }
+    const waBtn = $('#btn-open-whatsapp');
+    if (waBtn) waBtn.addEventListener('click', openWhatsApp);
+    const mobileToggle = $('#mobile-toggle');
+    const sidebar = $('#sidebar');
     const overlay = $('#sidebar-overlay');
-    if (menuBtn) {
-      menuBtn.addEventListener('click', () => {
-        const sidebar = $('#sidebar');
-        if (sidebar) sidebar.classList.toggle('open');
-        if (overlay) { overlay.classList.toggle('open'); overlay.setAttribute('aria-hidden', overlay.classList.contains('open') ? 'false' : 'true'); }
+    if (mobileToggle && sidebar) {
+      mobileToggle.addEventListener('click', () => {
+        sidebar.classList.toggle('open');
+        if (overlay) {
+          const open = sidebar.classList.contains('open');
+          overlay.classList.toggle('open', open);
+          overlay.setAttribute('aria-hidden', open ? 'false' : 'true');
+        }
       });
     }
     if (overlay) {
       overlay.addEventListener('click', () => {
-        const sidebar = $('#sidebar');
         if (sidebar) sidebar.classList.remove('open');
         overlay.classList.remove('open');
         overlay.setAttribute('aria-hidden', 'true');
       });
     }
-    initModalities();
-    const form = $('#search-form');
-    if (form) form.addEventListener('submit', submitSearch);
-    const filterInput = $('#results-filter');
-    if (filterInput) {
-      filterInput.addEventListener('input', () => {
-        const q = filterInput.value.trim().toLowerCase();
-        $all('#results-body tr').forEach((tr) => { tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? '' : 'none'; });
+    $all('.nav-item').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const view = btn.getAttribute('data-view');
+        if (view && !btn.disabled) navigate(view);
       });
-    }
-    const selectAll = $('#select-all');
-    if (selectAll) selectAll.addEventListener('change', () => { $all('.result-check').forEach((c) => { c.checked = selectAll.checked; }); });
-    const saveBtn = $('#btn-save-leads');
-    if (saveBtn) saveBtn.addEventListener('click', saveSelectedLeads);
+    });
     initPasswordResetRequest();
     const hash = (location.hash || '#dashboard').replace('#', '');
     navigate(titles[hash] ? hash : 'dashboard');
