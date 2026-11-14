@@ -1,9 +1,9 @@
 /**
  * Apify adapter — input shape is actor-specific and env-configurable.
  * Never log tokens. JSON template substitution escapes string values.
- * Supports AbortSignal and run abort via Apify API.
+ * Starts run without waitForFinish so runId is known immediately,
+ * then polls until terminal status. AbortSignal triggers real Actor abort.
  */
-
 const {
   withTimeout,
   notConfigured,
@@ -13,6 +13,8 @@ const {
 } = require('./baseProvider');
 
 const CODE = 'apify';
+const POLL_INTERVAL_MS = 2000;
+const MAX_WAIT_MS = 120000;
 
 function isConfigured() {
   return Boolean(
@@ -86,6 +88,27 @@ async function abortRun(runId) {
   }
 }
 
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      const err = new Error('cancelled');
+      err.code = 'CANCELLED';
+      reject(err);
+      return;
+    }
+    const t = setTimeout(resolve, ms);
+    if (signal) {
+      const onAbort = () => {
+        clearTimeout(t);
+        const err = new Error('cancelled');
+        err.code = 'CANCELLED';
+        reject(err);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
 /**
  * @param {object} criteria
  * @param {{ signal?: AbortSignal }} [opts]
@@ -93,11 +116,21 @@ async function abortRun(runId) {
 async function search(criteria, opts = {}) {
   if (!isConfigured()) return notConfigured(CODE);
   const signal = opts.signal;
+  let runId = null;
+  let abortListener = null;
+
+  const cleanup = () => {
+    if (signal && abortListener) {
+      try { signal.removeEventListener('abort', abortListener); } catch (_) {}
+      abortListener = null;
+    }
+  };
 
   try {
     if (signal && signal.aborted) {
       return errorResult('CANCELLED', 'Apify search cancelled');
     }
+
     const actorId = process.env.APIFY_ACTOR_ID;
     const token = process.env.APIFY_TOKEN;
     let body;
@@ -107,7 +140,8 @@ async function search(criteria, opts = {}) {
       return errorResult('APIFY_INPUT_INVALID', e.message || 'invalid APIFY_INPUT_JSON');
     }
 
-    const startUrl = `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs?token=${encodeURIComponent(token)}&waitForFinish=120`;
+    // Start without waitForFinish so we get runId immediately
+    const startUrl = `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs?token=${encodeURIComponent(token)}`;
     const startRes = await withTimeout(
       fetch(startUrl, {
         method: 'POST',
@@ -117,51 +151,91 @@ async function search(criteria, opts = {}) {
       }).then(async (res) => {
         if (!res.ok) {
           const text = await res.text().catch(() => '');
-          throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 200)}`), { code: 'HTTP_ERROR', httpStatus: res.status });
+          throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 200)}`), {
+            code: 'HTTP_ERROR',
+            httpStatus: res.status,
+          });
         }
         return res.json();
       }),
-      Math.max(DEFAULT_TIMEOUT_MS, 130000),
+      Math.max(DEFAULT_TIMEOUT_MS, 30000),
       CODE
     );
 
     const run = startRes.data || startRes;
-    const runId = run.id || run.runId || null;
+    runId = run.id || run.runId || null;
+
+    if (!runId) {
+      return errorResult('PROVIDER_ERROR', 'Apify did not return a run id');
+    }
+
+    // Attach abort as soon as we have the runId
     if (signal) {
-      const onAbort = () => { if (runId) abortRun(runId); };
+      abortListener = () => {
+        abortRun(runId).catch(() => {});
+      };
       if (signal.aborted) {
-        if (runId) await abortRun(runId);
+        await abortRun(runId);
+        cleanup();
         return errorResult('CANCELLED', 'Apify search cancelled');
       }
-      signal.addEventListener('abort', onAbort, { once: true });
+      signal.addEventListener('abort', abortListener, { once: true });
     }
 
-    const status = run.status || run.statusMessage;
-    if (status === 'ABORTED' || status === 'TIMED-OUT' || status === 'FAILED') {
-      return errorResult('PROVIDER_ERROR', `Apify run ${status}`);
-    }
+    // Poll until terminal or timeout
+    const terminal = new Set(['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT', 'ABORTING']);
+    const startedAt = Date.now();
+    let current = run;
 
-    const datasetId = run.defaultDatasetId || run.datasetId;
-    if (!datasetId) {
-      const syncUrl = `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
-      const data = await withTimeout(
-        fetch(syncUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal,
-        }).then(async (res) => {
+    while (!terminal.has(String(current.status || '').toUpperCase())) {
+      if (signal && signal.aborted) {
+        await abortRun(runId);
+        cleanup();
+        return errorResult('CANCELLED', 'Apify search cancelled');
+      }
+      if (Date.now() - startedAt > MAX_WAIT_MS) {
+        await abortRun(runId);
+        cleanup();
+        return errorResult('PROVIDER_ERROR', 'Apify run timed out');
+      }
+      await sleep(POLL_INTERVAL_MS, signal);
+      const statusUrl = `https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}?token=${encodeURIComponent(token)}`;
+      const statusRes = await withTimeout(
+        fetch(statusUrl, { headers: { Accept: 'application/json' }, signal }).then(async (res) => {
           if (!res.ok) {
             const text = await res.text().catch(() => '');
-            throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 200)}`), { code: 'HTTP_ERROR' });
+            throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 200)}`), {
+              code: 'HTTP_ERROR',
+              httpStatus: res.status,
+            });
           }
           return res.json();
         }),
-        Math.max(DEFAULT_TIMEOUT_MS, 90000),
+        Math.max(DEFAULT_TIMEOUT_MS, 15000),
         CODE
       );
-      const list = Array.isArray(data) ? data : [];
-      return okResult(list.map((p, idx) => mapItem(p, idx, criteria)));
+      current = statusRes.data || statusRes;
+    }
+
+    const status = String(current.status || '').toUpperCase();
+    if (status === 'ABORTED' || status === 'ABORTING') {
+      cleanup();
+      return errorResult('CANCELLED', 'Apify search cancelled');
+    }
+    if (status === 'FAILED' || status === 'TIMED-OUT') {
+      cleanup();
+      return errorResult('PROVIDER_ERROR', `Apify run ${status}`);
+    }
+
+    const datasetId = current.defaultDatasetId || current.datasetId;
+    if (!datasetId) {
+      cleanup();
+      return errorResult('PROVIDER_ERROR', 'Apify run finished without dataset');
+    }
+
+    if (signal && signal.aborted) {
+      cleanup();
+      return errorResult('CANCELLED', 'Apify search cancelled');
     }
 
     const itemsUrl = `https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?token=${encodeURIComponent(token)}&clean=true&format=json`;
@@ -169,13 +243,17 @@ async function search(criteria, opts = {}) {
       fetch(itemsUrl, { headers: { Accept: 'application/json' }, signal }).then(async (res) => {
         if (!res.ok) {
           const text = await res.text().catch(() => '');
-          throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 200)}`), { code: 'HTTP_ERROR' });
+          throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 200)}`), {
+            code: 'HTTP_ERROR',
+          });
         }
         return res.json();
       }),
       Math.max(DEFAULT_TIMEOUT_MS, 60000),
       CODE
     );
+
+    cleanup();
 
     if (signal && signal.aborted) {
       return errorResult('CANCELLED', 'Apify search cancelled');
@@ -184,6 +262,10 @@ async function search(criteria, opts = {}) {
     const list = Array.isArray(data) ? data : [];
     return okResult(list.map((p, idx) => mapItem(p, idx, criteria)));
   } catch (err) {
+    cleanup();
+    if (runId && err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
+      try { await abortRun(runId); } catch (_) {}
+    }
     if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
       return errorResult('CANCELLED', 'Apify search cancelled');
     }
