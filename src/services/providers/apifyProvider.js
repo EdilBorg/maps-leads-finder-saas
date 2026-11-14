@@ -1,6 +1,7 @@
 /**
  * Apify adapter — input shape is actor-specific and env-configurable.
  * Never log tokens. JSON template substitution escapes string values.
+ * Supports AbortSignal and run abort via Apify API.
  */
 
 const {
@@ -73,13 +74,32 @@ function mapItem(p, idx, criteria) {
   };
 }
 
-async function search(criteria) {
+async function abortRun(runId) {
+  if (!runId || !isConfigured()) return false;
+  try {
+    const token = process.env.APIFY_TOKEN;
+    const url = `https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}/abort?token=${encodeURIComponent(token)}`;
+    await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * @param {object} criteria
+ * @param {{ signal?: AbortSignal }} [opts]
+ */
+async function search(criteria, opts = {}) {
   if (!isConfigured()) return notConfigured(CODE);
+  const signal = opts.signal;
 
   try {
+    if (signal && signal.aborted) {
+      return errorResult('CANCELLED', 'Apify search cancelled');
+    }
     const actorId = process.env.APIFY_ACTOR_ID;
     const token = process.env.APIFY_TOKEN;
-    const url = `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
     let body;
     try {
       body = buildActorInput(criteria);
@@ -87,27 +107,86 @@ async function search(criteria) {
       return errorResult('APIFY_INPUT_INVALID', e.message || 'invalid APIFY_INPUT_JSON');
     }
 
-    const data = await withTimeout(
-      fetch(url, {
+    const startUrl = `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs?token=${encodeURIComponent(token)}&waitForFinish=120`;
+    const startRes = await withTimeout(
+      fetch(startUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify(body),
+        signal,
       }).then(async (res) => {
         if (!res.ok) {
           const text = await res.text().catch(() => '');
-          throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 200)}`), {
-            code: 'HTTP_ERROR',
-          });
+          throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 200)}`), { code: 'HTTP_ERROR', httpStatus: res.status });
         }
         return res.json();
       }),
-      Math.max(DEFAULT_TIMEOUT_MS, 90000),
+      Math.max(DEFAULT_TIMEOUT_MS, 130000),
       CODE
     );
+
+    const run = startRes.data || startRes;
+    const runId = run.id || run.runId || null;
+    if (signal) {
+      const onAbort = () => { if (runId) abortRun(runId); };
+      if (signal.aborted) {
+        if (runId) await abortRun(runId);
+        return errorResult('CANCELLED', 'Apify search cancelled');
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    const status = run.status || run.statusMessage;
+    if (status === 'ABORTED' || status === 'TIMED-OUT' || status === 'FAILED') {
+      return errorResult('PROVIDER_ERROR', `Apify run ${status}`);
+    }
+
+    const datasetId = run.defaultDatasetId || run.datasetId;
+    if (!datasetId) {
+      const syncUrl = `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+      const data = await withTimeout(
+        fetch(syncUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal,
+        }).then(async (res) => {
+          if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 200)}`), { code: 'HTTP_ERROR' });
+          }
+          return res.json();
+        }),
+        Math.max(DEFAULT_TIMEOUT_MS, 90000),
+        CODE
+      );
+      const list = Array.isArray(data) ? data : [];
+      return okResult(list.map((p, idx) => mapItem(p, idx, criteria)));
+    }
+
+    const itemsUrl = `https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items?token=${encodeURIComponent(token)}&clean=true&format=json`;
+    const data = await withTimeout(
+      fetch(itemsUrl, { headers: { Accept: 'application/json' }, signal }).then(async (res) => {
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 200)}`), { code: 'HTTP_ERROR' });
+        }
+        return res.json();
+      }),
+      Math.max(DEFAULT_TIMEOUT_MS, 60000),
+      CODE
+    );
+
+    if (signal && signal.aborted) {
+      return errorResult('CANCELLED', 'Apify search cancelled');
+    }
 
     const list = Array.isArray(data) ? data : [];
     return okResult(list.map((p, idx) => mapItem(p, idx, criteria)));
   } catch (err) {
+    if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
+      return errorResult('CANCELLED', 'Apify search cancelled');
+    }
     return errorResult(err.code || 'PROVIDER_ERROR', err.message || 'apify failed');
   }
 }
@@ -116,6 +195,7 @@ module.exports = {
   code: CODE,
   isConfigured,
   search,
+  abortRun,
   buildActorInput,
   escapeJsonString,
   mapItem,
