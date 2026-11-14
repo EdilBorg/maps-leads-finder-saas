@@ -90,13 +90,19 @@ describe('frontend account UI contract', () => {
     const css = fs.readFileSync(path.join(root, 'public/css/main.css'), 'utf8');
     const html = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
     assert.match(css, /overflow-x:\s*auto/);
-    assert.match(css, /table-wrap-results[\s\S]*min-width:\s*920px/);
+    // Results view is a responsive card grid (not a data table).
+    assert.match(html, /id="results-cards"/);
+    assert.match(html, /results-cards-grid/);
+    // History and saved leads still use table-wrap with horizontal scroll rules.
     assert.match(css, /table-wrap-history[\s\S]*min-width:\s*720px/);
     assert.match(css, /table-wrap-leads[\s\S]*min-width:\s*720px/);
-    assert.doesNotMatch(css, /table\.data td,\s*table\.data th\s*\{\s*max-width:\s*240px/);
-    assert.match(html, /table-wrap-results/);
     assert.match(html, /table-wrap-history/);
     assert.match(html, /table-wrap-leads/);
+    // CSS may still define table-wrap-results; if present, keep min-width contract.
+    if (/table-wrap-results/.test(css)) {
+      assert.match(css, /table-wrap-results[\s\S]*min-width:\s*920px/);
+    }
+    assert.doesNotMatch(css, /table\.data td,\s*table\.data th\s*\{\s*max-width:\s*240px/);
   });
 
   it('masks recovery email in UI but keeps full email for API body', () => {
