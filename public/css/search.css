@@ -1,7 +1,36 @@
-/* Search form + uniform result cards */
+/* Search form + uniform result cards — dark theme consistent */
 
 .modality-grid { display: none !important; }
 
+/* Force dark color-scheme so native <select> option lists match the app */
+html {
+  color-scheme: dark;
+}
+
+.select,
+select.select,
+select {
+  background-color: var(--surface-elevated, #161718) !important;
+  color: var(--color-mist, #d0d6e0) !important;
+  border-color: var(--color-graphite, #23252a) !important;
+  color-scheme: dark;
+}
+
+.select option,
+select option {
+  background-color: var(--surface-elevated, #161718);
+  color: var(--color-mist, #d0d6e0);
+}
+
+.select option:checked,
+select option:checked,
+.select option:hover,
+select option:hover {
+  background-color: var(--surface-interactive, #23252a);
+  color: var(--color-paper, #ffffff);
+}
+
+/* Result cards grid */
 .results-cards-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -22,16 +51,17 @@
   display: flex;
   flex-direction: column;
   height: 360px;
-  background: var(--color-surface, #fff);
-  border: 1px solid var(--color-border, #e5e7eb);
-  border-radius: 12px;
+  background: var(--surface-panel, #0f1011);
+  border: 1px solid var(--color-graphite, #23252a);
+  border-radius: var(--radius-cards, 12px);
   overflow: hidden;
+  box-shadow: var(--shadow-subtle, rgb(35, 37, 42) 0px 0px 0px 1px inset);
 }
 
 .result-card-photo {
   height: 120px;
   flex-shrink: 0;
-  background: #eef2f7;
+  background: var(--surface-elevated, #161718);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -44,7 +74,7 @@
 }
 .result-card-photo .photo-placeholder {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--color-ash, #62666d);
 }
 
 .result-card-body {
@@ -60,6 +90,7 @@
   font-weight: 600;
   font-size: 14px;
   line-height: 1.3;
+  color: var(--color-paper, #ffffff);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -69,7 +100,7 @@
 
 .result-card-line {
   font-size: 12px;
-  color: var(--color-muted, #64748b);
+  color: var(--color-fog, #8a8f98);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -83,6 +114,7 @@
   gap: 8px;
   flex-wrap: wrap;
   align-items: center;
+  border-top: 1px solid var(--color-graphite, #23252a);
 }
 
 .result-card-actions .btn { font-size: 12px; padding: 6px 10px; }
@@ -91,10 +123,52 @@
   display: flex;
   gap: 8px;
   justify-content: center;
+  align-items: center;
   margin-top: 20px;
   flex-wrap: wrap;
+  color: var(--color-fog, #8a8f98);
+  font-size: 13px;
 }
 
+.results-pagination .btn {
+  min-width: 36px;
+}
+
+/* Provider progress chips */
+.provider-status-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.provider-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-inputs, 6px);
+  border: 1px solid var(--color-graphite, #23252a);
+  background: var(--surface-elevated, #161718);
+  font-size: 12px;
+  color: var(--color-fog, #8a8f98);
+}
+.provider-status-chip .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-ash, #62666d);
+  flex-shrink: 0;
+}
+.provider-status-chip.running .dot { background: var(--color-signal-teal, #02b8cc); }
+.provider-status-chip.ok .dot,
+.provider-status-chip.completed .dot { background: var(--color-pulse-green, #27a644); }
+.provider-status-chip.empty .dot { background: var(--color-ash, #62666d); }
+.provider-status-chip.error .dot,
+.provider-status-chip.failed .dot { background: var(--color-coral-red, #eb5757); }
+.provider-status-chip.cancelled .dot { background: var(--color-fog, #8a8f98); }
+.provider-status-chip.not_configured .dot { background: var(--color-smoke, #383b3f); }
+
+/* Modal — dark theme */
 .modal {
   position: fixed;
   inset: 0;
@@ -107,18 +181,44 @@
 .modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(15, 23, 42, 0.45);
+  background: rgba(0, 0, 0, 0.65);
 }
 .modal-panel {
   position: relative;
-  background: #fff;
-  border-radius: 12px;
+  background: var(--surface-panel, #0f1011);
+  border: 1px solid var(--color-graphite, #23252a);
+  border-radius: var(--radius-cards, 12px);
   padding: 20px;
   width: min(480px, 92vw);
-  box-shadow: 0 20px 50px rgba(0,0,0,0.2);
+  box-shadow: var(--shadow-sm, rgba(0, 0, 0, 0.4) 0px 2px 4px 0px);
+  color: var(--color-mist, #d0d6e0);
 }
-.modal-panel textarea.input {
+.modal-panel h3 {
+  margin: 0 0 8px;
+  color: var(--color-paper, #ffffff);
+  font-size: 16px;
+  font-weight: 500;
+}
+.modal-panel textarea.input,
+.modal-panel .input,
+.modal-panel .select {
   width: 100%;
   resize: vertical;
   min-height: 100px;
+  background: var(--surface-elevated, #161718);
+  border: 1px solid var(--color-graphite, #23252a);
+  color: var(--color-mist, #d0d6e0);
+  border-radius: var(--radius-inputs, 6px);
+}
+.modal-panel textarea.input:focus,
+.modal-panel .input:focus {
+  outline: none;
+  border-color: var(--color-mist, #d0d6e0);
+}
+
+/* Progress / summary boxes stay on panel surface */
+#results-progress,
+#results-summary {
+  background: var(--surface-panel, #0f1011);
+  border: 1px solid var(--color-graphite, #23252a);
 }
