@@ -1,24 +1,20 @@
 /**
- * Search API — authenticated, CSRF on mutations, no provider names in responses.
+ * Search API — authenticated, CSRF on mutations.
+ * Async start + status + cancel + results.
  */
-
 const express = require('express');
 const { requireAuth, requireVerifiedEmail } = require('../middleware/auth');
 const { requireCsrf } = require('../middleware/csrf');
 const searchService = require('../services/searchService');
+const { ALLOWED_LIMITS, normalizeLimit } = require('../services/searchEngine');
 
 const router = express.Router();
-
-function parseModality(value) {
-  return value === 'expanded' ? 'expanded' : 'standard';
-}
 
 router.post('/', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
   try {
     const query = String(req.body.query || req.body.category || '').trim();
     const location = String(req.body.location || '').trim();
-    const modality = parseModality(req.body.modality);
-    const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 100, 1), 500);
+    const limit = normalizeLimit(req.body.limit);
     const filters = {
       hasPhone: Boolean(req.body.hasPhone),
       hasEmail: Boolean(req.body.hasEmail),
@@ -33,10 +29,12 @@ router.post('/', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res
     if (!location || location.length < 2) {
       return res.status(400).json({ error: 'Indica uma localização.' });
     }
+    if (!ALLOWED_LIMITS.includes(limit)) {
+      return res.status(400).json({ error: 'Limite inválido. Usa 100, 200, 300, 400 ou 500.' });
+    }
 
-    const result = await searchService.runAndPersist({
+    const result = await searchService.startSearch({
       userId: req.session.userId,
-      modality,
       query,
       location,
       filters,
@@ -104,6 +102,31 @@ router.post('/leads/save', requireAuth, requireVerifiedEmail, requireCsrf, async
         createdAt: s.created_at,
       })),
     });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get('/:id/status', requireAuth, requireVerifiedEmail, async (req, res, next) => {
+  try {
+    const data = await searchService.getSearchStatus(req.session.userId, req.params.id);
+    if (!data) return res.status(404).json({ error: 'Pesquisa não encontrada.' });
+    return res.json(data);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post('/:id/cancel', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    const result = await searchService.cancelSearch(req.session.userId, req.params.id);
+    if (!result.ok && result.reason === 'not_found') {
+      return res.status(404).json({ error: 'Pesquisa não encontrada.' });
+    }
+    if (!result.ok && result.reason === 'not_running') {
+      return res.status(409).json({ error: 'A pesquisa já não está em execução.', status: result.status });
+    }
+    return res.json({ searchId: req.params.id, status: 'cancelled' });
   } catch (err) {
     return next(err);
   }
