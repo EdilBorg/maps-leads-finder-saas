@@ -72,6 +72,7 @@ BEGIN
 
   -- Reference constraints with the exact expected SQL (same column name "status").
   -- pg_get_expr yields the server-normalized form for reliable comparison.
+  -- Lookups are restricted to this session's temporary schema only.
   CREATE TEMP TABLE _m010_ref_old (
     status text NOT NULL,
     CONSTRAINT _m010_ref_old_chk
@@ -88,14 +89,18 @@ BEGIN
     INTO expected_old
   FROM pg_constraint c
   JOIN pg_class t ON c.conrelid = t.oid
-  WHERE t.relname = '_m010_ref_old'
+  JOIN pg_namespace n ON t.relnamespace = n.oid
+  WHERE n.oid = pg_my_temp_schema()
+    AND t.relname = '_m010_ref_old'
     AND c.conname = '_m010_ref_old_chk';
 
   SELECT pg_get_expr(c.conbin, c.conrelid)
     INTO expected_new
   FROM pg_constraint c
   JOIN pg_class t ON c.conrelid = t.oid
-  WHERE t.relname = '_m010_ref_new'
+  JOIN pg_namespace n ON t.relnamespace = n.oid
+  WHERE n.oid = pg_my_temp_schema()
+    AND t.relname = '_m010_ref_new'
     AND c.conname = '_m010_ref_new_chk';
 
   IF expected_old IS NULL OR expected_new IS NULL THEN
