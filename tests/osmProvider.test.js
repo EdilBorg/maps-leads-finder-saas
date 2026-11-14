@@ -14,6 +14,8 @@ const {
   resolveOverpassEndpoints,
   extractRemarkError,
   isTransientError,
+  splitBboxIntoCells,
+  DEFAULT_OVERPASS_ENDPOINTS,
 } = require('../src/services/providers/osmProvider');
 
 describe('osmProvider normalize + resolveCategory', () => {
@@ -243,17 +245,42 @@ describe('osmProvider endpoints and helpers', () => {
     process.env = { ...ORIGINAL_ENV };
   });
 
-  it('resolveOverpassEndpoints uses OSM_OVERPASS_URL when set', () => {
-    process.env.OSM_OVERPASS_URL = 'https://custom.example/api/interpreter';
-    const eps = resolveOverpassEndpoints();
-    assert.deepEqual(eps, ['https://custom.example/api/interpreter']);
-  });
-
-  it('resolveOverpassEndpoints returns defaults when unset', () => {
+  it('resolveOverpassEndpoints puts VK Maps first by default', () => {
     delete process.env.OSM_OVERPASS_URL;
     const eps = resolveOverpassEndpoints();
-    assert.ok(eps.length >= 2);
+    assert.ok(eps.length >= 3);
+    assert.match(eps[0], /maps\.mail\.ru|vk/i);
     assert.ok(eps.some((e) => e.includes('overpass-api.de')));
+    assert.ok(eps.some((e) => e.includes('private.coffee') || e.includes('lz4')));
+  });
+
+  it('resolveOverpassEndpoints prepends OSM_OVERPASS_URL without dropping fallbacks', () => {
+    process.env.OSM_OVERPASS_URL = 'https://custom.example/api/interpreter';
+    const eps = resolveOverpassEndpoints();
+    assert.equal(eps[0], 'https://custom.example/api/interpreter');
+    assert.ok(eps.length >= 2);
+    assert.ok(eps.some((e) => e.includes('overpass-api.de') || e.includes('maps.mail.ru')));
+  });
+
+  it('splitBboxIntoCells divides large country bbox', () => {
+    // Rough Portugal-sized box
+    const cells = splitBboxIntoCells(
+      { south: 36.9, north: 42.2, west: -9.5, east: -6.2 },
+      0.25
+    );
+    assert.ok(cells.length > 4);
+    for (const c of cells) {
+      assert.ok(c.north - c.south <= 0.25 + 1e-9);
+      assert.ok(c.east - c.west <= 0.25 + 1e-9);
+    }
+  });
+
+  it('splitBboxIntoCells returns one cell for small bbox', () => {
+    const cells = splitBboxIntoCells(
+      { south: 38.7, north: 38.8, west: -9.2, east: -9.1 },
+      0.25
+    );
+    assert.equal(cells.length, 1);
   });
 
   it('extractRemarkError detects error remarks', () => {

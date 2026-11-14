@@ -10,11 +10,22 @@ const OSM_OVERPASS_TIMEOUT_MS = 45000;
 const OSM_GEOCODE_TIMEOUT_MS = 15000;
 const OVERPASS_SERVER_TIMEOUT_S = 25;
 
+/** VK Maps first, then public Overpass mirrors. */
 const DEFAULT_OVERPASS_ENDPOINTS = [
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass-api.de/api/interpreter',
   'https://lz4.overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
 ];
+
+/** Max bbox span (degrees) for a single Overpass query before cell split. */
+const CELL_MAX_SPAN_DEG = parseFloat(process.env.OSM_CELL_MAX_SPAN_DEG || '0.25') || 0.25;
+/** Max cells processed in one search() invocation. */
+const MAX_CELLS_PER_SEARCH = Math.min(Math.max(parseInt(process.env.OSM_MAX_CELLS_PER_SEARCH || '16', 10) || 16, 1), 64);
+/** Concurrent cell queries. */
+const CELL_CONCURRENCY = Math.min(Math.max(parseInt(process.env.OSM_CELL_CONCURRENCY || '2', 10) || 2, 1), 4);
+/** Delay between cell batches (ms). */
+const CELL_BATCH_DELAY_MS = Math.min(Math.max(parseInt(process.env.OSM_CELL_BATCH_DELAY_MS || '200', 10) || 200, 0), 5000);
 
 const TRANSIENT_HTTP = new Set([429, 502, 503, 504]);
 const TRANSIENT_NET = new Set([
@@ -443,18 +454,45 @@ function groupTagsByKey(tags) {
 }
 
 /**
- * Build area filter: prefer bbox when available and not excessively large,
- * else around:radius (preserves OSM_SEARCH_RADIUS_M for city-scale locations).
- * Bbox larger than ~0.4° (~45km) falls back to around to avoid Overpass timeouts.
+ * Split a bounding box into cells of at most maxSpan degrees on each side.
+ * Used for city/region/country-scale searches so each Overpass query stays small.
+ */
+function splitBboxIntoCells(bbox, maxSpan = CELL_MAX_SPAN_DEG) {
+  if (!bbox) return [];
+  const { south, west, north, east } = bbox;
+  const latSpan = north - south;
+  const lonSpan = east - west;
+  if (!(latSpan > 0) || !(lonSpan > 0)) return [];
+  const rows = Math.max(1, Math.ceil(latSpan / maxSpan));
+  const cols = Math.max(1, Math.ceil(lonSpan / maxSpan));
+  const cellH = latSpan / rows;
+  const cellW = lonSpan / cols;
+  const cells = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      cells.push({
+        south: south + r * cellH,
+        north: south + (r + 1) * cellH,
+        west: west + c * cellW,
+        east: west + (c + 1) * cellW,
+        row: r,
+        col: c,
+      });
+    }
+  }
+  return cells;
+}
+
+/**
+ * Build Overpass area filter for a geo target.
+ * - Small bbox: use bbox directly.
+ * - Large bbox: caller should split into cells; single-cell path still uses bbox.
+ * - No bbox: around:radius from center.
  */
 function areaFilter(geo, radius) {
   if (geo && geo.bbox) {
     const { south, west, north, east } = geo.bbox;
-    const latSpan = north - south;
-    const lonSpan = east - west;
-    if (latSpan <= 0.4 && lonSpan <= 0.4) {
-      return `(${south},${west},${north},${east})`;
-    }
+    return `(${south},${west},${north},${east})`;
   }
   return `(around:${radius},${geo.lat},${geo.lon})`;
 }
@@ -563,11 +601,20 @@ function mapElement(el, criteria) {
 }
 
 function resolveOverpassEndpoints() {
-  const single = process.env.OSM_OVERPASS_URL;
-  if (single && String(single).trim()) {
-    return [String(single).trim()];
+  const list = DEFAULT_OVERPASS_ENDPOINTS.slice();
+  const extra = process.env.OSM_OVERPASS_URL;
+  if (extra && String(extra).trim()) {
+    const url = String(extra).trim();
+    // Prepend custom URL if not already first; keep full fallback chain.
+    if (!list.includes(url)) {
+      list.unshift(url);
+    } else {
+      // Move to front
+      list.splice(list.indexOf(url), 1);
+      list.unshift(url);
+    }
   }
-  return DEFAULT_OVERPASS_ENDPOINTS.slice();
+  return list;
 }
 
 /**
@@ -714,6 +761,22 @@ async function fetchOverpassWithFallback(ql, timeoutMs) {
   });
 }
 
+/**
+ * Query one geographic cell (or full area when no split).
+ * Returns mapped leads; throws only on hard failure of all endpoints.
+ */
+async function queryCell(criteria, geo, radius, limit) {
+  const ql = buildOverpassQuery(criteria.query, radius, geo.lat, geo.lon, limit, geo);
+  const data = await fetchOverpassWithFallback(ql, OSM_OVERPASS_TIMEOUT_MS);
+  const elements = Array.isArray(data.elements) ? data.elements : [];
+  const mapped = [];
+  for (const el of elements) {
+    const item = mapElement(el, criteria);
+    if (item) mapped.push(item);
+  }
+  return mapped;
+}
+
 async function search(criteria) {
   if (!isConfigured()) {
     return { status: 'not_configured', results: [], errorCode: 'NOT_CONFIGURED', errorMessage: 'OSM disabled' };
@@ -728,36 +791,94 @@ async function search(criteria) {
       25000
     );
     const limit = Math.min(criteria.limit || 50, 100);
-    const ql = buildOverpassQuery(
-      criteria.query,
-      radius,
-      center.lat,
-      center.lon,
-      limit,
-      center
-    );
 
-    let data;
-    try {
-      data = await fetchOverpassWithFallback(ql, OSM_OVERPASS_TIMEOUT_MS);
-    } catch (err) {
-      if (err && !err.errorStage) err.errorStage = 'overpass';
-      throw err;
+    // Build list of geo targets (cells or single area)
+    let geos = [];
+    if (center.bbox) {
+      const { south, north, west, east } = center.bbox;
+      const latSpan = north - south;
+      const lonSpan = east - west;
+      if (latSpan > CELL_MAX_SPAN_DEG || lonSpan > CELL_MAX_SPAN_DEG) {
+        let cells = splitBboxIntoCells(center.bbox, CELL_MAX_SPAN_DEG);
+        if (cells.length > MAX_CELLS_PER_SEARCH) {
+          // Cap cells; prefer centre cells first for better local coverage
+          const midR = Math.floor(Math.max(...cells.map((c) => c.row)) / 2);
+          const midC = Math.floor(Math.max(...cells.map((c) => c.col)) / 2);
+          cells = cells
+            .map((c) => ({ ...c, dist: Math.abs(c.row - midR) + Math.abs(c.col - midC) }))
+            .sort((a, b) => a.dist - b.dist)
+            .slice(0, MAX_CELLS_PER_SEARCH);
+        }
+        geos = cells.map((c) => ({
+          lat: (c.south + c.north) / 2,
+          lon: (c.west + c.east) / 2,
+          bbox: { south: c.south, north: c.north, west: c.west, east: c.east },
+        }));
+        console.log(
+          JSON.stringify({
+            provider: CODE,
+            stage: 'geocode',
+            cells: geos.length,
+            latSpan,
+            lonSpan,
+            maxSpan: CELL_MAX_SPAN_DEG,
+          })
+        );
+      } else {
+        geos = [center];
+      }
+    } else {
+      geos = [center];
     }
 
-    const elements = Array.isArray(data.elements) ? data.elements : [];
     const seen = new Set();
     const mapped = [];
-    for (const el of elements) {
-      const item = mapElement(el, criteria);
-      if (!item) continue;
-      const key = item.externalId || `${item.name}|${item.address}|${item.phone}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      mapped.push(item);
+    let cellFailures = 0;
+    let lastCellErr = null;
+
+    // Process cells with limited concurrency
+    for (let i = 0; i < geos.length; i += CELL_CONCURRENCY) {
+      if (i > 0 && CELL_BATCH_DELAY_MS > 0) {
+        await new Promise((r) => setTimeout(r, CELL_BATCH_DELAY_MS));
+      }
+      const batch = geos.slice(i, i + CELL_CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(async (geo) => {
+          try {
+            return await queryCell(criteria, geo, radius, limit);
+          } catch (err) {
+            if (err && !err.errorStage) err.errorStage = 'overpass';
+            return { __error: err };
+          }
+        })
+      );
+      for (const res of results) {
+        if (res && res.__error) {
+          cellFailures += 1;
+          lastCellErr = res.__error;
+          continue;
+        }
+        for (const item of res || []) {
+          const key = item.externalId || `${item.name}|${item.address}|${item.phone}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          mapped.push(item);
+          if (mapped.length >= limit) break;
+        }
+        if (mapped.length >= limit) break;
+      }
       if (mapped.length >= limit) break;
     }
-    return okResult(mapped);
+
+    // All cells failed and no results → surface error
+    if (mapped.length === 0 && cellFailures > 0 && cellFailures === geos.length) {
+      throw lastCellErr || Object.assign(new Error('Overpass indisponível'), {
+        code: 'OSM_UNAVAILABLE',
+        errorStage: 'overpass',
+      });
+    }
+
+    return okResult(mapped.slice(0, limit));
   } catch (err) {
     const stage = (err && err.errorStage) || 'osm_search';
     const httpStatus = err && err.httpStatus != null ? err.httpStatus : null;
@@ -796,4 +917,8 @@ module.exports = {
   isTransientError,
   OSM_OVERPASS_TIMEOUT_MS,
   fetchWithAbort,
+  splitBboxIntoCells,
+  DEFAULT_OVERPASS_ENDPOINTS,
+  CELL_MAX_SPAN_DEG,
+  MAX_CELLS_PER_SEARCH,
 };
