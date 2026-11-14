@@ -70,10 +70,11 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
 
   async function createUser() {
     const email = `m010-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.test`;
+    const emailNormalized = String(email).trim().toLowerCase();
     const { rows } = await pool.query(
-      `INSERT INTO users (email, password_hash, email_verified_at)
-       VALUES ($1, 'x', NOW()) RETURNING id`,
-      [email]
+      `INSERT INTO users (email, email_normalized, password_hash, name, email_verified_at)
+       VALUES ($1, $2, 'x', 'Migration 010 Test', NOW()) RETURNING id`,
+      [email, emailNormalized]
     );
     ownedUserIds.push(rows[0].id);
     return rows[0].id;
@@ -214,10 +215,11 @@ describe('migration 010 searches.status cancelled (pg)', { skip: !RUN }, () => {
           CHECK (status IN ('pending', 'running', 'completed', 'partial', 'failed'))
       `);
 
+      const legacyEmail = `m010-legacy-${Date.now()}@example.test`;
       const u = await client.query(
-        `INSERT INTO users (email, password_hash, email_verified_at)
-         VALUES ($1, 'x', NOW()) RETURNING id`,
-        [`m010-legacy-${Date.now()}@example.test`]
+        `INSERT INTO users (email, email_normalized, password_hash, name, email_verified_at)
+         VALUES ($1, $2, 'x', 'Migration 010 Legacy', NOW()) RETURNING id`,
+        [legacyEmail, legacyEmail.trim().toLowerCase()]
       );
       const ins = await client.query(
         `INSERT INTO searches (user_id, query, location, status, total_raw)
