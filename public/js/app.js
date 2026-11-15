@@ -10,7 +10,7 @@
     plans: 'Planos',
   };
 
-  const PAGE_SIZE = 28;
+  const PAGE_SIZE = 24;
   let csrfToken = null;
   let currentUser = null;
   let currentResults = [];
@@ -24,12 +24,12 @@
   function $$(sel) { return Array.from(document.querySelectorAll(sel)); }
 
   function esc(s) { return s == null ? '' : String(s); }
-  function displayOrNa(v) {
-    if (v == null || String(v).trim() === '') return 'Não informado';
-    return String(v);
+  function hasValue(v) {
+    return v != null && String(v).trim() !== '';
   }
 
   function fieldRow(label, value) {
+    if (!hasValue(value)) return null;
     const row = document.createElement('div');
     row.className = 'result-card-field';
     const lab = document.createElement('span');
@@ -37,44 +37,69 @@
     lab.textContent = label;
     const val = document.createElement('span');
     val.className = 'result-card-field-value';
-    val.textContent = esc(displayOrNa(value));
+    val.textContent = esc(String(value).trim());
     row.appendChild(lab);
     row.appendChild(val);
     return row;
   }
 
-  function isSafeGoogleMapsUrl(url) {
-    if (!url || typeof url !== 'string') return false;
-    try {
-      const u = new URL(url.trim());
-      if (u.protocol !== 'https:') return false;
-      const host = u.hostname.toLowerCase();
-      return (
-        host === 'maps.google.com' ||
-        host === 'www.google.com' ||
-        host === 'google.com' ||
-        host.endsWith('.google.com') ||
-        host === 'maps.app.goo.gl' ||
-        host === 'goo.gl'
-      ) && (host.includes('google') || host.includes('goo.gl'));
-    } catch (_) {
-      return false;
-    }
+  function appendField(parent, label, value) {
+    const row = fieldRow(label, value);
+    if (row) parent.appendChild(row);
   }
 
+  /** Toast notifications for save feedback (success / warn / error). */
+  let toastTimer = null;
+  function showToast(message, type) {
+    let el = $('#app-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'app-toast';
+      el.className = 'app-toast';
+      el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+      document.body.appendChild(el);
+    }
+    el.textContent = message || '';
+    el.className = 'app-toast app-toast-' + (type || 'info');
+    el.hidden = false;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.hidden = true; }, 4500);
+  }
+
+  function isGooglePlaceId(id) {
+    if (!id || typeof id !== 'string') return false;
+    return /^ChIJ[A-Za-z0-9_-]{10,}$/.test(id.trim());
+  }
+
+  /**
+   * Build a Maps URL for THIS card only.
+   * Priority: 1) Google Place ID  2) name + address  3) coordinates.
+   * Never treats TomTom/Foursquare IDs as Google Place IDs.
+   */
   function buildGoogleMapsUrl(r) {
-    if (r.googleMapsUrl && isSafeGoogleMapsUrl(r.googleMapsUrl)) return r.googleMapsUrl.trim();
-    if (r.mapsUrl && isSafeGoogleMapsUrl(r.mapsUrl)) return r.mapsUrl.trim();
+    if (!r || typeof r !== 'object') return null;
+    const name = r.name && String(r.name).trim() ? String(r.name).trim() : '';
+    const address = r.address && String(r.address).trim() ? String(r.address).trim() : '';
+    const placeId = isGooglePlaceId(r.googlePlaceId) ? r.googlePlaceId.trim()
+      : (isGooglePlaceId(r.placeId) ? r.placeId.trim() : null);
+
+    if (placeId) {
+      const q = name || address || 'place';
+      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q) +
+        '&query_place_id=' + encodeURIComponent(placeId);
+    }
+    if (name && address) {
+      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(name + ', ' + address);
+    }
+    if (name) {
+      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(name);
+    }
     const lat = r.lat != null ? Number(r.lat) : NaN;
     const lng = r.lng != null ? Number(r.lng) : NaN;
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(lat + ',' + lng);
     }
-    const parts = [];
-    if (r.name && String(r.name).trim()) parts.push(String(r.name).trim());
-    if (r.address && String(r.address).trim()) parts.push(String(r.address).trim());
-    if (!parts.length) return null;
-    return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(parts.join(' '));
+    return null;
   }
 
   function maskEmail(email) {
@@ -203,52 +228,30 @@
     pageItems.forEach((r) => {
       const card = document.createElement('article');
       card.className = 'result-card';
-      const photo = document.createElement('div');
-      photo.className = 'result-card-photo';
-      const photoSrc = r.photoUrl || r.image || null;
-      if (photoSrc) {
-        const img = document.createElement('img');
-        img.src = photoSrc;
-        img.alt = r.name ? ('Foto de ' + String(r.name)) : 'Foto';
-        img.loading = 'lazy';
-        img.addEventListener('error', () => {
-          photo.innerHTML = '';
-          const ph = document.createElement('span');
-          ph.className = 'photo-placeholder';
-          ph.textContent = 'Sem foto';
-          photo.appendChild(ph);
-        });
-        photo.appendChild(img);
-      } else {
-        const ph = document.createElement('span');
-        ph.className = 'photo-placeholder';
-        ph.textContent = 'Sem foto';
-        photo.appendChild(ph);
-      }
-      card.appendChild(photo);
       const body = document.createElement('div');
       body.className = 'result-card-body';
       const name = document.createElement('div');
       name.className = 'result-card-name';
-      const displayName = r.name && String(r.name).trim() ? String(r.name).trim() : 'Nome não informado';
+      const displayName = r.name && String(r.name).trim() ? String(r.name).trim() : 'Estabelecimento';
       name.textContent = esc(displayName);
       body.appendChild(name);
-      body.appendChild(fieldRow('Categoria', r.category));
-      body.appendChild(fieldRow('Endereço', r.address));
-      body.appendChild(fieldRow('Telefone', r.phone));
-      body.appendChild(fieldRow('Email', r.email));
-      body.appendChild(fieldRow('Website', r.website));
+      appendField(body, 'Categoria', r.category);
+      appendField(body, 'Endereço', r.address);
+      appendField(body, 'Telefone', r.phone);
+      appendField(body, 'Email', r.email);
+      appendField(body, 'Website', r.website);
       if (r.rating != null || r.reviewsCount != null) {
         const ratingBits = [];
         if (r.rating != null) ratingBits.push(String(r.rating));
         if (r.reviewsCount != null) ratingBits.push(String(r.reviewsCount) + ' avaliações');
-        body.appendChild(fieldRow('Classificação', ratingBits.join(' · ')));
+        appendField(body, 'Classificação', ratingBits.join(' · '));
       }
       card.appendChild(body);
       const actions = document.createElement('div');
       actions.className = 'result-card-actions';
       const cb = document.createElement('input');
       cb.type = 'checkbox'; cb.className = 'result-check'; cb.value = r.id || '';
+      cb.setAttribute('aria-label', 'Selecionar ' + displayName);
       actions.appendChild(cb);
       const contactBtn = document.createElement('button');
       contactBtn.type = 'button'; contactBtn.className = 'btn btn-primary btn-sm';
@@ -263,13 +266,14 @@
         maps.href = mapsUrl; maps.target = '_blank'; maps.rel = 'noopener noreferrer';
         maps.textContent = 'Ver no Maps';
         actions.appendChild(maps);
-      }
-      if (r.website) {
-        const web = document.createElement('a');
-        web.className = 'btn btn-ghost btn-sm';
-        web.href = r.website.startsWith('http') ? r.website : 'https://' + r.website;
-        web.target = '_blank'; web.rel = 'noopener noreferrer'; web.textContent = 'Site';
-        actions.appendChild(web);
+      } else {
+        const mapsDisabled = document.createElement('button');
+        mapsDisabled.type = 'button';
+        mapsDisabled.className = 'btn btn-secondary btn-sm';
+        mapsDisabled.disabled = true;
+        mapsDisabled.title = 'Dados insuficientes para localizar no Maps';
+        mapsDisabled.textContent = 'Ver no Maps';
+        actions.appendChild(mapsDisabled);
       }
       card.appendChild(actions);
       frag.appendChild(card);
@@ -459,16 +463,16 @@
       const res = await api('/api/searches', {
         method: 'POST',
         headers: { 'X-CSRF-Token': token },
-        body: { query, location, limit, minRating: minRating || null, hasPhone, hasEmail, noWebsite, minReviews },
+        body: {
+          query, location, limit,
+          minRating: minRating || null,
+          hasPhone, hasEmail, noWebsite, minReviews,
+        },
       });
       if (!res.ok) {
         const data = res.data || {};
-        if (res.status === 403 && data.code === 'EMAIL_NOT_VERIFIED') {
+        if (res.status === 403 && data && data.code === 'EMAIL_NOT_VERIFIED') {
           setStatus('Verifica o teu email antes de pesquisar.', true);
-          setProgress(false); resetSearchUiButtons(); return;
-        }
-        if (res.status === 402) {
-          setStatus((data && data.error) || 'Quota esgotada.', true);
           setProgress(false); resetSearchUiButtons(); return;
         }
         setStatus((data && data.error) || 'Falha ao iniciar pesquisa.', true);
@@ -483,96 +487,107 @@
       await pollSearchUntilDone(searchId);
     } catch (err) {
       setStatus('Erro de rede ao pesquisar.', true);
-      setProgress(false); setSummary(true, 'Erro de rede ao pesquisar.');
-      resetSearchUiButtons(); activeSearchId = null;
+      setProgress(false);
+      resetSearchUiButtons();
     }
   }
 
   async function loadDashboard() {
     const box = $('#dashboard-recent');
+    if (!box) return;
     try {
       const res = await api('/api/searches/dashboard');
       if (!res.ok) {
         ['stat-searches', 'stat-results', 'stat-leads'].forEach((id) => {
           const el = $('#' + id); if (el) el.textContent = '—';
         });
-        if (box) {
-          box.innerHTML = '';
-          const p = document.createElement('p');
-          p.className = 'empty-hint';
-          p.textContent = res.status === 401 ? 'Inicia sessão para ver a atividade da conta.'
-            : res.status === 403 ? 'Verifica o email para aceder aos dados da conta.'
+        box.innerHTML = '';
+        const empty = document.createElement('p');
+        empty.className = 'empty-hint';
+        empty.id = 'dashboard-recent-empty';
+        empty.textContent = res.status === 401
+          ? 'Inicia sessão para ver a atividade da conta.'
+          : res.status === 403
+            ? 'Verifica o email para aceder aos dados da conta.'
             : 'Não foi possível carregar o dashboard.';
-          box.appendChild(p);
-        }
+        box.appendChild(empty);
         return;
       }
       const data = res.data || {};
       if ($('#stat-searches')) $('#stat-searches').textContent = String(data.searchesCount != null ? data.searchesCount : '—');
       if ($('#stat-results')) $('#stat-results').textContent = String(data.resultsCount != null ? data.resultsCount : '—');
       if ($('#stat-leads')) $('#stat-leads').textContent = String(data.savedLeadsCount != null ? data.savedLeadsCount : '—');
-      if (!box) return;
       box.innerHTML = '';
       const recent = data.recentSearches || [];
       if (!recent.length) {
-        const p = document.createElement('p'); p.className = 'empty-hint'; p.textContent = 'Ainda não existem pesquisas.';
-        box.appendChild(p); return;
+        const p = document.createElement('p');
+        p.className = 'empty-hint';
+        p.textContent = 'Ainda não existem pesquisas.';
+        box.appendChild(p);
+        return;
       }
-      const wrap = document.createElement('div'); wrap.className = 'table-wrap table-wrap-dashboard';
-      const table = document.createElement('table'); table.className = 'data table-dashboard';
+      const wrap = document.createElement('div');
+      wrap.className = 'table-wrap table-wrap-dashboard';
+      const table = document.createElement('table');
+      table.className = 'data table-dashboard';
       const thead = document.createElement('thead');
       thead.innerHTML = '<tr><th>Categoria</th><th>Localização</th><th>Resultados</th><th>Estado</th><th>Data</th></tr>';
       table.appendChild(thead);
       const tbody = document.createElement('tbody');
       recent.forEach((item) => {
-        const tr = document.createElement('tr'); tr.style.cursor = 'pointer';
+        const tr = document.createElement('tr');
+        tr.style.cursor = 'pointer';
         tr.addEventListener('click', () => openSearch(item.id));
-        const resultsVal = item.resultsCount != null ? item.resultsCount : '—';
-        [item.query, item.location, resultsVal, item.status, formatDate(item.createdAt || item.created_at)].forEach((val, idx) => {
+        [item.query, item.location, item.resultsCount != null ? item.resultsCount : '—', item.status, formatDate(item.createdAt)].forEach((val, idx) => {
           const td = document.createElement('td');
           if (idx === 3) {
             const pill = document.createElement('span');
-            pill.className = 'status-pill ' + esc(item.status || '');
-            pill.textContent = esc(item.status || '—');
+            pill.className = 'status-pill ' + esc(item.status);
+            pill.textContent = esc(item.status);
             td.appendChild(pill);
-          } else td.textContent = val == null ? '—' : String(val);
+          } else {
+            td.textContent = val == null ? '—' : String(val);
+          }
           tr.appendChild(td);
         });
         tbody.appendChild(tr);
       });
-      table.appendChild(tbody); wrap.appendChild(table); box.appendChild(wrap);
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      box.appendChild(wrap);
     } catch (_) {
-      if (box) {
-        box.innerHTML = '';
-        const p = document.createElement('p'); p.className = 'empty-hint';
-        p.textContent = 'Não foi possível carregar o dashboard.';
-        box.appendChild(p);
-      }
+      box.textContent = 'Não foi possível carregar o dashboard.';
     }
   }
 
   async function openSearch(id) {
     showView('results');
     setProgress(true, 'A carregar resultados…');
-    setSummary(false, '');
     try {
       const res = await api('/api/searches/' + id + '/results');
       if (!res.ok) {
-        const msg = (res.data && res.data.error) || 'Não foi possível carregar a pesquisa.';
-        setStatus(msg, true); setProgress(false); setSummary(true, msg);
-        currentResults = []; currentSearchMeta = { message: msg }; renderResultsState();
+        const msg = (res.data && res.data.error) ||
+          (res.status === 404 ? 'Pesquisa não encontrada.' : 'Não foi possível carregar a pesquisa.');
+        setStatus(msg, true);
+        setSummary(true, msg);
+        currentResults = [];
+        currentSearchMeta = { message: msg };
+        renderResultsState();
+        setProgress(false);
         return;
       }
-      const data = res.data || {};
-      currentResults = Array.isArray(data.results) ? data.results : [];
-      currentSearchMeta = { searchId: id, status: data.search && data.search.status, message: data.message || '' };
+      currentResults = Array.isArray(res.data.results) ? res.data.results : [];
+      currentSearchMeta = res.data;
       resultsPage = 1;
       renderResultsState();
       setProgress(false);
-      const msg = currentResults.length ? currentResults.length + ' resultado(s).' : (data.message || 'Sem resultados para esta pesquisa.');
-      setSummary(true, msg); setStatus('');
+      setSummary(true, currentResults.length
+        ? currentResults.length + ' resultado(s).'
+        : 'Sem resultados nesta pesquisa.');
     } catch (_) {
-      setStatus('Erro de rede.', true); setProgress(false); setSummary(true, 'Erro de rede.');
+      setStatus('Erro de rede.', true);
+      setSummary(true, 'Erro de rede ao carregar a pesquisa.');
+      setProgress(false);
     }
   }
 
@@ -583,34 +598,49 @@
     try {
       const res = await api('/api/searches?limit=50');
       if (!res.ok) {
-        const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 5;
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
         td.textContent = res.status === 401 ? 'Inicia sessão para ver o histórico.' : 'Não foi possível carregar o histórico.';
-        tr.appendChild(td); body.appendChild(tr); return;
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
       }
       const items = (res.data && res.data.items) || [];
       if (!items.length) {
-        const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 5;
-        td.textContent = 'Ainda não há pesquisas.'; tr.appendChild(td); body.appendChild(tr); return;
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.textContent = 'Ainda não há pesquisas.';
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
       }
       items.forEach((item) => {
-        const tr = document.createElement('tr'); tr.style.cursor = 'pointer';
+        const tr = document.createElement('tr');
+        tr.style.cursor = 'pointer';
         tr.addEventListener('click', () => openSearch(item.id));
-        const resultsVal = item.resultsCount != null ? item.resultsCount : '—';
-        [item.query, item.location, resultsVal, item.status, formatDate(item.createdAt || item.created_at)].forEach((val, idx) => {
+        [item.query, item.location, item.resultsCount != null ? item.resultsCount : '—', item.status, formatDate(item.createdAt)].forEach((val, idx) => {
           const td = document.createElement('td');
           if (idx === 3) {
             const pill = document.createElement('span');
-            pill.className = 'status-pill ' + esc(item.status || '');
-            pill.textContent = esc(item.status || '—');
+            pill.className = 'status-pill ' + esc(item.status);
+            pill.textContent = esc(item.status);
             td.appendChild(pill);
-          } else td.textContent = val == null ? '—' : String(val);
+          } else {
+            td.textContent = val == null ? '—' : String(val);
+          }
           tr.appendChild(td);
         });
         body.appendChild(tr);
       });
     } catch (_) {
-      const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 5;
-      td.textContent = 'Não foi possível carregar o histórico.'; tr.appendChild(td); body.appendChild(tr);
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 5;
+      td.textContent = 'Não foi possível carregar o histórico.';
+      tr.appendChild(td);
+      body.appendChild(tr);
     }
   }
 
@@ -621,18 +651,27 @@
     try {
       const res = await api('/api/searches/leads/saved');
       if (!res.ok) {
-        const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 5;
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
         td.textContent = res.status === 401 ? 'Inicia sessão para ver os leads.' : 'Não foi possível carregar os leads.';
-        tr.appendChild(td); body.appendChild(tr); return;
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
       }
       const items = (res.data && res.data.items) || [];
       if (!items.length) {
-        const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 5;
-        td.textContent = 'Ainda não há leads guardados.'; tr.appendChild(td); body.appendChild(tr); return;
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.textContent = 'Ainda não há leads guardados.';
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
       }
       items.forEach((item) => {
         const tr = document.createElement('tr');
-        [item.name, item.address, item.phone, item.email, formatDate(item.createdAt || item.created_at)].forEach((val) => {
+        [item.name, item.address, item.phone, item.email, formatDate(item.createdAt)].forEach((val) => {
           const td = document.createElement('td');
           td.textContent = val == null || val === '' ? '—' : String(val);
           tr.appendChild(td);
@@ -640,8 +679,12 @@
         body.appendChild(tr);
       });
     } catch (_) {
-      const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 5;
-      td.textContent = 'Não foi possível carregar os leads.'; tr.appendChild(td); body.appendChild(tr);
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 5;
+      td.textContent = 'Não foi possível carregar os leads.';
+      tr.appendChild(td);
+      body.appendChild(tr);
     }
   }
 
@@ -657,23 +700,59 @@
     }
     if (nameEl) nameEl.textContent = (currentUser && currentUser.name) || '—';
     if (emailEl) emailEl.textContent = (currentUser && currentUser.email) || '—';
-    if (verifiedEl) verifiedEl.textContent = currentUser ? (currentUser.emailVerified ? 'Verificado' : 'Por verificar') : '—';
+    if (verifiedEl) {
+      verifiedEl.textContent = currentUser
+        ? (currentUser.emailVerified ? 'Verificado' : 'Por verificar')
+        : '—';
+    }
     const resetEmail = $('#reset-password-email');
     if (resetEmail) resetEmail.textContent = currentUser && currentUser.email ? maskEmail(currentUser.email) : '—';
   }
 
+  let saveInFlight = false;
   async function saveSelectedLeads() {
+    if (saveInFlight) return;
     const ids = $$('.result-check:checked').map((c) => c.value).filter(Boolean);
-    if (!ids.length) { setStatus('Seleciona resultados para guardar.', true); return; }
+    if (!ids.length) {
+      showToast('Seleciona pelo menos um estabelecimento para guardar.', 'warn');
+      return;
+    }
+    const saveBtn = $('#btn-save-leads');
+    saveInFlight = true;
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'A guardar…'; }
     try {
       const token = await ensureCsrf();
       const res = await api('/api/searches/leads/save', {
         method: 'POST', headers: { 'X-CSRF-Token': token }, body: { resultIds: ids },
       });
-      if (!res.ok) { setStatus((res.data && res.data.error) || 'Falha ao guardar.', true); return; }
-      const n = (res.data && res.data.saved && res.data.saved.length) || 0;
-      setStatus(n + ' lead(s) guardado(s).');
-    } catch (_) { setStatus('Falha ao guardar leads.', true); }
+      if (!res.ok) {
+        showToast('Não foi possível guardar os estabelecimentos. Tenta novamente.', 'error');
+        return;
+      }
+      const data = res.data || {};
+      const savedCount = data.savedCount != null ? data.savedCount : ((data.saved && data.saved.length) || 0);
+      const already = data.alreadySavedCount != null ? data.alreadySavedCount : 0;
+      if (savedCount > 0 && already > 0) {
+        showToast(savedCount + ' estabelecimento' + (savedCount === 1 ? '' : 's') +
+          ' guardado' + (savedCount === 1 ? '' : 's') + '. ' + already +
+          ' já estava' + (already === 1 ? '' : 'm') + ' guardado' + (already === 1 ? '' : 's') + '.', 'success');
+      } else if (savedCount > 0) {
+        showToast(savedCount === 1
+          ? 'Estabelecimento guardado com sucesso.'
+          : savedCount + ' estabelecimentos guardados com sucesso.', 'success');
+      } else if (already > 0) {
+        showToast(already === 1
+          ? 'Este estabelecimento já está guardado.'
+          : already + ' estabelecimentos já estavam guardados.', 'warn');
+      } else {
+        showToast('Nenhum estabelecimento foi guardado.', 'warn');
+      }
+    } catch (_) {
+      showToast('Não foi possível guardar os estabelecimentos. Tenta novamente.', 'error');
+    } finally {
+      saveInFlight = false;
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Guardar selecionados'; }
+    }
   }
 
   function initNav() {
@@ -716,11 +795,7 @@
     const form = $('#search-form');
     if (form) form.addEventListener('submit', (ev) => { ev.preventDefault(); runSearch(); });
     const btn = $('#btn-search');
-    if (btn && !form) btn.addEventListener('click', runSearch);
-    const selectAll = $('#select-all');
-    if (selectAll) selectAll.addEventListener('change', () => {
-      $$('.result-check').forEach((c) => { c.checked = selectAll.checked; });
-    });
+    if (btn) btn.addEventListener('click', (ev) => { ev.preventDefault(); runSearch(); });
     const saveBtn = $('#btn-save-leads');
     if (saveBtn) saveBtn.addEventListener('click', saveSelectedLeads);
   }
@@ -738,15 +813,6 @@
         window.open('https://wa.me/' + digits + '?text=' + encodeURIComponent(text), '_blank', 'noopener');
       });
     }
-    const regen = $('#btn-regen-message');
-    if (regen) {
-      regen.addEventListener('click', () => {
-        const modal = $('#contact-modal');
-        const ta = $('#contact-message');
-        if (!modal || !ta) return;
-        ta.value = 'Olá, vi o estabelecimento ' + (modal.dataset.name || '') + ' e gostaria de mais informações.';
-      });
-    }
   }
 
   function initSettingsRecovery() {
@@ -758,7 +824,8 @@
     if (cancelBtn && panel) cancelBtn.addEventListener('click', () => { panel.hidden = true; });
     if (sendBtn) {
       sendBtn.addEventListener('click', async () => {
-        const ok = $('#reset-password-ok'); const err = $('#reset-password-error');
+        const ok = $('#reset-password-ok');
+        const err = $('#reset-password-error');
         if (ok) { ok.hidden = true; ok.textContent = ''; }
         if (err) { err.hidden = true; err.textContent = ''; }
         try {
@@ -772,9 +839,13 @@
           });
           const data = res.data || {};
           if (res.ok) {
-            if (ok) { ok.hidden = false; ok.textContent = (data && data.message) || 'Se o email estiver associado a uma conta, enviámos instruções de recuperação.'; }
+            if (ok) {
+              ok.hidden = false;
+              ok.textContent = (data && data.message) || 'Se o email estiver associado a uma conta, enviámos instruções de recuperação.';
+            }
           } else if (err) {
-            err.hidden = false; err.textContent = (data && data.error) || 'Não foi possível enviar o pedido.';
+            err.hidden = false;
+            err.textContent = (data && data.error) || 'Não foi possível enviar o pedido.';
           }
         } catch (_) {
           if (err) { err.hidden = false; err.textContent = 'Erro de rede.'; }
@@ -784,13 +855,17 @@
   }
 
   function init() {
-    initNav(); initSearchForm(); initContactModal(); initSettingsRecovery();
+    initNav();
+    initSearchForm();
+    initContactModal();
+    initSettingsRecovery();
     showView('dashboard');
   }
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => { init(); refreshAuthUi(); });
   } else {
-    init(); refreshAuthUi();
+    init();
+    refreshAuthUi();
   }
 })();
