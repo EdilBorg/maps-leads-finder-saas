@@ -2,7 +2,6 @@
 
 .modality-grid { display: none !important; }
 
-/* Force dark color-scheme so native <select> option lists match the app */
 html {
   color-scheme: dark;
 }
@@ -22,15 +21,6 @@ select option {
   color: var(--color-mist, #d0d6e0);
 }
 
-.select option:checked,
-select option:checked,
-.select option:hover,
-select option:hover {
-  background-color: var(--surface-interactive, #23252a);
-  color: var(--color-paper, #ffffff);
-}
-
-/* Result cards grid */
 .results-cards-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -94,7 +84,7 @@ select option:hover {
   font-size: 15px;
   line-height: 1.3;
   color: var(--color-paper, #f4f5f7);
-  margin-bottom: 4px;
+  margin-bottom: 6px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -138,6 +128,16 @@ select option:hover {
 
 .result-card-actions .btn { font-size: 12px; padding: 6px 10px; }
 
+.result-card-actions .btn-secondary {
+  background: transparent;
+  border: 1px solid var(--color-graphite, #23252a);
+  color: var(--color-mist, #d0d6e0);
+}
+.result-card-actions .btn-secondary:hover {
+  border-color: var(--color-mist, #d0d6e0);
+  color: var(--color-paper, #ffffff);
+}
+
 .results-pagination {
   display: flex;
   gap: 8px;
@@ -147,97 +147,4 @@ select option:hover {
   flex-wrap: wrap;
   color: var(--color-fog, #8a8f98);
   font-size: 13px;
-}
-
-.results-pagination .btn {
-  min-width: 36px;
-}
-
-/* Provider progress chips */
-.provider-status-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
-}
-.provider-status-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: var(--radius-inputs, 6px);
-  border: 1px solid var(--color-graphite, #23252a);
-  background: var(--surface-elevated, #161718);
-  font-size: 12px;
-  color: var(--color-fog, #8a8f98);
-}
-.provider-status-chip .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-ash, #62666d);
-  flex-shrink: 0;
-}
-.provider-status-chip.running .dot { background: var(--color-signal-teal, #02b8cc); }
-.provider-status-chip.ok .dot,
-.provider-status-chip.completed .dot { background: var(--color-pulse-green, #27a644); }
-.provider-status-chip.empty .dot { background: var(--color-ash, #62666d); }
-.provider-status-chip.error .dot,
-.provider-status-chip.failed .dot { background: var(--color-coral-red, #eb5757); }
-.provider-status-chip.cancelled .dot { background: var(--color-fog, #8a8f98); }
-.provider-status-chip.not_configured .dot { background: var(--color-smoke, #383b3f); }
-
-/* Modal — dark theme */
-.modal {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.modal[hidden] { display: none !important; }
-.modal-backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.65);
-}
-.modal-panel {
-  position: relative;
-  background: var(--surface-panel, #0f1011);
-  border: 1px solid var(--color-graphite, #23252a);
-  border-radius: var(--radius-cards, 12px);
-  padding: 20px;
-  width: min(480px, 92vw);
-  box-shadow: var(--shadow-sm, rgba(0, 0, 0, 0.4) 0px 2px 4px 0px);
-  color: var(--color-mist, #d0d6e0);
-}
-.modal-panel h3 {
-  margin: 0 0 8px;
-  color: var(--color-paper, #ffffff);
-  font-size: 16px;
-  font-weight: 500;
-}
-.modal-panel textarea.input,
-.modal-panel .input,
-.modal-panel .select {
-  width: 100%;
-  resize: vertical;
-  min-height: 100px;
-  background: var(--surface-elevated, #161718);
-  border: 1px solid var(--color-graphite, #23252a);
-  color: var(--color-mist, #d0d6e0);
-  border-radius: var(--radius-inputs, 6px);
-}
-.modal-panel textarea.input:focus,
-.modal-panel .input:focus {
-  outline: none;
-  border-color: var(--color-mist, #d0d6e0);
-}
-
-/* Progress / summary boxes stay on panel surface */
-#results-progress,
-#results-summary {
-  background: var(--surface-panel, #0f1011);
-  border: 1px solid var(--color-graphite, #23252a);
 }
