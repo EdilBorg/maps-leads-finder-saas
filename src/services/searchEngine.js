@@ -50,6 +50,9 @@ function normalizeWebsite(s) {
 /** Centralized URL classification for the "Sem website" filter.
  * Categories: own_website | social_media | directory | unknown | none
  * Classification is by domain (and path only for specific cases like Google Maps).
+ * Limitation: without external checks we cannot confirm domain ownership;
+ * unrecognized valid hosts are therefore unknown, not own_website.
+ * own_website remains reserved for future explicit recognition policies.
  */
 const SOCIAL_MEDIA_DOMAINS = Object.freeze([
   'facebook.com',
@@ -121,16 +124,38 @@ function classifyWebsiteUrl(url) {
     return 'unknown';
   }
 
-  return 'own_website';
+  // Valid host not in social/directory lists: we cannot confirm ownership
+  // without external checks, so treat as unknown (not own_website).
+  // own_website remains reserved for future explicit recognition policies.
+  return 'unknown';
 }
+
+/** Priority for merge: lower rank = higher preference. Deterministic and order-independent. */
+const WEBSITE_CATEGORY_RANK = Object.freeze({
+  own_website: 1,
+  social_media: 2,
+  directory: 3,
+  unknown: 4,
+  none: 5,
+});
 
 function pickPreferredWebsite(a, b) {
   const ca = classifyWebsiteUrl(a);
   const cb = classifyWebsiteUrl(b);
-  if (ca === 'own_website' && cb !== 'own_website') return a;
-  if (cb === 'own_website' && ca !== 'own_website') return b;
-  if (a != null && a !== '') return a;
-  return b;
+  const ra = WEBSITE_CATEGORY_RANK[ca] != null ? WEBSITE_CATEGORY_RANK[ca] : 5;
+  const rb = WEBSITE_CATEGORY_RANK[cb] != null ? WEBSITE_CATEGORY_RANK[cb] : 5;
+
+  if (ra < rb) return a;
+  if (rb < ra) return b;
+
+  // Same category: deterministic tie-break independent of argument order.
+  const sa = a == null ? '' : String(a);
+  const sb = b == null ? '' : String(b);
+  if (!sa && !sb) return a;
+  if (!sa) return b;
+  if (!sb) return a;
+  if (sa === sb) return a;
+  return sa < sb ? a : b;
 }
 
 function normalizeLead(lead) {
@@ -524,7 +549,7 @@ function clientHintForOutcome(outcome) {
 
 module.exports = {
   PROVIDER_CODES, PROVIDER_MAX, ALLOWED_LIMITS, normalizeLimit, providerLimit, normalizeText, normalizePhone, normalizeWebsite,
-  classifyWebsiteUrl, SOCIAL_MEDIA_DOMAINS, DIRECTORY_DOMAINS,
+  classifyWebsiteUrl, SOCIAL_MEDIA_DOMAINS, DIRECTORY_DOMAINS, WEBSITE_CATEGORY_RANK, pickPreferredWebsite,
   normalizeLead, deduplicate, mergeLeads, applyFilters, perProviderLimit, normalizeProviderResult,
   runProviderSafe, classifySearchOutcome, executeSearch, publicLead, isGooglePlaceId, leadIdentityKey, clientMessageForOutcome, clientHintForOutcome,
   MODALITIES: { standard: { id: 'standard', providerCodes: PROVIDER_CODES } },
