@@ -15,6 +15,7 @@ const {
   clientMessageForOutcome,
   clientHintForOutcome,
   normalizeLimit,
+  leadIdentityKey,
 } = require('./searchEngine');
 const {
   acquireFreeSearchHold,
@@ -41,6 +42,9 @@ function mapPublicRow(r, i) {
     category: r.category, lat: r.lat, lng: r.lng,
     photoUrl: raw.photoUrl || null,
     googleMapsUrl: raw.googleMapsUrl || raw.url || null,
+    googlePlaceId: raw.placeId || raw.googlePlaceId || null,
+    sourceProvider: r.source_provider || null,
+    externalId: r.external_id || null,
     raw,
   }, i);
 }
@@ -54,10 +58,6 @@ function mapProviderUiStatus(status, errorCode) {
   return 'failed';
 }
 
-/**
- * Mark only pending/running providers as cancelled; preserve terminal provider states.
- * Pure function for unit tests and SQL-equivalent logic.
- */
 function markPendingProvidersCancelled(providers) {
   if (!Array.isArray(providers)) return [];
   return providers.map((p) => {
@@ -70,10 +70,6 @@ function markPendingProvidersCancelled(providers) {
   });
 }
 
-/**
- * Atomically update one provider entry inside searches.providers_used (JSONB array).
- * Only updates while status is still running — never overwrites terminal search state.
- */
 async function updateProviderProgress(pool, searchId, userId, progress) {
   const code = progress && progress.code;
   if (!code) return;
@@ -549,7 +545,7 @@ async function getSearchResults(userId, searchId) {
     };
   }
   const { rows } = await pool.query(
-    `SELECT id,name,address,phone,email,website,rating,reviews_count,category,lat,lng,raw_payload
+    `SELECT id,name,address,phone,email,website,rating,reviews_count,category,lat,lng,source_provider,external_id,raw_payload
      FROM search_results WHERE search_id=$1 AND user_id=$2 ORDER BY created_at ASC`,
     [searchId, userId]
   );
@@ -601,28 +597,90 @@ async function listSavedLeads(userId, { limit = 50, offset = 0 } = {}) {
 async function saveLeadsFromResults(userId, resultIds) {
   const pool = getPool();
   const client = await pool.connect();
+  const saved = [];
+  const alreadySaved = [];
   try {
     await client.query('BEGIN');
-    const saved = [];
-    for (const rid of resultIds) {
+    await lockUserForUpdate(client, userId);
+
+    const ids = Array.from(new Set((resultIds || []).filter(Boolean))).slice(0, 100);
+    for (const rid of ids) {
       const { rows } = await client.query(
-        `SELECT name, address, phone, email, website, rating, reviews_count, category, lat, lng
+        `SELECT id, search_id, name, address, phone, email, website, rating, reviews_count,
+                category, lat, lng, source_provider, external_id, raw_payload
          FROM search_results WHERE id=$1 AND user_id=$2`,
         [rid, userId]
       );
       if (!rows[0]) continue;
       const r = rows[0];
-      const ins = await client.query(
-        `INSERT INTO saved_leads (
-           user_id, name, address, phone, email, website, rating, reviews_count, category, lat, lng
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-         RETURNING id, name, address, phone, email, website, created_at`,
-        [userId, r.name, r.address, r.phone, r.email, r.website, r.rating, r.reviews_count, r.category, r.lat, r.lng]
+      const identity = leadIdentityKey({
+        name: r.name, address: r.address, phone: r.phone,
+      });
+      const identityKey = identity || (
+        r.source_provider && r.external_id
+          ? ('x:' + r.source_provider + ':' + String(r.external_id).slice(0, 80))
+          : null
       );
-      saved.push(ins.rows[0]);
+
+      if (identityKey) {
+        const existing = await client.query(
+          `SELECT id, name, address, phone, email, website, created_at
+           FROM saved_leads
+           WHERE user_id=$1 AND identity_key=$2
+           LIMIT 1`,
+          [userId, identityKey]
+        );
+        if (existing.rows[0]) {
+          alreadySaved.push({
+            id: existing.rows[0].id,
+            name: existing.rows[0].name,
+            address: existing.rows[0].address,
+            phone: existing.rows[0].phone,
+            email: existing.rows[0].email,
+            website: existing.rows[0].website,
+            createdAt: existing.rows[0].created_at,
+          });
+          continue;
+        }
+      }
+
+      try {
+        const ins = await client.query(
+          `INSERT INTO saved_leads (
+             user_id, origin_search_id, origin_result_id,
+             name, address, phone, email, website, rating, reviews_count, category, lat, lng,
+             source_provider, external_id, identity_key, snapshot
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
+           RETURNING id, name, address, phone, email, website, created_at`,
+          [
+            userId, r.search_id, r.id,
+            r.name, r.address, r.phone, r.email, r.website, r.rating, r.reviews_count,
+            r.category, r.lat, r.lng, r.source_provider, r.external_id, identityKey,
+            JSON.stringify({ source: 'search_result', resultId: r.id }),
+          ]
+        );
+        saved.push(ins.rows[0]);
+      } catch (err) {
+        if (err && (err.code === '23505' || /unique/i.test(String(err.message || '')))) {
+          alreadySaved.push({
+            id: null, name: r.name, address: r.address, phone: r.phone,
+            email: r.email, website: r.website, createdAt: null,
+          });
+          continue;
+        }
+        throw err;
+      }
     }
     await client.query('COMMIT');
-    return saved;
+    return {
+      savedCount: saved.length,
+      alreadySavedCount: alreadySaved.length,
+      saved: saved.map((s) => ({
+        id: s.id, name: s.name, address: s.address, phone: s.phone,
+        email: s.email, website: s.website, createdAt: s.created_at,
+      })),
+      alreadySaved,
+    };
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
     throw err;
