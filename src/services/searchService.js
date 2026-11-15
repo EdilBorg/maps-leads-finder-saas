@@ -704,4 +704,6 @@ module.exports = {
   FREE_SEARCH_HOLD_MINUTES,
   activeRuns,
   markPendingProvidersCancelled,
+  mapProviderUiStatus,
+  startHoldRenewal,
 };

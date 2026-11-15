@@ -1289,6 +1289,7 @@
     const nameEl = $('#settings-name');
     const emailEl = $('#settings-email');
     const verifiedEl = $('#settings-verified');
+    const recoveryEmailEl = $('#reset-password-email');
     if (!currentUser) {
       try {
         const res = await api('/api/auth/me');
@@ -1299,6 +1300,9 @@
       if (nameEl) nameEl.textContent = currentUser.name || '—';
       if (emailEl) emailEl.textContent = currentUser.email || '—';
       if (verifiedEl) verifiedEl.textContent = currentUser.emailVerified ? 'Verificado' : 'Não verificado';
+      if (recoveryEmailEl) recoveryEmailEl.textContent = currentUser.email ? maskEmail(currentUser.email) : '—';
+    } else if (recoveryEmailEl) {
+      recoveryEmailEl.textContent = '—';
     }
   }
 
