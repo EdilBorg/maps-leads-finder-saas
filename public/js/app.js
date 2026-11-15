@@ -363,30 +363,10 @@
     }
   }
 
-  function setSearchProgress(visible, text) {
+  function setSearchProgress(visible) {
     const box = $('#search-progress');
     if (!box) return;
     box.hidden = !visible;
-    if (text != null) {
-      const p = $('#search-progress-text') || box.querySelector('p');
-      if (p) p.textContent = text;
-    }
-  }
-
-  function friendlySearchProgress(status, providers) {
-    const list = Array.isArray(providers) ? providers : [];
-    const statuses = list.map((p) => (p && p.status) || '');
-    const anyRunning = statuses.some((s) => s === 'running' || s === 'pending');
-    const anyDone = statuses.some((s) => s === 'completed' || s === 'ok' || s === 'no_results' || s === 'empty');
-    if (status === 'pending' || status === 'queued') return 'A preparar a pesquisa…';
-    if (status === 'running') {
-      if (!list.length) return 'A procurar estabelecimentos…';
-      if (anyRunning && !anyDone) return 'A procurar estabelecimentos…';
-      if (anyRunning && anyDone) return 'A recolher informações…';
-      if (!anyRunning && anyDone) return 'A reunir e verificar resultados…';
-      return 'A finalizar a pesquisa…';
-    }
-    return 'A processar a pesquisa…';
   }
 
   function officialResultsTotal(payload) {
@@ -447,8 +427,7 @@
       }
       const data = statusRes.data || {};
       const status = data.status || '';
-      const providers = data.providers || [];
-      setSearchProgress(true, friendlySearchProgress(status, providers));
+      setSearchProgress(true);
       if (status === 'running' || status === 'pending' || status === 'queued') {
         await new Promise((r) => { pollTimer = setTimeout(r, 1500); });
         continue;
@@ -475,7 +454,7 @@
         resetSearchUiButtons(); activeSearchId = null;
         return { outcome: 'error' };
       }
-      setSearchProgress(true, 'A finalizar a pesquisa…');
+      setSearchProgress(true);
       let resultsRes;
       try {
         resultsRes = await api('/api/searches/' + searchId + '/results');
@@ -577,7 +556,7 @@
         activeSearchId = null;
       };
     }
-    setSearchProgress(true, 'A preparar a pesquisa…');
+    setSearchProgress(true);
     setStatus('');
     try {
       const token = await ensureCsrf();
