@@ -15,6 +15,7 @@ const {
   deduplicate,
   mergeLeads,
   classifyWebsiteUrl,
+  pickPreferredWebsite,
   clientMessageForOutcome,
   publicLead,
 } = require('../src/services/searchEngine');
@@ -89,27 +90,29 @@ describe('searchEngine normalize dedupe filter limit', () => {
       1
     );
   });
-  it('classifyWebsiteUrl maps social, own, directory, none, unknown', () => {
+  it('classifyWebsiteUrl maps social, directory, none, unknown (no false own_website)', () => {
     assert.equal(classifyWebsiteUrl('https://www.instagram.com/empresa'), 'social_media');
     assert.equal(classifyWebsiteUrl('www.facebook.com/empresa'), 'social_media');
     assert.equal(classifyWebsiteUrl('m.facebook.com/empresa'), 'social_media');
     assert.equal(classifyWebsiteUrl('https://www.tiktok.com/@empresa'), 'social_media');
     assert.equal(classifyWebsiteUrl('https://youtu.be/abc123'), 'social_media');
-    assert.equal(classifyWebsiteUrl('https://empresa.co.mz'), 'own_website');
-    assert.equal(classifyWebsiteUrl('https://www.empresa.com'), 'own_website');
+    // Valid but unrecognized domains are unknown — we do not invent ownership certainty
+    assert.equal(classifyWebsiteUrl('https://empresa.co.mz'), 'unknown');
+    assert.equal(classifyWebsiteUrl('https://www.empresa.com'), 'unknown');
     assert.equal(classifyWebsiteUrl('https://www.yelp.com/biz/empresa'), 'directory');
     assert.equal(classifyWebsiteUrl('https://www.tripadvisor.com/empresa'), 'directory');
     assert.equal(classifyWebsiteUrl('https://www.google.com/maps/place/empresa'), 'directory');
     assert.equal(classifyWebsiteUrl(''), 'none');
     assert.equal(classifyWebsiteUrl(null), 'none');
     assert.equal(classifyWebsiteUrl('not a url !!!'), 'unknown');
-    assert.equal(classifyWebsiteUrl('https://facebook.com.evil.com'), 'own_website');
-    assert.equal(classifyWebsiteUrl('https://notfacebook.com'), 'own_website');
+    assert.equal(classifyWebsiteUrl('https://facebook.com.evil.com'), 'unknown');
+    assert.equal(classifyWebsiteUrl('https://notfacebook.com'), 'unknown');
+    assert.equal(classifyWebsiteUrl('https://plataforma-desconhecida.example/empresa'), 'unknown');
   });
 
-  it('applyFilters noWebsite keeps social and none, excludes own/directory/unknown', () => {
+  it('applyFilters noWebsite keeps social and none, excludes directory/unknown', () => {
     const leads = [
-      { name: 'Own', website: 'https://empresa.co.mz' },
+      { name: 'UnknownDomain', website: 'https://empresa.co.mz' },
       { name: 'IG', website: 'https://www.instagram.com/empresa' },
       { name: 'FB', website: 'www.facebook.com/page' },
       { name: 'Yelp', website: 'https://www.yelp.com/biz/x' },
@@ -123,7 +126,7 @@ describe('searchEngine normalize dedupe filter limit', () => {
     assert.equal(filtered.find((l) => l.name === 'IG').website, 'https://www.instagram.com/empresa');
   });
 
-  it('applyFilters noWebsite excludes own website', () => {
+  it('applyFilters noWebsite excludes unknown domain', () => {
     const leads = [
       { name: 'A', website: 'https://x.test' },
       { name: 'B', website: null },
@@ -133,13 +136,85 @@ describe('searchEngine normalize dedupe filter limit', () => {
     assert.equal(filtered[0].name, 'B');
   });
 
-  it('mergeLeads prefers own_website over social when combining providers', () => {
-    const a = { name: 'X', website: 'https://instagram.com/x', sourceProvider: 'apify', sources: ['apify'] };
-    const b = { name: 'X', website: 'https://empresa.co.mz', sourceProvider: 'tomtom', sources: ['tomtom'] };
-    const m1 = mergeLeads(a, b);
-    assert.equal(m1.website, 'https://empresa.co.mz');
-    const m2 = mergeLeads(b, a);
-    assert.equal(m2.website, 'https://empresa.co.mz');
+  it('pickPreferredWebsite is deterministic and order-independent', () => {
+    function both(a, b, expected) {
+      assert.equal(pickPreferredWebsite(a, b), expected);
+      assert.equal(pickPreferredWebsite(b, a), expected);
+    }
+    // social > directory
+    both('https://instagram.com/empresa', 'https://yelp.com/biz/empresa', 'https://instagram.com/empresa');
+    // facebook > tripadvisor
+    both('https://facebook.com/empresa', 'https://tripadvisor.com/empresa', 'https://facebook.com/empresa');
+    // social > unknown
+    both('https://instagram.com/empresa', 'https://plataforma-desconhecida.example/empresa', 'https://instagram.com/empresa');
+    // directory > unknown
+    both('https://yelp.com/biz/empresa', 'https://plataforma-desconhecida.example/x', 'https://yelp.com/biz/empresa');
+    // directory > none
+    both('https://yelp.com/biz/empresa', null, 'https://yelp.com/biz/empresa');
+    both('https://yelp.com/biz/empresa', '', 'https://yelp.com/biz/empresa');
+    // unknown > none
+    both('https://plataforma-desconhecida.example/empresa', null, 'https://plataforma-desconhecida.example/empresa');
+    // same category: lexicographic stable
+    both('https://instagram.com/a', 'https://instagram.com/b', 'https://instagram.com/a');
+    both('https://yelp.com/biz/z', 'https://yelp.com/biz/a', 'https://yelp.com/biz/a');
+  });
+
+  it('mergeLeads website preference is order-independent', () => {
+    function mergeBoth(wa, wb, expected) {
+      const a = { name: 'X', website: wa, sourceProvider: 'apify', sources: ['apify'] };
+      const b = { name: 'X', website: wb, sourceProvider: 'tomtom', sources: ['tomtom'] };
+      assert.equal(mergeLeads(a, b).website, expected);
+      assert.equal(mergeLeads(b, a).website, expected);
+    }
+    mergeBoth('https://instagram.com/x', 'https://yelp.com/biz/x', 'https://instagram.com/x');
+    mergeBoth('https://facebook.com/x', 'https://tripadvisor.com/x', 'https://facebook.com/x');
+    mergeBoth('https://instagram.com/x', 'https://desconhecida.example/x', 'https://instagram.com/x');
+    mergeBoth('https://yelp.com/biz/x', null, 'https://yelp.com/biz/x');
+    mergeBoth('https://desconhecida.example/x', null, 'https://desconhecida.example/x');
+  });
+
+  it('noWebsite after merge: social+directory include; only directory/unknown exclude', () => {
+    function mergedWebsite(wa, wb) {
+      const a = { name: 'X', website: wa, sourceProvider: 'apify', sources: ['apify'] };
+      const b = { name: 'X', website: wb, sourceProvider: 'tomtom', sources: ['tomtom'] };
+      return mergeLeads(a, b).website;
+    }
+    // Instagram + directory → Instagram → include
+    {
+      const w = mergedWebsite('https://instagram.com/empresa', 'https://yelp.com/biz/empresa');
+      assert.equal(classifyWebsiteUrl(w), 'social_media');
+      assert.equal(applyFilters([{ name: 'X', website: w }], { noWebsite: true }).length, 1);
+    }
+    // Facebook + TripAdvisor → Facebook → include
+    {
+      const w = mergedWebsite('https://facebook.com/empresa', 'https://tripadvisor.com/empresa');
+      assert.equal(classifyWebsiteUrl(w), 'social_media');
+      assert.equal(applyFilters([{ name: 'X', website: w }], { noWebsite: true }).length, 1);
+    }
+    // only directory → exclude
+    {
+      const w = mergedWebsite('https://yelp.com/biz/empresa', null);
+      assert.equal(classifyWebsiteUrl(w), 'directory');
+      assert.equal(applyFilters([{ name: 'X', website: w }], { noWebsite: true }).length, 0);
+    }
+    // Instagram + unknown → Instagram → include
+    {
+      const w = mergedWebsite('https://instagram.com/empresa', 'https://plataforma-desconhecida.example/empresa');
+      assert.equal(classifyWebsiteUrl(w), 'social_media');
+      assert.equal(applyFilters([{ name: 'X', website: w }], { noWebsite: true }).length, 1);
+    }
+    // only unknown → exclude
+    {
+      const w = mergedWebsite('https://plataforma-desconhecida.example/empresa', null);
+      assert.equal(classifyWebsiteUrl(w), 'unknown');
+      assert.equal(applyFilters([{ name: 'X', website: w }], { noWebsite: true }).length, 0);
+    }
+    // both empty → include
+    {
+      const w = mergedWebsite(null, null);
+      assert.equal(classifyWebsiteUrl(w), 'none');
+      assert.equal(applyFilters([{ name: 'X', website: w }], { noWebsite: true }).length, 1);
+    }
   });
 
   it('noWebsite + hasPhone combination', () => {
