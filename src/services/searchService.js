@@ -34,10 +34,14 @@ const RETENTION_DAYS = 30;
 const activeRuns = new Map();
 
 function mapPublicRow(r, i) {
+  const raw = r.raw_payload && typeof r.raw_payload === 'object' ? r.raw_payload : {};
   return publicLead({
     id: r.id, name: r.name, address: r.address, phone: r.phone, email: r.email, website: r.website,
     rating: r.rating != null ? Number(r.rating) : null, reviewsCount: r.reviews_count,
-    category: r.category, lat: r.lat, lng: r.lng, photoUrl: r.raw_payload && r.raw_payload.photoUrl,
+    category: r.category, lat: r.lat, lng: r.lng,
+    photoUrl: raw.photoUrl || null,
+    googleMapsUrl: raw.googleMapsUrl || raw.url || null,
+    raw,
   }, i);
 }
 
@@ -356,7 +360,7 @@ async function runSearchJob(ctx) {
           ctx.searchId, ctx.userId, lead.name, lead.address, lead.phone, lead.email, lead.website,
           lead.rating, lead.reviewsCount, lead.category, lead.lat, lead.lng,
           lead.sourceProvider, lead.externalId,
-          JSON.stringify({ ...(lead.raw || {}), photoUrl: lead.photoUrl || null, sources: lead.sources || [] }),
+          JSON.stringify({ ...(lead.raw || {}), photoUrl: lead.photoUrl || null, googleMapsUrl: lead.googleMapsUrl || null, sources: lead.sources || [] }),
         ]
       );
       inserted.push(row.rows[0]);
@@ -595,34 +599,32 @@ async function listSavedLeads(userId, { limit = 50, offset = 0 } = {}) {
 }
 
 async function saveLeadsFromResults(userId, resultIds) {
-  const client = await getPool().connect();
+  const pool = getPool();
+  const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const saved = [];
     for (const rid of resultIds) {
       const { rows } = await client.query(
-        'SELECT * FROM search_results WHERE id=$1 AND user_id=$2', [rid, userId]
+        `SELECT name, address, phone, email, website, rating, reviews_count, category, lat, lng
+         FROM search_results WHERE id=$1 AND user_id=$2`,
+        [rid, userId]
       );
       if (!rows[0]) continue;
       const r = rows[0];
       const ins = await client.query(
         `INSERT INTO saved_leads (
-           user_id,origin_search_id,origin_result_id,name,address,phone,email,website,
-           rating,reviews_count,category,lat,lng,source_provider,external_id,snapshot
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
-         RETURNING id,name,address,phone,email,website,created_at`,
-        [
-          userId, r.search_id, r.id, r.name, r.address, r.phone, r.email, r.website,
-          r.rating, r.reviews_count, r.category, r.lat, r.lng, r.source_provider,
-          r.external_id, JSON.stringify(r),
-        ]
+           user_id, name, address, phone, email, website, rating, reviews_count, category, lat, lng
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         RETURNING id, name, address, phone, email, website, created_at`,
+        [userId, r.name, r.address, r.phone, r.email, r.website, r.rating, r.reviews_count, r.category, r.lat, r.lng]
       );
       saved.push(ins.rows[0]);
     }
     await client.query('COMMIT');
     return saved;
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch (_) {}
     throw err;
   } finally {
     client.release();
@@ -630,10 +632,6 @@ async function saveLeadsFromResults(userId, resultIds) {
 }
 
 module.exports = {
-  mapProviderUiStatus,
-  markPendingProvidersCancelled,
-  updateProviderProgress,
-  startHoldRenewal,
   startSearch,
   cancelSearch,
   getSearchStatus,
@@ -646,4 +644,5 @@ module.exports = {
   recoverAbandonedSearches,
   FREE_SEARCH_HOLD_MINUTES,
   activeRuns,
+  markPendingProvidersCancelled,
 };
