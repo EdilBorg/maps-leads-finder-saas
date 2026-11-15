@@ -1,6 +1,7 @@
 /**
  * Search API — authenticated, CSRF on mutations.
  * Async start + status + cancel + results.
+ * CRM Stage 1: filtered saved leads, detail and status/notes updates.
  */
 const express = require('express');
 const { requireAuth, requireVerifiedEmail } = require('../middleware/auth');
@@ -75,11 +76,45 @@ router.get('/dashboard', requireAuth, requireVerifiedEmail, async (req, res, nex
 
 router.get('/leads/saved', requireAuth, requireVerifiedEmail, async (req, res, next) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-    const items = await searchService.listSavedLeads(req.session.userId, { limit, offset });
-    return res.json({ items });
+    const data = await searchService.listSavedLeads(req.session.userId, {
+      limit,
+      offset,
+      q: req.query.q,
+      status: req.query.status,
+      category: req.query.category,
+      sort: req.query.sort,
+    });
+    return res.json(data);
   } catch (err) {
+    return next(err);
+  }
+});
+
+router.get('/leads/saved/:id', requireAuth, requireVerifiedEmail, async (req, res, next) => {
+  try {
+    const lead = await searchService.getSavedLead(req.session.userId, req.params.id);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado.' });
+    return res.json({ lead });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.patch('/leads/saved/:id', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const patch = {};
+    if (Object.prototype.hasOwnProperty.call(body, 'status')) patch.status = body.status;
+    if (Object.prototype.hasOwnProperty.call(body, 'notes')) patch.notes = body.notes;
+    const lead = await searchService.updateSavedLead(req.session.userId, req.params.id, patch);
+    if (!lead) return res.status(404).json({ error: 'Lead não encontrado.' });
+    return res.json({ lead });
+  } catch (err) {
+    if (err.code === 'VALIDATION') {
+      return res.status(400).json({ error: err.message });
+    }
     return next(err);
   }
 });
