@@ -6,6 +6,7 @@
   <title>Maps Leads Finder</title>
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/search.css">
+  <link rel="stylesheet" href="/css/leads.css">
 </head>
 <body>
   <div class="sidebar-overlay" id="sidebar-overlay" aria-hidden="true"></div>
@@ -145,16 +146,107 @@
           </div>
         </section>
         <section class="view" id="view-leads" aria-label="Leads guardados">
-          <h2 class="page-heading">Leads guardados</h2>
-          <p class="page-sub">Contactos que guardaste</p>
-          <div class="card">
-            <div class="table-wrap">
-              <table class="data">
-                <thead>
-                  <tr><th>Nome</th><th>Endereço</th><th>Telefone</th><th>Email</th><th>Data</th></tr>
-                </thead>
-                <tbody id="leads-body"></tbody>
-              </table>
+          <div id="leads-list-panel" class="leads-crm">
+            <div class="leads-crm-header">
+              <h2 class="page-heading">Leads guardados</h2>
+              <p class="page-sub">Gere os estabelecimentos que guardaste e acompanha o teu processo comercial.</p>
+            </div>
+            <div class="leads-crm-stats" id="leads-stats">
+              <div class="leads-crm-stat"><span class="leads-crm-stat-label">Total</span><span class="leads-crm-stat-value" id="leads-stat-total">—</span></div>
+              <div class="leads-crm-stat"><span class="leads-crm-stat-label">Por contactar</span><span class="leads-crm-stat-value" id="leads-stat-pending">—</span></div>
+              <div class="leads-crm-stat"><span class="leads-crm-stat-label">Interessados</span><span class="leads-crm-stat-value" id="leads-stat-interested">—</span></div>
+              <div class="leads-crm-stat"><span class="leads-crm-stat-label">Clientes</span><span class="leads-crm-stat-value" id="leads-stat-clients">—</span></div>
+            </div>
+            <div class="leads-crm-toolbar card">
+              <div class="leads-crm-toolbar-row">
+                <div class="form-group leads-crm-search">
+                  <label class="form-label" for="leads-q">Pesquisar</label>
+                  <input class="input" id="leads-q" type="search" placeholder="Nome ou telefone" autocomplete="off">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="leads-status">Estado</label>
+                  <select class="select" id="leads-status">
+                    <option value="">Todos os estados</option>
+                    <option value="Por contactar">Por contactar</option>
+                    <option value="Contactado">Contactado</option>
+                    <option value="Não atendeu">Não atendeu</option>
+                    <option value="Aguardando resposta">Aguardando resposta</option>
+                    <option value="Interessado">Interessado</option>
+                    <option value="Reunião agendada">Reunião agendada</option>
+                    <option value="Não interessado">Não interessado</option>
+                    <option value="Cliente">Cliente</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="leads-category">Categoria</label>
+                  <select class="select" id="leads-category">
+                    <option value="">Todas as categorias</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="leads-sort">Ordenação</label>
+                  <select class="select" id="leads-sort">
+                    <option value="recent">Mais recentes</option>
+                    <option value="oldest">Mais antigos</option>
+                    <option value="name_asc">Nome A–Z</option>
+                    <option value="name_desc">Nome Z–A</option>
+                  </select>
+                </div>
+                <div class="form-group leads-crm-toolbar-actions">
+                  <label class="form-label">&nbsp;</label>
+                  <button type="button" class="btn btn-ghost btn-sm" id="leads-clear-filters">Limpar filtros</button>
+                </div>
+              </div>
+            </div>
+            <div class="card leads-crm-table-card">
+              <div class="table-wrap">
+                <table class="data leads-crm-table">
+                  <thead>
+                    <tr>
+                      <th>Estabelecimento</th>
+                      <th>Categoria</th>
+                      <th>Telefone</th>
+                      <th>Estado</th>
+                      <th>Guardado em</th>
+                      <th>Ação</th>
+                    </tr>
+                  </thead>
+                  <tbody id="leads-body"></tbody>
+                </table>
+              </div>
+              <div id="leads-pagination" class="results-pagination" hidden></div>
+            </div>
+          </div>
+          <div id="leads-detail-panel" class="leads-crm-detail" hidden>
+            <button type="button" class="btn btn-ghost btn-sm leads-crm-back" id="leads-back">← Voltar aos leads</button>
+            <div class="leads-crm-detail-grid">
+              <div class="card leads-crm-notes-card">
+                <h3 class="card-title">Notas comerciais</h3>
+                <p class="card-muted">Regista informações importantes sobre este estabelecimento.</p>
+                <textarea class="input" id="leads-notes" rows="10" maxlength="10000" placeholder="Escreve as tuas notas…"></textarea>
+                <div class="toolbar" style="margin-top:12px">
+                  <button type="button" class="btn btn-primary" id="leads-save-notes">Guardar notas</button>
+                  <span class="card-muted" id="leads-notes-status"></span>
+                </div>
+              </div>
+              <div class="card leads-crm-side-card">
+                <h3 class="card-title" id="leads-detail-name">—</h3>
+                <div class="leads-crm-fields" id="leads-detail-fields"></div>
+                <div class="form-group" style="margin-top:16px">
+                  <label class="form-label" for="leads-detail-status">Estado comercial</label>
+                  <select class="select" id="leads-detail-status">
+                    <option value="Por contactar">Por contactar</option>
+                    <option value="Contactado">Contactado</option>
+                    <option value="Não atendeu">Não atendeu</option>
+                    <option value="Aguardando resposta">Aguardando resposta</option>
+                    <option value="Interessado">Interessado</option>
+                    <option value="Reunião agendada">Reunião agendada</option>
+                    <option value="Não interessado">Não interessado</option>
+                    <option value="Cliente">Cliente</option>
+                  </select>
+                </div>
+                <p class="card-muted" id="leads-status-msg" style="margin-top:8px"></p>
+              </div>
             </div>
           </div>
         </section>
