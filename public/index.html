@@ -1,15 +1,15 @@
 <!DOCTYPE html>
 <html lang="pt">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Maps Leads Finder</title>
-  <link rel="stylesheet" href="/css/tokens.css">
-  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/tokens.css" />
+  <link rel="stylesheet" href="/css/main.css" />
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar" aria-label="Navegação">
+    <aside class="sidebar" id="sidebar">
       <div class="sidebar-brand">
         <div class="brand-mark" aria-hidden="true">ML</div>
         <div>
@@ -17,14 +17,13 @@
           <div class="brand-sub">Finder SaaS</div>
         </div>
       </div>
-      <nav class="sidebar-nav">
+      <nav class="sidebar-nav" aria-label="Principal">
         <button type="button" class="nav-item active" data-view="dashboard">Dashboard</button>
         <button type="button" class="nav-item" data-view="search">Nova pesquisa</button>
         <button type="button" class="nav-item" data-view="results">Resultados</button>
         <button type="button" class="nav-item" data-view="history">Histórico</button>
         <button type="button" class="nav-item" data-view="leads">Leads guardados</button>
         <button type="button" class="nav-item" data-view="settings">Configurações</button>
-        <button type="button" class="nav-item" data-view="plans">Planos</button>
       </nav>
     </aside>
     <div class="main">
@@ -39,7 +38,7 @@
           </div>
         </div>
       </header>
-      <div class="content">
+      <main class="content">
         <section class="view active" id="view-dashboard" aria-label="Dashboard">
           <h2 class="page-heading">Dashboard</h2>
           <p class="page-sub">Resumo da tua atividade</p>
@@ -157,22 +156,19 @@
             <div><span class="form-label">Email</span><div id="settings-email">—</div></div>
             <div><span class="form-label">Estado do email</span><div id="settings-verified">—</div></div>
             <div id="reset-password-panel" hidden class="stack-gap-16">
-              <p id="reset-password-ok" class="card-muted" hidden></p>
-              <p id="reset-password-error" class="error" hidden></p>
+              <p id="reset-password-ok" class="success-box" hidden></p>
+              <p id="reset-password-error" class="error-box" hidden></p>
+              <div class="toolbar">
+                <button type="button" class="btn btn-primary" id="btn-send-reset-link">Enviar link de recuperação</button>
+                <button type="button" class="btn btn-ghost" id="btn-cancel-reset-password">Cancelar</button>
+              </div>
             </div>
             <div class="toolbar">
               <button type="button" class="btn btn-ghost" id="btn-show-reset-password">Recuperar palavra-passe</button>
-              <button type="button" class="btn btn-primary" id="btn-send-reset-link" hidden>Enviar link</button>
-              <button type="button" class="btn btn-ghost" id="btn-cancel-reset-password" hidden>Cancelar</button>
             </div>
           </div>
         </section>
-        <section class="view" id="view-plans" aria-label="Planos">
-          <h2 class="page-heading">Planos</h2>
-          <p class="page-sub">Escolhe o plano adequado</p>
-          <div class="card"><p class="card-muted">Os planos serão apresentados aqui.</p></div>
-        </section>
-      </div>
+      </main>
     </div>
   </div>
   <script src="/js/app.js"></script>
