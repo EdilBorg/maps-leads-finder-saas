@@ -1,4 +1,4 @@
-/* Search form + uniform result cards — dark theme consistent */
+/* Search form + compact result cards — dark theme consistent */
 
 .modality-grid { display: none !important; }
 
@@ -41,33 +41,11 @@ select option {
   display: flex;
   flex-direction: column;
   height: auto;
-  min-height: 380px;
+  min-height: 0;
   background: var(--surface-panel, #121314);
   border: 1px solid var(--color-graphite, #23252a);
   border-radius: var(--radius-cards, 10px);
   overflow: hidden;
-}
-
-.result-card-photo {
-  height: 120px;
-  flex-shrink: 0;
-  background: var(--surface-elevated, #161718);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-}
-
-.result-card-photo img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.result-card-photo .photo-placeholder {
-  font-size: 12px;
-  color: var(--color-ash, #62666d);
 }
 
 .result-card-body {
@@ -137,6 +115,10 @@ select option {
   border-color: var(--color-mist, #d0d6e0);
   color: var(--color-paper, #ffffff);
 }
+.result-card-actions .btn-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 .results-pagination {
   display: flex;
@@ -147,4 +129,42 @@ select option {
   flex-wrap: wrap;
   color: var(--color-fog, #8a8f98);
   font-size: 13px;
+}
+
+/* Toast notifications (save feedback) */
+.app-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 12px 18px;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  border: 1px solid var(--color-graphite, #23252a);
+  background: var(--surface-elevated, #161718);
+  color: var(--color-paper, #f4f5f7);
+  text-align: center;
+}
+.app-toast[hidden] { display: none !important; }
+.app-toast-success {
+  border-color: #2f6f4e;
+  background: #143024;
+  color: #d4f5e4;
+}
+.app-toast-warn {
+  border-color: #6f5a2f;
+  background: #302814;
+  color: #f5edd4;
+}
+.app-toast-error {
+  border-color: #6f2f2f;
+  background: #301414;
+  color: #f5d4d4;
+}
+.app-toast-info {
+  border-color: var(--color-graphite, #23252a);
 }
