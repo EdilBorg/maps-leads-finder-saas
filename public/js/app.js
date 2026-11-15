@@ -137,11 +137,35 @@
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   }
 
+  function closeMobileSidebar() {
+    const sidebar = $('#sidebar');
+    const overlay = $('#sidebar-overlay');
+    if (sidebar) sidebar.classList.remove('open');
+    if (overlay) {
+      overlay.classList.remove('open');
+      overlay.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  function openMobileSidebar() {
+    const sidebar = $('#sidebar');
+    const overlay = $('#sidebar-overlay');
+    if (sidebar) sidebar.classList.add('open');
+    if (overlay) {
+      overlay.classList.add('open');
+      overlay.setAttribute('aria-hidden', 'false');
+    }
+  }
+
   function showView(view) {
     $$('.view').forEach((el) => el.classList.toggle('active', el.id === 'view-' + view));
-    $$('.nav-item').forEach((el) => el.classList.toggle('active', el.getAttribute('data-view') === view));
+    $$('.nav-item').forEach((el) => {
+      const dv = el.getAttribute('data-view');
+      if (dv) el.classList.toggle('active', dv === view);
+    });
     const t = $('#topbar-title');
     if (t) t.textContent = titles[view] || 'Maps Leads Finder';
+    closeMobileSidebar();
     if (view === 'results') renderResultsState();
     if (view === 'dashboard') loadDashboard();
     if (view === 'history') {
@@ -173,12 +197,20 @@
   }
 
   function setGuestUi() {
-    const guest = $('#guest-actions'); const user = $('#user-actions');
-    if (guest) guest.hidden = false; if (user) user.hidden = true;
+    const guest = $('#guest-actions');
+    const user = $('#user-actions');
+    const logoutBtn = $('#btn-logout');
+    if (guest) guest.hidden = false;
+    if (user) user.hidden = true;
+    if (logoutBtn) logoutBtn.hidden = true;
   }
   function setAuthedUi() {
-    const guest = $('#guest-actions'); const user = $('#user-actions');
-    if (guest) guest.hidden = true; if (user) user.hidden = false;
+    const guest = $('#guest-actions');
+    const user = $('#user-actions');
+    const logoutBtn = $('#btn-logout');
+    if (guest) guest.hidden = true;
+    if (user) user.hidden = false;
+    if (logoutBtn) logoutBtn.hidden = false;
   }
 
   async function refreshAuthUi() {
@@ -920,6 +952,62 @@
     });
   }
 
+  function initMobileNav() {
+    const toggle = $('#mobile-toggle');
+    const overlay = $('#sidebar-overlay');
+    if (toggle) {
+      toggle.addEventListener('click', () => {
+        const sidebar = $('#sidebar');
+        if (sidebar && sidebar.classList.contains('open')) closeMobileSidebar();
+        else openMobileSidebar();
+      });
+    }
+    if (overlay) {
+      overlay.addEventListener('click', closeMobileSidebar);
+    }
+  }
+
+  let logoutInFlight = false;
+  async function logout() {
+    if (logoutInFlight) return;
+    logoutInFlight = true;
+    const btn = $('#btn-logout');
+    if (btn) btn.disabled = true;
+    try {
+      const token = await ensureCsrf();
+      const res = await api('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': token },
+        body: {},
+      });
+      if (!res.ok) {
+        const msg = (res.data && res.data.error) || 'Não foi possível terminar a sessão.';
+        showToast(msg, 'error');
+        return;
+      }
+      currentUser = null;
+      csrfToken = null;
+      currentResults = [];
+      currentResultsTotal = null;
+      currentSearchMeta = null;
+      setGuestUi();
+      window.location.href = '/pages/login.html';
+    } catch (_) {
+      showToast('Erro de rede ao terminar a sessão.', 'error');
+    } finally {
+      logoutInFlight = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function initLogout() {
+    const btn = $('#btn-logout');
+    if (btn) btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      logout();
+    });
+  }
+
   function initSearchForm() {
     const form = $('#search-form');
     if (form) form.addEventListener('submit', (e) => { e.preventDefault(); runSearch(); });
@@ -984,6 +1072,8 @@
 
   function init() {
     initNav();
+    initMobileNav();
+    initLogout();
     initSearchForm();
     initContactModal();
     initSettingsRecovery();
