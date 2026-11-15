@@ -12,6 +12,7 @@ html { -webkit-text-size-adjust: 100%; height: 100%; }
 body {
   margin: 0;
   min-height: 100%;
+  height: 100%;
   font-family: var(--font-inter);
   font-size: var(--text-body-sm);
   font-weight: var(--font-weight-regular);
@@ -36,7 +37,13 @@ button { cursor: pointer; border: none; background: none; }
   outline-offset: 2px;
 }
 
-.app-shell { display: flex; min-height: 100vh; }
+.app-shell {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
 
 .sidebar {
   width: var(--sidebar-width);
@@ -45,10 +52,10 @@ button { cursor: pointer; border: none; background: none; }
   border-right: 1px solid var(--color-graphite);
   display: flex;
   flex-direction: column;
-  position: sticky;
-  top: 0;
-  height: 100vh;
+  position: relative;
+  height: 100%;
   z-index: 40;
+  overflow: hidden;
 }
 
 .sidebar-brand {
@@ -142,7 +149,16 @@ button { cursor: pointer; border: none; background: none; }
 }
 .plan-chip strong { color: var(--color-mist); font-weight: var(--font-weight-medium); }
 
-.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
 
 .topbar {
   height: var(--topbar-height);
@@ -446,13 +462,16 @@ table.data .mono { font-family: var(--font-mono); font-size: 12px; color: var(--
   .form-grid.cols-2 { grid-template-columns: 1fr; }
 }
 @media (max-width: 768px) {
+  html, body { height: auto; overflow: auto; }
+  .app-shell { height: auto; min-height: 100vh; overflow: visible; }
   .sidebar {
-    position: fixed; left: 0; top: 0;
+    position: fixed; left: 0; top: 0; height: 100%;
     transform: translateX(-100%); transition: transform 0.2s ease;
   }
   .sidebar.open { transform: translateX(0); }
   .sidebar-overlay.open { display: block; }
   .mobile-toggle { display: inline-flex; }
+  .main { overflow: visible; }
   .content { padding: var(--spacing-16); }
   .topbar { padding: 0 var(--spacing-16); }
 }
@@ -497,7 +516,11 @@ table.data .mono { font-family: var(--font-mono); font-size: 12px; color: var(--
 }
 .content .success-box.visible { display: block; }
 
-html, body { overflow-x: hidden; max-width: 100%; }
+html, body {
+  height: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
 .table-wrap {
   -webkit-overflow-scrolling: touch;
   max-width: 100%;
@@ -506,24 +529,28 @@ html, body { overflow-x: hidden; max-width: 100%; }
 
 /* Refined scrollbars — sidebar + table wrappers (design system) */
 .sidebar-nav,
-.table-wrap {
+.table-wrap,
+.main {
   scrollbar-width: thin;
   scrollbar-color: var(--color-smoke) transparent;
 }
 
 .sidebar-nav::-webkit-scrollbar,
-.table-wrap::-webkit-scrollbar {
+.table-wrap::-webkit-scrollbar,
+.main::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 .sidebar-nav::-webkit-scrollbar-track,
-.table-wrap::-webkit-scrollbar-track {
+.table-wrap::-webkit-scrollbar-track,
+.main::-webkit-scrollbar-track {
   background: transparent;
 }
 
 .sidebar-nav::-webkit-scrollbar-thumb,
-.table-wrap::-webkit-scrollbar-thumb {
+.table-wrap::-webkit-scrollbar-thumb,
+.main::-webkit-scrollbar-thumb {
   background-color: var(--color-smoke);
   border-radius: 999px;
   border: 2px solid transparent;
@@ -531,19 +558,22 @@ html, body { overflow-x: hidden; max-width: 100%; }
 }
 
 .sidebar-nav::-webkit-scrollbar-thumb:hover,
-.table-wrap::-webkit-scrollbar-thumb:hover {
+.table-wrap::-webkit-scrollbar-thumb:hover,
+.main::-webkit-scrollbar-thumb:hover {
   background-color: var(--color-ash);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
 .sidebar-nav::-webkit-scrollbar-thumb:active,
-.table-wrap::-webkit-scrollbar-thumb:active {
+.table-wrap::-webkit-scrollbar-thumb:active,
+.main::-webkit-scrollbar-thumb:active {
   background-color: var(--color-ash);
 }
 
 .sidebar-nav::-webkit-scrollbar-corner,
-.table-wrap::-webkit-scrollbar-corner {
+.table-wrap::-webkit-scrollbar-corner,
+.main::-webkit-scrollbar-corner {
   background: transparent;
 }
 
@@ -608,7 +638,6 @@ table.data td.cell-wrap {
 }
 
 @media (min-width: 1200px) {
-  /* Dashboard — balanced desktop composition */
   #view-dashboard .stat-grid {
     grid-template-columns: repeat(3, 1fr);
     gap: var(--spacing-16);
@@ -631,28 +660,6 @@ table.data td.cell-wrap {
     margin-bottom: var(--spacing-20);
   }
   #view-dashboard .table-wrap-dashboard {
-    margin: 0;
-  }
-}
-
-@media (min-width: 1440px) {
-  .content { padding: var(--spacing-32) var(--spacing-24); }
-  #view-dashboard .stat-grid {
-    gap: var(--spacing-20);
-  }
-  #view-dashboard .stat-value {
-    font-size: 28px;
-  }
-  #view-dashboard > .card {
-    margin-top: var(--spacing-32);
-  }
-}
-
-@media (min-width: 1920px) {
-  #view-dashboard .stat-grid {
-    gap: var(--spacing-24);
-  }
-  #view-dashboard .stat-card {
-    padding: var(--spacing-24) var(--spacing-28, 28px);
+    margin-top: 0;
   }
 }
