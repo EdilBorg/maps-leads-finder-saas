@@ -5,7 +5,6 @@
  * Free-search: atomic hold + validated consume in the same TX as result inserts.
  * GLOBAL LOCK ORDER: users → searches.
  * Incremental provider progress is written to searches.providers_used while status=running.
- * CRM list/detail/update delegated to ./savedLeadsCrm.
  */
 function getPool() {
   return require('../db/pool').getPool();
@@ -29,6 +28,7 @@ const {
   FREE_SEARCH_HOLD_MINUTES,
   FREE_SEARCH_RENEW_INTERVAL_MS,
 } = require('./freeSearchHold');
+
 const {
   listSavedLeads,
   getSavedLead,
@@ -89,18 +89,7 @@ async function updateProviderProgress(pool, searchId, userId, progress) {
   if (progress.durationMs != null) entry.durationMs = progress.durationMs;
   try {
     await pool.query(
-      `UPDATE searches
-       SET providers_used = (
-         SELECT COALESCE(jsonb_agg(
-           CASE
-             WHEN elem->>'code' = $3 THEN $4::jsonb
-             ELSE elem
-           END
-           ORDER BY ord
-         ), '[]'::jsonb)
-         FROM jsonb_array_elements(providers_used) WITH ORDINALITY AS t(elem, ord)
-       )
-       WHERE id = $1 AND user_id = $2 AND status = 'running'`,
+      `UPDATE searches\n       SET providers_used = (\n         SELECT COALESCE(jsonb_agg(\n           CASE\n             WHEN elem->>'code' = $3 THEN $4::jsonb\n             ELSE elem\n           END\n           ORDER BY ord\n         ), '[]'::jsonb)\n         FROM jsonb_array_elements(providers_used) WITH ORDINALITY AS t(elem, ord)\n       )\n       WHERE id = $1 AND user_id = $2 AND status = 'running'`,
       [searchId, userId, code, JSON.stringify(entry)]
     );
   } catch (err) {
@@ -161,17 +150,92 @@ function startHoldRenewal(userId, holdToken, opts = {}) {
 
 async function markSearchFailed(pool, searchId, userId, summary) {
   await pool.query(
-    `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2
-     WHERE id=$1 AND user_id=$3 AND status IN ('running','failed')`,
+    `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2\n     WHERE id=$1 AND user_id=$3 AND status IN ('running','failed')`,
     [searchId, summary, userId]
   );
 }
 
-// NOTE: remaining search job functions preserved from mainline —
-// For brevity in this emergency restore, re-export CRM + pull core from backup pattern.
-// Full implementation is required — load from attached artifact.
+async function startSearch(opts) {
+  const pool = getPool();
+  let searchId = null;
+  let holdToken = null;
+
+  {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const hold = await acquireFreeSearchHold(client, opts.userId, null);
+      if (!hold.allowed) {
+        await client.query('ROLLBACK');
+        const err = new Error(
+          hold.reason === 'FREE_SEARCH_IN_PROGRESS'
+            ? 'Já existe uma pesquisa gratuita em curso. Aguarde ou tente mais tarde.'
+            : 'Quota gratuita indisponível.'
+        );
+        err.code = 'QUOTA';
+        err.reason = hold.reason;
+        throw err;
+      }
+      holdToken = hold.holdToken;
+      const limit = normalizeLimit(opts.limit);
+      const ins = await client.query(
+        `INSERT INTO searches (\n           user_id, query, location, filters, status, providers_used, started_at, expires_at\n         ) VALUES ($1,$2,$3,$4::jsonb,'running',$5::jsonb,NOW(), NOW() + ($6 || ' days')::interval)\n         RETURNING id`,
+        [
+          opts.userId, opts.query, opts.location,
+          JSON.stringify({ ...(opts.filters || {}), limit, holdToken }),
+          JSON.stringify([
+            { code: 'apify', status: 'pending', count: 0 },
+            { code: 'tomtom', status: 'pending', count: 0 },
+            { code: 'foursquare', status: 'pending', count: 0 },
+          ]),
+          String(RETENTION_DAYS),
+        ]
+      );
+      searchId = ins.rows[0].id;
+      const bound = await bindHoldToSearch(client, opts.userId, holdToken, searchId);
+      if (!bound) {
+        await client.query('ROLLBACK');
+        try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
+        const err = new Error('Não foi possível associar a reserva à pesquisa. Tenta novamente.');
+        err.code = 'HOLD_BIND_FAILED';
+        throw err;
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      if (holdToken && err.code !== 'QUOTA' && err.code !== 'HOLD_BIND_FAILED') {
+        try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
+      }
+      client.release();
+      throw err;
+    }
+    client.release();
+  }
+
+  const controller = new AbortController();
+  activeRuns.set(String(searchId), { controller, userId: opts.userId, holdToken });
+
+  setImmediate(() => {
+    runSearchJob({
+      searchId,
+      userId: opts.userId,
+      query: opts.query,
+      location: opts.location,
+      filters: opts.filters,
+      limit: opts.limit,
+      holdToken,
+      controller,
+      executeSearchFn: opts.executeSearchFn,
+    }).catch((err) => {
+      console.error('[search-job]', searchId, err && err.message ? err.message : err);
+    });
+  });
+
+  return { searchId, status: 'running' };
+}
 
 module.exports = {
+  startSearch,
   listSavedLeads,
   getSavedLead,
   updateSavedLead,
