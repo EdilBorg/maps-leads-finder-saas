@@ -721,31 +721,71 @@
   }
 
   async function loadDashboard() {
+    const box = $('#dashboard-recent');
+    if (!box) return;
     try {
-      const res = await api('/api/searches?limit=5');
-      const el = $('#dashboard-recent');
-      if (!el) return;
-      el.innerHTML = '';
+      const res = await api('/api/searches/dashboard');
       if (!res.ok) {
-        el.textContent = res.status === 401 ? 'Inicia sessão para ver o dashboard.' : 'Não foi possível carregar.';
+        ['stat-searches', 'stat-results', 'stat-leads'].forEach((id) => {
+          const el = $('#' + id); if (el) el.textContent = '—';
+        });
+        box.innerHTML = '';
+        const empty = document.createElement('p');
+        empty.className = 'empty-hint';
+        empty.id = 'dashboard-recent-empty';
+        empty.textContent = res.status === 401
+          ? 'Inicia sessão para ver a atividade da conta.'
+          : res.status === 403
+            ? 'Verifica o email para aceder aos dados da conta.'
+            : 'Não foi possível carregar o dashboard.';
+        box.appendChild(empty);
         return;
       }
-      const items = (res.data && res.data.items) || [];
-      if (!items.length) {
-        el.textContent = 'Ainda não há pesquisas recentes.';
+      const data = res.data || {};
+      if ($('#stat-searches')) $('#stat-searches').textContent = String(data.searchesCount != null ? data.searchesCount : '—');
+      if ($('#stat-results')) $('#stat-results').textContent = String(data.resultsCount != null ? data.resultsCount : '—');
+      if ($('#stat-leads')) $('#stat-leads').textContent = String(data.savedLeadsCount != null ? data.savedLeadsCount : '—');
+      box.innerHTML = '';
+      const recent = data.recentSearches || [];
+      if (!recent.length) {
+        const p = document.createElement('p');
+        p.className = 'empty-hint';
+        p.textContent = 'Ainda não existem pesquisas.';
+        box.appendChild(p);
         return;
       }
-      const ul = document.createElement('ul');
-      ul.className = 'dashboard-list';
-      items.forEach((item) => {
-        const li = document.createElement('li');
-        li.style.cursor = 'pointer';
-        li.textContent = (item.query || '—') + ' · ' + (item.location || '—') + ' · ' + formatDate(item.createdAt);
-        li.addEventListener('click', () => openSearch(item.id));
-        ul.appendChild(li);
+      const wrap = document.createElement('div');
+      wrap.className = 'table-wrap table-wrap-dashboard';
+      const table = document.createElement('table');
+      table.className = 'data table-dashboard';
+      const thead = document.createElement('thead');
+      thead.innerHTML = '<tr><th>Categoria</th><th>Localização</th><th>Resultados</th><th>Estado</th><th>Data</th></tr>';
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      recent.forEach((item) => {
+        const tr = document.createElement('tr');
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', () => openSearch(item.id));
+        [item.query, item.location, item.resultsCount != null ? item.resultsCount : '—', item.status, formatDate(item.createdAt)].forEach((val, idx) => {
+          const td = document.createElement('td');
+          if (idx === 3) {
+            const pill = document.createElement('span');
+            pill.className = 'status-pill ' + esc(item.status);
+            pill.textContent = esc(item.status);
+            td.appendChild(pill);
+          } else {
+            td.textContent = val == null ? '—' : String(val);
+          }
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
       });
-      el.appendChild(ul);
-    } catch (_) {}
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      box.appendChild(wrap);
+    } catch (_) {
+      box.textContent = 'Não foi possível carregar o dashboard.';
+    }
   }
 
   async function loadSettings() {
