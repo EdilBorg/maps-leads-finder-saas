@@ -1,0 +1,108 @@
+/* CRM Stage 1 — isolated under .leads-crm* ; uses design tokens only */
+
+.leads-crm-header { margin-bottom: var(--spacing-16); }
+
+.leads-crm-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--spacing-12);
+  margin-bottom: var(--spacing-16);
+}
+@media (max-width: 900px) {
+  .leads-crm-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 480px) {
+  .leads-crm-stats { grid-template-columns: 1fr; }
+}
+
+.leads-crm-stat {
+  background: var(--surface-panel);
+  border: 1px solid var(--color-graphite);
+  border-radius: 12px;
+  padding: var(--spacing-16);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.leads-crm-stat-label {
+  font-size: var(--text-caption, 12px);
+  color: var(--color-fog);
+}
+.leads-crm-stat-value {
+  font-size: var(--text-title, 20px);
+  font-weight: var(--font-weight-semibold, 510);
+  color: var(--color-paper);
+  letter-spacing: -0.02em;
+}
+
+.leads-crm-toolbar { margin-bottom: var(--spacing-16); }
+.leads-crm-toolbar-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr 1fr auto;
+  gap: var(--spacing-12);
+  align-items: end;
+}
+@media (max-width: 960px) {
+  .leads-crm-toolbar-row { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 560px) {
+  .leads-crm-toolbar-row { grid-template-columns: 1fr; }
+}
+
+.leads-crm-table-card { padding-bottom: var(--spacing-12); }
+
+.leads-crm-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--text-caption, 12px);
+  border: 1px solid var(--color-graphite);
+  background: var(--surface-elevated);
+  color: var(--color-mist);
+  white-space: nowrap;
+}
+.leads-crm-status.is-pending { border-color: var(--color-smoke); color: var(--color-fog); }
+.leads-crm-status.is-contacted { border-color: #5d542f; color: #e7d89b; }
+.leads-crm-status.is-waiting { border-color: #5d542f; color: #e7d89b; }
+.leads-crm-status.is-interested { border-color: #2f5d3a; color: #9be7a8; }
+.leads-crm-status.is-meeting { border-color: #2f4f5d; color: #9bd6e7; }
+.leads-crm-status.is-rejected { border-color: #5d2f2f; color: #e79b9b; }
+.leads-crm-status.is-client {
+  border-color: var(--color-acid-lime);
+  color: var(--color-acid-lime);
+}
+
+.leads-crm-detail { margin-top: var(--spacing-8); }
+.leads-crm-back { margin-bottom: var(--spacing-16); }
+.leads-crm-detail-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: var(--spacing-16);
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .leads-crm-detail-grid { grid-template-columns: 1fr; }
+}
+
+.leads-crm-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-8);
+  margin-top: var(--spacing-12);
+}
+.leads-crm-field {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: var(--spacing-8);
+  font-size: var(--text-body-sm, 14px);
+}
+.leads-crm-field-label { color: var(--color-fog); }
+.leads-crm-field-value { color: var(--color-mist); word-break: break-word; }
+
+#leads-notes {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  margin-top: var(--spacing-12);
+}
