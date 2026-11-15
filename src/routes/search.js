@@ -90,17 +90,12 @@ router.post('/leads/save', requireAuth, requireVerifiedEmail, requireCsrf, async
     if (!ids.length) {
       return res.status(400).json({ error: 'Seleciona pelo menos um resultado.' });
     }
-    const saved = await searchService.saveLeadsFromResults(req.session.userId, ids.slice(0, 100));
+    const result = await searchService.saveLeadsFromResults(req.session.userId, ids.slice(0, 100));
     return res.status(201).json({
-      saved: saved.map((s) => ({
-        id: s.id,
-        name: s.name,
-        address: s.address,
-        phone: s.phone,
-        email: s.email,
-        website: s.website,
-        createdAt: s.created_at,
-      })),
+      savedCount: result.savedCount,
+      alreadySavedCount: result.alreadySavedCount,
+      saved: result.saved,
+      alreadySaved: result.alreadySaved,
     });
   } catch (err) {
     return next(err);
