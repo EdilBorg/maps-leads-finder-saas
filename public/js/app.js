@@ -15,6 +15,7 @@
   let csrfToken = null;
   let currentUser = null;
   let currentResults = [];
+  let currentResultsTotal = null;
   let currentSearchMeta = null;
   let resultsPage = 1;
   let historyPage = 1;
@@ -236,6 +237,7 @@
     const count = $('#results-count');
     if (!grid) return;
     grid.innerHTML = '';
+    const totalOfficial = currentResultsTotal != null ? currentResultsTotal : currentResults.length;
     if (!currentResults.length) {
       if (empty) {
         empty.hidden = false;
@@ -245,11 +247,14 @@
         if (p) p.textContent = msg;
       }
       if (count) count.textContent = '0 resultados';
+      updateSelectedCountLabel();
       renderPagination();
       return;
     }
     if (empty) empty.hidden = true;
-    if (count) count.textContent = currentResults.length + ' resultado' + (currentResults.length === 1 ? '' : 's');
+    if (count) {
+      count.textContent = totalOfficial + ' resultado' + (totalOfficial === 1 ? '' : 's');
+    }
     const pages = totalPages();
     if (resultsPage > pages) resultsPage = pages;
     if (resultsPage < 1) resultsPage = 1;
@@ -283,6 +288,7 @@
       const cb = document.createElement('input');
       cb.type = 'checkbox'; cb.className = 'result-check'; cb.value = r.id || '';
       cb.setAttribute('aria-label', 'Selecionar ' + displayName);
+      cb.addEventListener('change', updateSelectedCountLabel);
       actions.appendChild(cb);
       const contactBtn = document.createElement('button');
       contactBtn.type = 'button'; contactBtn.className = 'btn btn-primary btn-sm';
@@ -311,6 +317,7 @@
     });
     grid.appendChild(frag);
     renderPagination();
+    updateSelectedCountLabel();
   }
 
   function resetSearchUiButtons() {
@@ -356,6 +363,47 @@
     }
   }
 
+  function setSearchProgress(visible, text) {
+    const box = $('#search-progress');
+    if (!box) return;
+    box.hidden = !visible;
+    if (text != null) {
+      const p = $('#search-progress-text') || box.querySelector('p');
+      if (p) p.textContent = text;
+    }
+  }
+
+  function friendlySearchProgress(status, providers) {
+    const list = Array.isArray(providers) ? providers : [];
+    const statuses = list.map((p) => (p && p.status) || '');
+    const anyRunning = statuses.some((s) => s === 'running' || s === 'pending');
+    const anyDone = statuses.some((s) => s === 'completed' || s === 'ok' || s === 'no_results' || s === 'empty');
+    if (status === 'pending' || status === 'queued') return 'A preparar a pesquisa…';
+    if (status === 'running') {
+      if (!list.length) return 'A procurar estabelecimentos…';
+      if (anyRunning && !anyDone) return 'A procurar estabelecimentos…';
+      if (anyRunning && anyDone) return 'A recolher informações…';
+      if (!anyRunning && anyDone) return 'A reunir e verificar resultados…';
+      return 'A finalizar a pesquisa…';
+    }
+    return 'A processar a pesquisa…';
+  }
+
+  function officialResultsTotal(payload) {
+    const d = payload || {};
+    if (d.search && d.search.resultsCount != null) return Number(d.search.resultsCount);
+    if (d.totals && d.totals.afterFilters != null) return Number(d.totals.afterFilters);
+    if (Array.isArray(d.results)) return d.results.length;
+    return 0;
+  }
+
+  function updateSelectedCountLabel() {
+    const btn = $('#btn-save-leads');
+    if (!btn) return;
+    const n = $$('.result-check:checked').length;
+    btn.textContent = n > 0 ? ('Guardar selecionados (' + n + ')') : 'Guardar selecionados';
+  }
+
   function setSummary(visible, text) {
     const box = $('#results-summary');
     const t = $('#results-summary-text');
@@ -381,78 +429,107 @@
       try {
         statusRes = await api('/api/searches/' + searchId + '/status');
       } catch (_) {
-        setStatus('Erro de rede ao consultar o estado da pesquisa.', true);
+        setSearchProgress(false);
         setProgress(false);
-        setSummary(true, 'Erro de rede. Tenta novamente.');
+        setStatus('Não foi possível consultar o estado da pesquisa. Tenta novamente.', true);
         stopPolling(); resetSearchUiButtons(); activeSearchId = null;
-        return;
+        return { outcome: 'error' };
       }
       if (!statusRes.ok) {
         const msg = (statusRes.data && statusRes.data.error) ||
           (statusRes.status === 404 ? 'Pesquisa não encontrada.' : 'Não foi possível obter o estado da pesquisa.');
-        setStatus(msg, true); setProgress(false); setSummary(true, msg);
-        currentResults = []; currentSearchMeta = { message: msg };
-        renderResultsState(); stopPolling(); resetSearchUiButtons(); activeSearchId = null;
-        return;
+        setSearchProgress(false);
+        setProgress(false);
+        setStatus(msg, true);
+        currentResults = []; currentResultsTotal = 0; currentSearchMeta = { message: msg };
+        stopPolling(); resetSearchUiButtons(); activeSearchId = null;
+        return { outcome: 'error' };
       }
       const data = statusRes.data || {};
       const status = data.status || '';
       const providers = data.providers || [];
-      if (Array.isArray(providers) && providers.length) {
-        setProgress(true, providers.map((p) => (p.code || '') + ': ' + (p.status || '')).join(' · '));
-      } else {
-        setProgress(true, data.message || ('Estado: ' + status));
-      }
+      setSearchProgress(true, friendlySearchProgress(status, providers));
       if (status === 'running' || status === 'pending' || status === 'queued') {
         await new Promise((r) => { pollTimer = setTimeout(r, 1500); });
         continue;
       }
-      stopPolling(); setProgress(false);
+      stopPolling();
       if (status === 'cancelled') {
+        setSearchProgress(false);
+        setProgress(false);
         currentResults = [];
+        currentResultsTotal = 0;
         currentSearchMeta = { searchId, status: 'cancelled', message: 'Pesquisa cancelada.' };
-        setStatus('Pesquisa cancelada.'); setSummary(true, 'Pesquisa cancelada pelo utilizador.');
-        renderResultsState(); resetSearchUiButtons(); activeSearchId = null;
-        return;
+        setStatus('Pesquisa cancelada.');
+        resetSearchUiButtons(); activeSearchId = null;
+        return { outcome: 'cancelled' };
       }
       if (status === 'failed' || status === 'error') {
         const errMsg = data.errorSummary || data.message || 'A pesquisa falhou.';
-        currentResults = []; currentSearchMeta = { searchId, status, message: errMsg };
-        setStatus(errMsg, true); setSummary(true, errMsg);
-        renderResultsState(); resetSearchUiButtons(); activeSearchId = null;
-        return;
+        setSearchProgress(false);
+        setProgress(false);
+        currentResults = [];
+        currentResultsTotal = 0;
+        currentSearchMeta = { searchId, status, message: errMsg };
+        setStatus(errMsg, true);
+        resetSearchUiButtons(); activeSearchId = null;
+        return { outcome: 'error' };
       }
+      setSearchProgress(true, 'A finalizar a pesquisa…');
       let resultsRes;
       try {
         resultsRes = await api('/api/searches/' + searchId + '/results');
       } catch (_) {
-        setStatus('Erro de rede ao carregar resultados.', true);
-        setSummary(true, 'Erro de rede ao carregar resultados.');
+        setSearchProgress(false);
+        setProgress(false);
+        setStatus('Não foi possível carregar os resultados. Tenta novamente.', true);
+        currentResults = [];
+        currentResultsTotal = 0;
+        currentSearchMeta = { message: 'Não foi possível carregar os resultados.' };
         resetSearchUiButtons(); activeSearchId = null;
-        return;
+        return { outcome: 'error' };
       }
       if (!resultsRes.ok) {
         const msg = (resultsRes.data && resultsRes.data.error) || 'Não foi possível carregar os resultados.';
-        setStatus(msg, true); setSummary(true, msg);
-        currentResults = []; currentSearchMeta = { message: msg };
-        renderResultsState(); resetSearchUiButtons(); activeSearchId = null;
-        return;
+        setSearchProgress(false);
+        setProgress(false);
+        setStatus(msg, true);
+        currentResults = [];
+        currentResultsTotal = 0;
+        currentSearchMeta = { message: msg };
+        resetSearchUiButtons(); activeSearchId = null;
+        return { outcome: 'error' };
+      }
+      if (abortRequested) {
+        setSearchProgress(false);
+        setProgress(false);
+        currentResults = [];
+        currentResultsTotal = 0;
+        currentSearchMeta = { searchId, status: 'cancelled', message: 'Pesquisa cancelada.' };
+        setStatus('Pesquisa cancelada.');
+        resetSearchUiButtons(); activeSearchId = null;
+        return { outcome: 'cancelled' };
       }
       const d2 = resultsRes.data || {};
       currentResults = Array.isArray(d2.results) ? d2.results : [];
+      currentResultsTotal = officialResultsTotal(d2);
       resultsPage = 1;
       currentSearchMeta = { searchId, status: (d2.search && d2.search.status) || status, message: d2.message || '' };
-      const msg = currentResults.length
-        ? currentResults.length + ' resultado(s) encontrados.'
-        : (d2.message || 'Nenhum resultado encontrado.');
-      setStatus(currentResults.length ? '' : msg, !currentResults.length);
-      setSummary(true, msg);
+      setSearchProgress(false);
+      setProgress(false);
+      setStatus('');
       renderResultsState();
+      showView('results');
       resetSearchUiButtons();
       activeSearchId = null;
-      return;
+      return { outcome: 'success' };
     }
-    stopPolling(); resetSearchUiButtons(); activeSearchId = null;
+    stopPolling();
+    setSearchProgress(false);
+    setProgress(false);
+    resetSearchUiButtons();
+    activeSearchId = null;
+    return { outcome: 'cancelled' };
   }
 
   async function runSearch() {
@@ -467,8 +544,14 @@
     const noWebsite = !!document.querySelector('input[name="noWebsite"]:checked');
     const minReviews = !!document.querySelector('input[name="minReviews"]:checked');
     if (!query || !location) { setStatus('Preenche categoria e localização.', true); return; }
-    stopPolling(); abortRequested = false;
-    currentResults = []; resultsPage = 1; currentSearchMeta = null; setSummary(false, '');
+    stopPolling();
+    abortRequested = false;
+    currentResults = [];
+    currentResultsTotal = null;
+    resultsPage = 1;
+    currentSearchMeta = null;
+    setSummary(false, '');
+    setProgress(false);
     const btn = $('#btn-search');
     if (btn) { btn.disabled = true; btn.textContent = 'A pesquisar…'; }
     let cancelBtn = $('#btn-cancel-search');
@@ -481,16 +564,29 @@
     if (cancelBtn) {
       cancelBtn.hidden = false;
       cancelBtn.onclick = async () => {
-        abortRequested = true; stopPolling();
+        abortRequested = true;
+        stopPolling();
         if (activeSearchId) await sendCancel(activeSearchId);
-        setStatus('Pesquisa cancelada.'); setProgress(false); setSummary(true, 'Pesquisa cancelada.');
-        currentResults = []; currentSearchMeta = { message: 'Pesquisa cancelada.' };
-        renderResultsState(); resetSearchUiButtons(); activeSearchId = null;
+        setSearchProgress(false);
+        setProgress(false);
+        setStatus('Pesquisa cancelada.');
+        currentResults = [];
+        currentResultsTotal = 0;
+        currentSearchMeta = { message: 'Pesquisa cancelada.' };
+        resetSearchUiButtons();
+        activeSearchId = null;
       };
     }
-    setProgress(true, 'A iniciar pesquisa…'); setStatus(''); showView('results');
+    setSearchProgress(true, 'A preparar a pesquisa…');
+    setStatus('');
     try {
       const token = await ensureCsrf();
+      if (abortRequested) {
+        setSearchProgress(false);
+        setStatus('Pesquisa cancelada.');
+        resetSearchUiButtons();
+        return;
+      }
       const res = await api('/api/searches', {
         method: 'POST',
         headers: { 'X-CSRF-Token': token },
@@ -505,23 +601,52 @@
           },
         },
       });
+      if (abortRequested) {
+        const sid = res && res.data && (res.data.searchId || res.data.id);
+        if (sid) {
+          activeSearchId = sid;
+          await sendCancel(sid);
+        }
+        setSearchProgress(false);
+        setStatus('Pesquisa cancelada.');
+        currentResults = [];
+        currentResultsTotal = 0;
+        resetSearchUiButtons();
+        activeSearchId = null;
+        return;
+      }
       if (!res.ok) {
         const err = (res.data && res.data.error) || 'Não foi possível iniciar a pesquisa.';
-        setStatus(err, true); setProgress(false); setSummary(true, err);
-        renderResultsState(); resetSearchUiButtons(); activeSearchId = null;
+        setStatus(err, true);
+        setSearchProgress(false);
+        setProgress(false);
+        resetSearchUiButtons();
+        activeSearchId = null;
         return;
       }
       const searchId = res.data && (res.data.searchId || res.data.id);
       if (!searchId) {
-        setStatus('Resposta inválida do servidor.', true); setProgress(false);
-        resetSearchUiButtons(); return;
+        setStatus('Resposta inválida do servidor.', true);
+        setSearchProgress(false);
+        resetSearchUiButtons();
+        return;
       }
       activeSearchId = searchId;
+      if (abortRequested) {
+        await sendCancel(searchId);
+        setSearchProgress(false);
+        setStatus('Pesquisa cancelada.');
+        resetSearchUiButtons();
+        activeSearchId = null;
+        return;
+      }
       await pollSearchUntilDone(searchId);
     } catch (_) {
       setStatus('Erro de rede ao iniciar a pesquisa.', true);
-      setProgress(false); setSummary(true, 'Erro de rede.');
-      resetSearchUiButtons(); activeSearchId = null;
+      setSearchProgress(false);
+      setProgress(false);
+      resetSearchUiButtons();
+      activeSearchId = null;
     }
   }
 
@@ -536,18 +661,19 @@
       if (!resultsRes.ok) {
         const msg = (resultsRes.data && resultsRes.data.error) || 'Não foi possível carregar os resultados.';
         setStatus(msg, true); setSummary(true, msg);
-        currentResults = []; currentSearchMeta = { message: msg };
+        currentResults = []; currentResultsTotal = 0; currentSearchMeta = { message: msg };
         renderResultsState();
         return;
       }
       const d2 = resultsRes.data || {};
       currentResults = Array.isArray(d2.results) ? d2.results : [];
+      currentResultsTotal = officialResultsTotal(d2);
       resultsPage = 1;
       currentSearchMeta = { searchId: id, status: (d2.search && d2.search.status) || '', message: d2.message || '' };
-      const msg = currentResults.length
-        ? currentResults.length + ' resultado(s) encontrados.'
+      const msg = currentResultsTotal
+        ? currentResultsTotal + ' resultado(s) encontrados.'
         : (d2.message || 'Nenhum resultado encontrado.');
-      setStatus(currentResults.length ? '' : msg, !currentResults.length);
+      setStatus('');
       setSummary(true, msg);
       renderResultsState();
     } catch (_) {
