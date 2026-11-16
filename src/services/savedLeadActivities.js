@@ -51,7 +51,7 @@ function mapActivityRow(r) {
  * List activities for a lead owned by userId (newest first).
  */
 async function listActivities(userId, leadId, opts = {}) {
-  const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 50, 1), 200);
+  const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 50, 1), 100);
   const offset = Math.max(parseInt(opts.offset, 10) || 0, 0);
   const pool = getPool();
 

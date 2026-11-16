@@ -26,6 +26,7 @@
   let selectedLeadIds = new Set();
   let selectedHistoryIds = new Set();
   let resultsSelectAllMode = false;
+  let resultsExcludedIds = new Set();
 
 
   function $(sel) { return document.querySelector(sel); }
@@ -363,9 +364,19 @@
       const cb = document.createElement('input');
       cb.type = 'checkbox'; cb.className = 'result-check'; cb.value = r.id || '';
       cb.setAttribute('aria-label', 'Selecionar ' + displayName);
-      if (resultsSelectAllMode) cb.checked = true;
+      const rid = String(r.id || '');
+      if (resultsSelectAllMode) {
+        cb.checked = !resultsExcludedIds.has(rid);
+      }
       cb.addEventListener('change', () => {
-        if (!cb.checked) resultsSelectAllMode = false;
+        const id = String(cb.value || '').trim();
+        if (resultsSelectAllMode) {
+          if (!cb.checked) {
+            if (id) resultsExcludedIds.add(id);
+          } else if (id) {
+            resultsExcludedIds.delete(id);
+          }
+        }
         updateSelectedCountLabel();
       });
       actions.appendChild(cb);
@@ -456,13 +467,19 @@
     return 0;
   }
 
-    function getSelectedResultIds() {
+  function getSelectedResultIds() {
     if (resultsSelectAllMode && currentResults.length) {
-      return currentResults.map((r) => r && r.id).filter(Boolean).map(String);
+      return currentResults
+        .map((r) => (r && r.id != null ? String(r.id) : ''))
+        .filter((id) => id && !resultsExcludedIds.has(id));
     }
-    return $$('.result-check:checked')
-      .map((el) => (el && el.value ? String(el.value).trim() : ''))
-      .filter(Boolean);
+    const seen = new Set();
+    const ids = [];
+    $$('.result-check:checked').forEach((el) => {
+      const id = el && el.value ? String(el.value).trim() : '';
+      if (id && !seen.has(id)) { seen.add(id); ids.push(id); }
+    });
+    return ids;
   }
 
   function updateSelectedCountLabel() {
@@ -472,7 +489,7 @@
     const checkedPage = pageChecks.filter((c) => c.checked).length;
     let n;
     if (resultsSelectAllMode) {
-      n = currentResults.length;
+      n = Math.max(0, currentResults.length - resultsExcludedIds.size);
     } else {
       n = checkedPage;
     }
@@ -480,10 +497,21 @@
       btn.textContent = n > 0 ? ('Guardar seleccionados (' + n + ')') : 'Guardar seleccionados';
     }
     if (master) {
-      if (!pageChecks.length) {
+      if (resultsSelectAllMode) {
+        if (resultsExcludedIds.size === 0 && currentResults.length > 0) {
+          master.checked = true;
+          master.indeterminate = false;
+        } else if (n === 0) {
+          master.checked = false;
+          master.indeterminate = false;
+        } else {
+          master.checked = false;
+          master.indeterminate = true;
+        }
+      } else if (!pageChecks.length) {
         master.checked = false;
         master.indeterminate = false;
-      } else if (resultsSelectAllMode || checkedPage === pageChecks.length) {
+      } else if (checkedPage === pageChecks.length) {
         master.checked = true;
         master.indeterminate = false;
       } else if (checkedPage === 0) {
@@ -498,7 +526,15 @@
 
   function setResultsSelectAll(on) {
     resultsSelectAllMode = !!on;
+    resultsExcludedIds.clear();
     $$('.result-check').forEach((c) => { c.checked = !!on; });
+    updateSelectedCountLabel();
+  }
+
+  function clearResultsSelection() {
+    resultsSelectAllMode = false;
+    resultsExcludedIds.clear();
+    $$('.result-check').forEach((c) => { c.checked = false; });
     updateSelectedCountLabel();
   }
 
@@ -540,9 +576,7 @@
         }
         showToast(msg, saved > 0 ? 'success' : 'info');
         // Clear selection of processed results
-        resultsSelectAllMode = false;
-        $$('.result-check').forEach((el) => { el.checked = false; });
-        updateSelectedCountLabel();
+        clearResultsSelection();
         if (typeof loadDashboard === 'function') {
           try { loadDashboard(); } catch (_) {}
         }
@@ -586,9 +620,7 @@
       { title: 'Guardar todos', okLabel: 'Guardar todos' }
     );
     if (!ok) return;
-    resultsSelectAllMode = true;
-    $$('.result-check').forEach((c) => { c.checked = true; });
-    updateSelectedCountLabel();
+    setResultsSelectAll(true);
     await saveSelectedLeads();
   }
 
@@ -698,6 +730,7 @@
         return { outcome: 'cancelled' };
       }
       const d2 = resultsRes.data || {};
+      clearResultsSelection();
       currentResults = Array.isArray(d2.results) ? d2.results : [];
       currentResultsTotal = officialResultsTotal(d2);
       resultsPage = 1;
@@ -720,6 +753,7 @@
   }
 
   async function runSearch() {
+    clearResultsSelection();
     const query = (($('#query') && $('#query').value) || '').trim();
     const location = (($('#location') && $('#location').value) || '').trim();
     const limitEl = $('#limit');
@@ -853,6 +887,7 @@
         return;
       }
       const d2 = resultsRes.data || {};
+      clearResultsSelection();
       currentResults = Array.isArray(d2.results) ? d2.results : [];
       currentResultsTotal = officialResultsTotal(d2);
       resultsPage = 1;
@@ -1219,24 +1254,45 @@
       ' seleccionado' + (ids.length === 1 ? '' : 's') + ' e os respectivos dados comerciais.'
     );
     if (!ok) return;
+    const BATCH = 500;
+    let totalDeleted = 0;
+    const remaining = ids.slice();
     try {
       const token = await ensureCsrf();
-      const res = await api('/api/searches/leads/saved/delete', {
-        method: 'POST',
-        headers: { 'X-CSRF-Token': token },
-        body: { ids },
-      });
-      if (!res.ok) {
-        showToast((res.data && res.data.error) || 'Não foi possível eliminar os leads.', 'error');
-        return;
+      while (remaining.length) {
+        const batch = remaining.splice(0, BATCH);
+        const res = await api('/api/searches/leads/saved/delete', {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': token },
+          body: { ids: batch },
+        });
+        if (!res.ok) {
+          // Keep failed batch in selection
+          batch.forEach((id) => selectedLeadIds.add(String(id)));
+          remaining.forEach((id) => selectedLeadIds.add(String(id)));
+          showToast(
+            (totalDeleted ? (totalDeleted + ' eliminados. ') : '') +
+            ((res.data && res.data.error) || 'Não foi possível eliminar todos os leads seleccionados.'),
+            'error'
+          );
+          loadLeads({ scrollToTop: false });
+          return;
+        }
+        const deletedIds = (res.data && res.data.deletedIds) || [];
+        const n = (res.data && res.data.deletedCount) != null ? res.data.deletedCount : deletedIds.length;
+        totalDeleted += n;
+        batch.forEach((id) => selectedLeadIds.delete(String(id)));
+        deletedIds.forEach((id) => selectedLeadIds.delete(String(id)));
       }
-      const n = (res.data && res.data.deletedCount) || 0;
-      selectedLeadIds.clear();
-      showToast(n + ' lead' + (n === 1 ? '' : 's') + ' eliminado' + (n === 1 ? '' : 's') + '.', 'success');
+      showToast(totalDeleted + ' lead' + (totalDeleted === 1 ? '' : 's') + ' eliminado' + (totalDeleted === 1 ? '' : 's') + '.', 'success');
       loadLeads({ scrollToTop: false });
       if (typeof loadDashboard === 'function') try { loadDashboard(); } catch (_) {}
     } catch (_) {
-      showToast('Erro de rede ao eliminar leads.', 'error');
+      showToast(
+        (totalDeleted ? (totalDeleted + ' eliminados. ') : '') + 'Erro de rede ao eliminar leads.',
+        'error'
+      );
+      loadLeads({ scrollToTop: false });
     }
   }
 
@@ -1293,7 +1349,7 @@
     }
   }
 
-  async function deleteSelectedSearches() {
+    async function deleteSelectedSearches() {
     const ids = Array.from(selectedHistoryIds);
     if (!ids.length) return;
     const ok = await openConfirmModal(
@@ -1301,28 +1357,53 @@
       ' seleccionada' + (ids.length === 1 ? '' : 's') + '. Os leads guardados não serão afectados.'
     );
     if (!ok) return;
+    const BATCH = 500;
+    let totalDeleted = 0;
+    let totalSkipped = [];
+    const remaining = ids.slice();
     try {
       const token = await ensureCsrf();
-      const res = await api('/api/searches/delete', {
-        method: 'POST',
-        headers: { 'X-CSRF-Token': token },
-        body: { ids },
-      });
-      if (!res.ok && res.status !== 409) {
-        showToast((res.data && res.data.error) || 'Não foi possível eliminar as pesquisas.', 'error');
-        return;
+      while (remaining.length) {
+        const batch = remaining.splice(0, BATCH);
+        const res = await api('/api/searches/delete', {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': token },
+          body: { ids: batch },
+        });
+        if (!res.ok && res.status !== 409) {
+          batch.forEach((id) => selectedHistoryIds.add(String(id)));
+          remaining.forEach((id) => selectedHistoryIds.add(String(id)));
+          showToast(
+            (totalDeleted ? (totalDeleted + ' eliminadas. ') : '') +
+            ((res.data && res.data.error) || 'Não foi possível eliminar todas as pesquisas seleccionadas.'),
+            'error'
+          );
+          loadHistory({ scrollToTop: false });
+          return;
+        }
+        const n = (res.data && res.data.deletedCount) || 0;
+        const skipped = (res.data && res.data.skippedRunning) || [];
+        totalDeleted += n;
+        totalSkipped = totalSkipped.concat(skipped);
+        const deletedIds = (res.data && res.data.deletedIds) || [];
+        batch.forEach((id) => {
+          if (!skipped.map(String).includes(String(id))) selectedHistoryIds.delete(String(id));
+        });
+        deletedIds.forEach((id) => selectedHistoryIds.delete(String(id)));
       }
-      const n = (res.data && res.data.deletedCount) || 0;
-      const skipped = (res.data && res.data.skippedRunning) || [];
-      selectedHistoryIds.clear();
-      let msg = n + ' pesquisa' + (n === 1 ? '' : 's') + ' eliminada' + (n === 1 ? '' : 's') + '.';
-      if (skipped.length) msg += ' ' + skipped.length + ' em execução foram ignoradas.';
-      showToast(msg, n > 0 ? 'success' : 'info');
+      let msg = totalDeleted + ' pesquisa' + (totalDeleted === 1 ? '' : 's') + ' eliminada' + (totalDeleted === 1 ? '' : 's') + '.';
+      if (totalSkipped.length) msg += ' ' + totalSkipped.length + ' em execução foram ignoradas.';
+      showToast(msg, totalSkipped.length && !totalDeleted ? 'error' : 'success');
       loadHistory({ scrollToTop: false });
     } catch (_) {
-      showToast('Erro de rede ao eliminar pesquisas.', 'error');
+      showToast(
+        (totalDeleted ? (totalDeleted + ' eliminadas. ') : '') + 'Erro de rede ao eliminar pesquisas.',
+        'error'
+      );
+      loadHistory({ scrollToTop: false });
     }
   }
+
 
   async function deleteAllSearches() {
     const ok = await openConfirmModal(
@@ -1436,47 +1517,108 @@
     const list = $('#leads-activities-full-list');
     if (!list || !currentLeadId) return;
     list.innerHTML = '';
+    const loading = document.createElement('p');
+    loading.className = 'empty-hint';
+    loading.textContent = 'A carregar…';
+    list.appendChild(loading);
     try {
-      const res = await api('/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) + '/activities?limit=200');
+      const qEl = $('#leads-activities-full-q');
+      const typeEl = $('#leads-activities-full-type');
+      const q = qEl ? String(qEl.value || '').trim() : '';
+      const type = typeEl ? String(typeEl.value || '') : '';
+      // Server page: use offset based on page; client filter only if server doesn't support q/type
+      const offset = (Math.max(1, activitiesFullPage) - 1) * ACTIVITIES_FULL_PAGE_SIZE;
+      const params = new URLSearchParams();
+      params.set('limit', String(ACTIVITIES_FULL_PAGE_SIZE));
+      params.set('offset', String(offset));
+      const res = await api(
+        '/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) +
+        '/activities?' + params.toString()
+      );
       if (!res.ok) {
         list.innerHTML = '<p class="empty-hint">Não foi possível carregar o histórico.</p>';
         return;
       }
-      activitiesFullCache = (res.data && res.data.items) || [];
-      renderActivitiesFullPage();
+      const items = (res.data && res.data.items) || [];
+      const total = (res.data && res.data.total != null) ? Number(res.data.total) : items.length;
+      activitiesFullCache = { items: items, total: total, page: activitiesFullPage };
+      // Client-side filter on current page is insufficient for q/type across all pages.
+      // When filters applied, fetch larger window then filter — still limited by API max.
+      // Prefer server total; if filters active, filter current batch and note limitation via full fetch loop.
+      if (q || type) {
+        await loadActivitiesFullFiltered(q, type);
+        return;
+      }
+      renderActivitiesFullPageFromServer(items, total);
     } catch (_) {
       list.innerHTML = '<p class="empty-hint">Erro de rede.</p>';
     }
   }
 
+  async function loadActivitiesFullFiltered(q, type) {
+    const list = $('#leads-activities-full-list');
+    if (!list || !currentLeadId) return;
+    // Walk server pages until we have enough matching items for current page or exhaust
+    const pageSize = ACTIVITIES_FULL_PAGE_SIZE;
+    const matchAll = [];
+    let offset = 0;
+    const FETCH = 100; // max per request (backend cap)
+    let totalServer = null;
+    try {
+      while (true) {
+        const params = new URLSearchParams();
+        params.set('limit', String(FETCH));
+        params.set('offset', String(offset));
+        const res = await api(
+          '/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) +
+          '/activities?' + params.toString()
+        );
+        if (!res.ok) break;
+        const items = (res.data && res.data.items) || [];
+        if (totalServer == null) totalServer = (res.data && res.data.total != null) ? Number(res.data.total) : null;
+        items.forEach((a) => {
+          if (type && a.activityType !== type) return;
+          if (q) {
+            const d = String(a.description || '').toLowerCase();
+            const o = String(a.outcome || '').toLowerCase();
+            if (!d.includes(q.toLowerCase()) && !o.includes(q.toLowerCase())) return;
+          }
+          matchAll.push(a);
+        });
+        if (!items.length || items.length < FETCH) break;
+        offset += FETCH;
+        if (totalServer != null && offset >= totalServer) break;
+        // safety: max 50 pages = 5000
+        if (offset > 5000) break;
+      }
+      const total = matchAll.length;
+      const pages = Math.max(1, Math.ceil(total / pageSize));
+      if (activitiesFullPage > pages) activitiesFullPage = pages;
+      if (activitiesFullPage < 1) activitiesFullPage = 1;
+      const start = (activitiesFullPage - 1) * pageSize;
+      const pageItems = matchAll.slice(start, start + pageSize);
+      activitiesFullCache = { items: pageItems, total: total, page: activitiesFullPage, filtered: true, allMatched: matchAll };
+      renderActivitiesFullPageFromServer(pageItems, total);
+    } catch (_) {
+      list.innerHTML = '<p class="empty-hint">Erro de rede.</p>';
+    }
+  }
+
+
   function renderActivitiesFullPage() {
+    // Re-entry from filter UI: reload from server
+    loadActivitiesFull();
+  }
+
+  function renderActivitiesFullPageFromServer(items, total) {
     const list = $('#leads-activities-full-list');
     const pag = $('#leads-activities-full-pagination');
     if (!list) return;
     list.innerHTML = '';
-    const qEl = $('#leads-activities-full-q');
-    const typeEl = $('#leads-activities-full-type');
-    const q = qEl ? String(qEl.value || '').trim().toLowerCase() : '';
-    const type = typeEl ? String(typeEl.value || '') : '';
-    let items = activitiesFullCache.slice();
-    if (type) items = items.filter((a) => a.activityType === type);
-    if (q) {
-      items = items.filter((a) => {
-        const d = String(a.description || '').toLowerCase();
-        const o = String(a.outcome || '').toLowerCase();
-        return d.includes(q) || o.includes(q);
-      });
-    }
-    const total = items.length;
-    const pages = Math.max(1, Math.ceil(total / ACTIVITIES_FULL_PAGE_SIZE));
-    if (activitiesFullPage > pages) activitiesFullPage = pages;
-    if (activitiesFullPage < 1) activitiesFullPage = 1;
-    const start = (activitiesFullPage - 1) * ACTIVITIES_FULL_PAGE_SIZE;
-    const pageItems = items.slice(start, start + ACTIVITIES_FULL_PAGE_SIZE);
-    if (!pageItems.length) {
+    if (!items.length) {
       list.innerHTML = '<p class="empty-hint">Sem actividades neste filtro.</p>';
     } else {
-      pageItems.forEach((a) => {
+      items.forEach((a) => {
         const el = document.createElement('div');
         el.className = 'leads-crm-activity' + (a.activityType === 'status_change' ? ' is-status' : '');
         const head = document.createElement('div');
@@ -1516,6 +1658,7 @@
     }
     if (pag) {
       pag.innerHTML = '';
+      const pages = Math.max(1, Math.ceil(Math.max(0, total) / ACTIVITIES_FULL_PAGE_SIZE));
       if (pages <= 1) { pag.hidden = true; return; }
       pag.hidden = false;
       const info = document.createElement('span');
@@ -1524,14 +1667,15 @@
       const prev = document.createElement('button');
       prev.type = 'button'; prev.className = 'btn btn-ghost btn-sm'; prev.textContent = 'Anterior';
       prev.disabled = activitiesFullPage <= 1;
-      prev.addEventListener('click', () => { activitiesFullPage -= 1; renderActivitiesFullPage(); });
+      prev.addEventListener('click', () => { activitiesFullPage -= 1; loadActivitiesFull(); });
       const next = document.createElement('button');
       next.type = 'button'; next.className = 'btn btn-ghost btn-sm'; next.textContent = 'Seguinte';
       next.disabled = activitiesFullPage >= pages;
-      next.addEventListener('click', () => { activitiesFullPage += 1; renderActivitiesFullPage(); });
+      next.addEventListener('click', () => { activitiesFullPage += 1; loadActivitiesFull(); });
       pag.appendChild(prev); pag.appendChild(next);
     }
   }
+
 
   async function openAppointmentsFullView() {
     if (!currentLeadId) return;
@@ -1655,15 +1799,15 @@
         loadLeads();
       });
     }
-    const saveNotes = $('#leads-save-notes');
+    const saveNotes = $('#leads-notes-save');
     if (saveNotes) {
       saveNotes.addEventListener('click', () => saveLeadNotes());
     }
-    const editNotes = $('#leads-edit-notes');
+    const editNotes = $('#leads-notes-edit-btn');
     if (editNotes) {
       editNotes.addEventListener('click', () => startEditNotes());
     }
-    const cancelNotes = $('#leads-cancel-notes');
+    const cancelNotes = $('#leads-notes-cancel');
     if (cancelNotes) {
       cancelNotes.addEventListener('click', () => cancelEditNotes());
     }
@@ -1859,42 +2003,41 @@
   let currentLeadNotes = '';
 
   function setNotesViewMode(editing) {
-    const view = $('#leads-notes-view');
     const edit = $('#leads-notes-edit');
-    const editBtn = $('#leads-edit-notes');
-    if (view) view.hidden = !!editing;
+    const preview = $('#leads-notes-preview');
+    const editBtn = $('#leads-notes-edit-btn');
     if (edit) edit.hidden = !editing;
+    if (preview) preview.hidden = !!editing;
     if (editBtn) editBtn.hidden = !!editing;
   }
 
   function renderNotesPreview(notes) {
     currentLeadNotes = notes != null ? String(notes) : '';
-    const empty = $('#leads-notes-empty');
     const preview = $('#leads-notes-preview');
-    const notesEl = $('#leads-notes');
+    const notesEl = $('#leads-notes-textarea');
     const has = currentLeadNotes.trim().length > 0;
-    if (empty) empty.hidden = has;
     if (preview) {
-      preview.hidden = !has;
-      preview.textContent = has ? currentLeadNotes : '';
+      if (!preview.hidden || true) {
+        preview.textContent = has ? currentLeadNotes : 'Sem notas.';
+      }
     }
     if (notesEl) notesEl.value = currentLeadNotes;
     setNotesViewMode(false);
   }
 
   function startEditNotes() {
-    const notesEl = $('#leads-notes');
+    const notesEl = $('#leads-notes-textarea');
     if (notesEl) notesEl.value = currentLeadNotes;
-    const statusEl = $('#leads-notes-status');
+    const statusEl = $('#leads-notes-msg');
     if (statusEl) statusEl.textContent = '';
     setNotesViewMode(true);
     if (notesEl) notesEl.focus();
   }
 
   function cancelEditNotes() {
-    const notesEl = $('#leads-notes');
+    const notesEl = $('#leads-notes-textarea');
     if (notesEl) notesEl.value = currentLeadNotes;
-    const statusEl = $('#leads-notes-status');
+    const statusEl = $('#leads-notes-msg');
     if (statusEl) statusEl.textContent = '';
     setNotesViewMode(false);
   }
@@ -1916,7 +2059,7 @@
     const fields = $('#leads-detail-fields');
     const meta = $('#leads-detail-meta');
     const actions = $('#leads-detail-actions');
-    const notesStatus = $('#leads-notes-status');
+    const notesStatus = $('#leads-notes-msg');
     const statusMsg = $('#leads-status-msg');
     const statusSel = $('#leads-detail-status');
     if (nameEl) nameEl.textContent = 'A carregar…';
@@ -2032,9 +2175,9 @@
 
   async function saveLeadNotes() {
     if (!currentLeadId) return;
-    const notesEl = $('#leads-notes');
-    const statusEl = $('#leads-notes-status');
-    const btn = $('#leads-save-notes');
+    const notesEl = $('#leads-notes-textarea');
+    const statusEl = $('#leads-notes-msg');
+    const btn = $('#leads-notes-save');
     const notes = notesEl ? notesEl.value : '';
     if (notes.length > 10000) {
       if (statusEl) statusEl.textContent = 'Máximo de 10.000 caracteres.';
