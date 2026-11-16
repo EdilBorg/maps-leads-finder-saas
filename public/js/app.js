@@ -1130,6 +1130,7 @@
   function showLeadsList() {
     const list = $('#leads-list-panel');
     const detail = $('#leads-detail-panel');
+    hideLeadSubpanels();
     if (list) list.hidden = false;
     if (detail) detail.hidden = true;
     currentLeadId = null;
@@ -1396,6 +1397,215 @@
       loadLeadActivities();
     } catch (_) {
       showToast('Erro de rede ao limpar actividades.', 'error');
+    }
+  }
+
+
+  function hideLeadSubpanels() {
+    const fullA = $('#leads-activities-full-panel');
+    const fullP = $('#leads-appointments-full-panel');
+    if (fullA) fullA.hidden = true;
+    if (fullP) fullP.hidden = true;
+  }
+
+  function showLeadDetailOnly() {
+    hideLeadSubpanels();
+    const list = $('#leads-list-panel');
+    const detail = $('#leads-detail-panel');
+    if (list) list.hidden = true;
+    if (detail) detail.hidden = false;
+  }
+
+  async function openActivitiesFullView() {
+    if (!currentLeadId) return;
+    const list = $('#leads-list-panel');
+    const detail = $('#leads-detail-panel');
+    const full = $('#leads-activities-full-panel');
+    const fullAppt = $('#leads-appointments-full-panel');
+    if (list) list.hidden = true;
+    if (detail) detail.hidden = true;
+    if (fullAppt) fullAppt.hidden = true;
+    if (full) full.hidden = false;
+    const sub = $('#leads-activities-full-sub');
+    if (sub) sub.textContent = (currentLeadName || 'Lead') + ' · actividades';
+    activitiesFullPage = 1;
+    await loadActivitiesFull();
+  }
+
+  async function loadActivitiesFull() {
+    const list = $('#leads-activities-full-list');
+    if (!list || !currentLeadId) return;
+    list.innerHTML = '';
+    try {
+      const res = await api('/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) + '/activities?limit=200');
+      if (!res.ok) {
+        list.innerHTML = '<p class="empty-hint">Não foi possível carregar o histórico.</p>';
+        return;
+      }
+      activitiesFullCache = (res.data && res.data.items) || [];
+      renderActivitiesFullPage();
+    } catch (_) {
+      list.innerHTML = '<p class="empty-hint">Erro de rede.</p>';
+    }
+  }
+
+  function renderActivitiesFullPage() {
+    const list = $('#leads-activities-full-list');
+    const pag = $('#leads-activities-full-pagination');
+    if (!list) return;
+    list.innerHTML = '';
+    const qEl = $('#leads-activities-full-q');
+    const typeEl = $('#leads-activities-full-type');
+    const q = qEl ? String(qEl.value || '').trim().toLowerCase() : '';
+    const type = typeEl ? String(typeEl.value || '') : '';
+    let items = activitiesFullCache.slice();
+    if (type) items = items.filter((a) => a.activityType === type);
+    if (q) {
+      items = items.filter((a) => {
+        const d = String(a.description || '').toLowerCase();
+        const o = String(a.outcome || '').toLowerCase();
+        return d.includes(q) || o.includes(q);
+      });
+    }
+    const total = items.length;
+    const pages = Math.max(1, Math.ceil(total / ACTIVITIES_FULL_PAGE_SIZE));
+    if (activitiesFullPage > pages) activitiesFullPage = pages;
+    if (activitiesFullPage < 1) activitiesFullPage = 1;
+    const start = (activitiesFullPage - 1) * ACTIVITIES_FULL_PAGE_SIZE;
+    const pageItems = items.slice(start, start + ACTIVITIES_FULL_PAGE_SIZE);
+    if (!pageItems.length) {
+      list.innerHTML = '<p class="empty-hint">Sem actividades neste filtro.</p>';
+    } else {
+      pageItems.forEach((a) => {
+        const el = document.createElement('div');
+        el.className = 'leads-crm-activity' + (a.activityType === 'status_change' ? ' is-status' : '');
+        const head = document.createElement('div');
+        head.className = 'leads-crm-activity-head';
+        const meta = document.createElement('div');
+        meta.className = 'leads-crm-activity-meta';
+        meta.textContent = formatDate(a.occurredAt);
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'btn btn-ghost btn-sm';
+        delBtn.textContent = 'Eliminar';
+        delBtn.addEventListener('click', () => {
+          const summary = (ACTIVITY_TYPE_LABEL[a.activityType] || '') + (a.description ? (': ' + String(a.description).slice(0, 80)) : '');
+          deleteOneActivity(a.id, summary).then(() => { loadActivitiesFull(); loadLeadActivities(); });
+        });
+        head.appendChild(meta);
+        head.appendChild(delBtn);
+        const typeDiv = document.createElement('div');
+        typeDiv.className = 'leads-crm-activity-type';
+        typeDiv.textContent = ACTIVITY_TYPE_LABEL[a.activityType] || a.activityType || 'Actividade';
+        const desc = document.createElement('div');
+        desc.className = 'leads-crm-activity-desc';
+        desc.style.webkitLineClamp = 'unset';
+        desc.style.display = 'block';
+        desc.textContent = a.description || '';
+        el.appendChild(head);
+        el.appendChild(typeDiv);
+        el.appendChild(desc);
+        if (a.outcome) {
+          const out = document.createElement('div');
+          out.className = 'leads-crm-activity-outcome';
+          out.textContent = a.outcome;
+          el.appendChild(out);
+        }
+        list.appendChild(el);
+      });
+    }
+    if (pag) {
+      pag.innerHTML = '';
+      if (pages <= 1) { pag.hidden = true; return; }
+      pag.hidden = false;
+      const info = document.createElement('span');
+      info.textContent = 'Página ' + activitiesFullPage + ' / ' + pages + ' (' + total + ')';
+      pag.appendChild(info);
+      const prev = document.createElement('button');
+      prev.type = 'button'; prev.className = 'btn btn-ghost btn-sm'; prev.textContent = 'Anterior';
+      prev.disabled = activitiesFullPage <= 1;
+      prev.addEventListener('click', () => { activitiesFullPage -= 1; renderActivitiesFullPage(); });
+      const next = document.createElement('button');
+      next.type = 'button'; next.className = 'btn btn-ghost btn-sm'; next.textContent = 'Seguinte';
+      next.disabled = activitiesFullPage >= pages;
+      next.addEventListener('click', () => { activitiesFullPage += 1; renderActivitiesFullPage(); });
+      pag.appendChild(prev); pag.appendChild(next);
+    }
+  }
+
+  async function openAppointmentsFullView() {
+    if (!currentLeadId) return;
+    const list = $('#leads-list-panel');
+    const detail = $('#leads-detail-panel');
+    const fullA = $('#leads-activities-full-panel');
+    const full = $('#leads-appointments-full-panel');
+    if (list) list.hidden = true;
+    if (detail) detail.hidden = true;
+    if (fullA) fullA.hidden = true;
+    if (full) full.hidden = false;
+    const sub = $('#leads-appointments-full-sub');
+    if (sub) sub.textContent = (currentLeadName || 'Lead') + ' · agendamentos';
+    await loadAppointmentsFull();
+  }
+
+  async function loadAppointmentsFull() {
+    const list = $('#leads-appointments-full-list');
+    const stats = $('#leads-appointments-full-stats');
+    if (!list || !currentLeadId) return;
+    list.innerHTML = '';
+    try {
+      const res = await api('/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) + '/appointments');
+      if (!res.ok) {
+        list.innerHTML = '<p class="empty-hint">Não foi possível carregar.</p>';
+        return;
+      }
+      const data = res.data || {};
+      const upcomingAll = data.upcoming || [];
+      const overdue = [];
+      const upcoming = [];
+      upcomingAll.forEach((a) => {
+        if (isAppointmentOverdue(a)) overdue.push(a);
+        else upcoming.push(a);
+      });
+      const completed = data.completed || [];
+      const cancelled = data.cancelled || [];
+      if (stats) {
+        stats.innerHTML = '';
+        [
+          ['Próximos', upcoming.length],
+          ['Atrasados', overdue.length],
+          ['Concluídos', completed.length],
+          ['Cancelados', cancelled.length],
+        ].forEach(([lab, n]) => {
+          const d = document.createElement('div');
+          d.className = 'leads-crm-appt-stat';
+          d.innerHTML = '<div class="leads-crm-appt-stat-label"></div><div class="leads-crm-appt-stat-value"></div>';
+          d.querySelector('.leads-crm-appt-stat-label').textContent = lab;
+          d.querySelector('.leads-crm-appt-stat-value').textContent = String(n);
+          stats.appendChild(d);
+        });
+      }
+      function group(title, items, withActions, isOd) {
+        if (!items.length) return;
+        const g = document.createElement('div');
+        g.className = 'leads-crm-appt-group' + (isOd ? ' is-overdue' : '');
+        const h = document.createElement('h4');
+        h.className = 'leads-crm-appt-group-title';
+        h.textContent = title + ' (' + items.length + ')';
+        g.appendChild(h);
+        items.forEach((a) => g.appendChild(buildAppointmentCard(a, withActions, !!isOd)));
+        list.appendChild(g);
+      }
+      if (!overdue.length && !upcoming.length && !completed.length && !cancelled.length) {
+        list.innerHTML = '<p class="empty-hint">Sem agendamentos.</p>';
+        return;
+      }
+      group('Atrasados', overdue, true, true);
+      group('Próximos', upcoming, true, false);
+      group('Concluídos', completed, false, false);
+      group('Cancelados', cancelled, false, false);
+    } catch (_) {
+      list.innerHTML = '<p class="empty-hint">Erro de rede.</p>';
     }
   }
 
@@ -1690,6 +1900,7 @@
   }
 
   async function openLeadDetail(id) {
+    hideLeadSubpanels();
     if (!id) return;
     leadsReturnState = {
       page: leadsPage,
@@ -1700,6 +1911,7 @@
     };
     showLeadsDetail();
     currentLeadId = id;
+    currentLeadName = '';
     const nameEl = $('#leads-detail-name');
     const fields = $('#leads-detail-fields');
     const meta = $('#leads-detail-meta');
@@ -1732,6 +1944,7 @@
       }
       const lead = res.data.lead;
       currentLeadId = lead.id;
+      currentLeadName = lead.name || '';
       if (nameEl) nameEl.textContent = lead.name || 'Estabelecimento';
 
       if (meta) {
@@ -1914,6 +2127,8 @@
     const form = $('#leads-appointment-form');
     if (!form) return;
     form.hidden = !show;
+    const actOpen = $('#leads-activity-form') && !$('#leads-activity-form').hidden;
+    setFormBackdrop(!!show || !!actOpen);
     const idEl = $('#leads-appointment-edit-id');
     const titleEl = $('#leads-appointment-title');
     const whenEl = $('#leads-appointment-when');
@@ -1959,15 +2174,25 @@
         return;
       }
       const items = (res.data && res.data.items) || [];
+      const total = (res.data && res.data.total != null) ? Number(res.data.total) : items.length;
+      const countEl = $('#leads-activities-count');
+      if (countEl) {
+        if (total > 0) { countEl.hidden = false; countEl.textContent = String(total); }
+        else { countEl.hidden = true; countEl.textContent = ''; }
+      }
+      const meta = $('#leads-activities-preview-meta');
       if (!items.length) {
         const p = document.createElement('p');
         p.className = 'empty-hint';
         p.id = 'leads-activities-empty';
-        p.textContent = 'Sem actividades registadas.';
+        p.textContent = 'Ainda não existem actividades registadas.';
         list.appendChild(p);
+        if (meta) meta.textContent = '';
         return;
       }
-      items.forEach((a) => {
+      const preview = items.slice(0, 3);
+      if (meta) meta.textContent = preview.length + ' de ' + total + ' actividade' + (total === 1 ? '' : 's');
+      preview.forEach((a) => {
         const el = document.createElement('div');
         el.className = 'leads-crm-activity' + (a.activityType === 'status_change' ? ' is-status' : '');
         const head = document.createElement('div');
@@ -2129,60 +2354,37 @@
       const completed = data.completed || [];
       const cancelled = data.cancelled || [];
       updateNextAppointmentSide(upcoming);
+      appointmentsFullCache = { overdue, upcoming, completed, cancelled };
 
-      if (!overdue.length && !upcoming.length && !completed.length && !cancelled.length) {
+      const total = overdue.length + upcoming.length + completed.length + cancelled.length;
+      const countEl = $('#leads-appointments-count');
+      if (countEl) {
+        if (total > 0) { countEl.hidden = false; countEl.textContent = String(total); }
+        else { countEl.hidden = true; }
+      }
+      const meta = $('#leads-appointments-preview-meta');
+      if (meta) {
+        const bits = [];
+        if (completed.length) bits.push('Concluídos (' + completed.length + ')');
+        if (cancelled.length) bits.push('Cancelados (' + cancelled.length + ')');
+        meta.textContent = bits.join(' · ');
+      }
+
+      if (!overdue.length && !upcoming.length) {
         const p = document.createElement('p');
         p.className = 'empty-hint';
         p.id = 'leads-appointments-empty';
-        p.textContent = 'Sem agendamentos.';
+        p.textContent = 'Sem agendamentos futuros.';
         list.appendChild(p);
         return;
       }
 
-      function renderGroup(title, items, withActions, extraClass) {
-        if (!items.length) return;
-        const group = document.createElement('div');
-        group.className = 'leads-crm-appt-group' + (extraClass ? ' ' + extraClass : '');
-        const isCollapsible = title === 'Concluídos' || title === 'Cancelados';
-        if (isCollapsible) {
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'leads-crm-group-toggle';
-          btn.setAttribute('aria-expanded', 'false');
-          const chev = document.createElement('span');
-          chev.className = 'leads-crm-group-chevron';
-          chev.setAttribute('aria-hidden', 'true');
-          chev.textContent = '▾';
-          const h = document.createElement('span');
-          h.className = 'leads-crm-appt-group-title';
-          h.textContent = title + ' (' + items.length + ')';
-          btn.appendChild(chev);
-          btn.appendChild(h);
-          const body = document.createElement('div');
-          body.className = 'leads-crm-group-body';
-          body.hidden = true;
-          items.forEach((a) => body.appendChild(buildAppointmentCard(a, withActions, false)));
-          btn.addEventListener('click', () => {
-            const open = btn.getAttribute('aria-expanded') === 'true';
-            btn.setAttribute('aria-expanded', open ? 'false' : 'true');
-            body.hidden = open;
-          });
-          group.appendChild(btn);
-          group.appendChild(body);
-        } else {
-          const h = document.createElement('div');
-          h.className = 'leads-crm-appt-group-title';
-          h.textContent = title;
-          group.appendChild(h);
-          const markOverdue = extraClass === 'is-overdue';
-          items.forEach((a) => group.appendChild(buildAppointmentCard(a, withActions, markOverdue)));
-        }
-        list.appendChild(group);
-      }
-      renderGroup('Atrasados', overdue, true, 'is-overdue');
-      renderGroup('Próximos', upcoming, true, null);
-      renderGroup('Concluídos', completed, false, null);
-      renderGroup('Cancelados', cancelled, false, null);
+      // Preview: max 2 next (overdue first, then upcoming)
+      const preview = overdue.concat(upcoming).slice(0, 2);
+      preview.forEach((a) => {
+        const isOd = isAppointmentOverdue(a);
+        list.appendChild(buildAppointmentCard(a, true, isOd));
+      });
     } catch (_) {
       list.innerHTML = '';
       const p = document.createElement('p');
@@ -2192,6 +2394,7 @@
       updateNextAppointmentSide([]);
     }
   }
+
 
   function buildAppointmentCard(a, withActions, isOverdue) {
     const el = document.createElement('div');
@@ -2563,6 +2766,30 @@
 
     const clearAct = $('#leads-btn-clear-activities');
     if (clearAct) clearAct.addEventListener('click', () => clearLeadActivities());
+    const viewAct = $('#leads-btn-view-activities');
+    if (viewAct) viewAct.addEventListener('click', () => openActivitiesFullView());
+    const manageAppt = $('#leads-btn-manage-appointments');
+    if (manageAppt) manageAppt.addEventListener('click', () => openAppointmentsFullView());
+    const backAct = $('#leads-activities-full-back');
+    if (backAct) backAct.addEventListener('click', () => {
+      showLeadDetailOnly();
+      loadLeadActivities();
+      loadLeadAppointments();
+    });
+    const backAppt = $('#leads-appointments-full-back');
+    if (backAppt) backAppt.addEventListener('click', () => {
+      showLeadDetailOnly();
+      loadLeadAppointments();
+    });
+    const addActFull = $('#leads-btn-add-activity-full');
+    if (addActFull) addActFull.addEventListener('click', () => showActivityForm(true));
+    const addApptFull = $('#leads-btn-add-appointment-full');
+    if (addApptFull) addApptFull.addEventListener('click', () => showAppointmentForm(true));
+    const fullQ = $('#leads-activities-full-q');
+    if (fullQ) fullQ.addEventListener('input', () => { activitiesFullPage = 1; renderActivitiesFullPage(); });
+    const fullType = $('#leads-activities-full-type');
+    if (fullType) fullType.addEventListener('change', () => { activitiesFullPage = 1; renderActivitiesFullPage(); });
+
   }
 
   function initContactModal() {
@@ -2628,6 +2855,7 @@
     initContactModal();
     initSettingsRecovery();
     initConfirmModal();
+    reparentLeadForms();
     initBulkActions();
     showView('dashboard');
   }
