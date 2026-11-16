@@ -599,7 +599,7 @@ async function saveLeadsFromResults(userId, resultIds) {
     await client.query('BEGIN');
     await lockUserForUpdate(client, userId);
 
-    const ids = Array.from(new Set((resultIds || []).filter(Boolean))).slice(0, 100);
+    const ids = Array.from(new Set((resultIds || []).filter(Boolean))).slice(0, 500);
     for (const rid of ids) {
       const { rows } = await client.query(
         `SELECT id, search_id, name, address, phone, email, website, rating, reviews_count,
@@ -685,6 +685,141 @@ async function saveLeadsFromResults(userId, resultIds) {
   }
 }
 
+
+/**
+ * Delete saved leads by id (owner-scoped). Activities/appointments cascade via FK.
+ * @returns {{ deletedCount: number, deletedIds: string[] }}
+ */
+async function deleteSavedLeads(userId, leadIds) {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockUserForUpdate(client, userId);
+    const ids = Array.from(new Set((leadIds || []).filter(Boolean))).slice(0, 500);
+    if (!ids.length) {
+      await client.query('ROLLBACK');
+      return { deletedCount: 0, deletedIds: [] };
+    }
+    const { rows } = await client.query(
+      `DELETE FROM saved_leads
+       WHERE user_id = $1 AND id = ANY($2::uuid[])
+       RETURNING id`,
+      [userId, ids]
+    );
+    await client.query('COMMIT');
+    const deletedIds = rows.map((r) => r.id);
+    return { deletedCount: deletedIds.length, deletedIds };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Delete all saved leads for the user.
+ */
+async function deleteAllSavedLeads(userId) {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockUserForUpdate(client, userId);
+    const { rows } = await client.query(
+      `DELETE FROM saved_leads WHERE user_id = $1 RETURNING id`,
+      [userId]
+    );
+    await client.query('COMMIT');
+    return { deletedCount: rows.length, deletedIds: rows.map((r) => r.id) };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Delete searches owned by user. Refuses if any target is still running.
+ * search_results cascade; saved_leads.origin_search_id is SET NULL.
+ */
+async function deleteSearches(userId, searchIds) {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockUserForUpdate(client, userId);
+    const ids = Array.from(new Set((searchIds || []).filter(Boolean))).slice(0, 500);
+    if (!ids.length) {
+      await client.query('ROLLBACK');
+      return { deletedCount: 0, deletedIds: [], skippedRunning: [] };
+    }
+    const st = await client.query(
+      `SELECT id, status FROM searches WHERE user_id = $1 AND id = ANY($2::uuid[]) FOR UPDATE`,
+      [userId, ids]
+    );
+    const running = st.rows.filter((r) => r.status === 'running').map((r) => r.id);
+    const deletable = st.rows.filter((r) => r.status !== 'running').map((r) => r.id);
+    if (!deletable.length) {
+      await client.query('ROLLBACK');
+      return { deletedCount: 0, deletedIds: [], skippedRunning: running };
+    }
+    // Clear activeRuns for any (should not be running if deletable)
+    for (const sid of deletable) {
+      try { activeRuns.delete(String(sid)); } catch (_) {}
+    }
+    const { rows } = await client.query(
+      `DELETE FROM searches WHERE user_id = $1 AND id = ANY($2::uuid[]) AND status <> 'running' RETURNING id`,
+      [userId, deletable]
+    );
+    await client.query('COMMIT');
+    return {
+      deletedCount: rows.length,
+      deletedIds: rows.map((r) => r.id),
+      skippedRunning: running,
+    };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Delete all non-running searches for the user.
+ */
+async function deleteAllSearches(userId) {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockUserForUpdate(client, userId);
+    const running = await client.query(
+      `SELECT id FROM searches WHERE user_id = $1 AND status = 'running' FOR UPDATE`,
+      [userId]
+    );
+    const skippedRunning = running.rows.map((r) => r.id);
+    const { rows } = await client.query(
+      `DELETE FROM searches WHERE user_id = $1 AND status <> 'running' RETURNING id`,
+      [userId]
+    );
+    await client.query('COMMIT');
+    return {
+      deletedCount: rows.length,
+      deletedIds: rows.map((r) => r.id),
+      skippedRunning,
+    };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   startSearch,
   cancelSearch,
@@ -700,6 +835,10 @@ module.exports = {
   CRM_NOTES_MAX,
   isValidCrmStatus,
   saveLeadsFromResults,
+  deleteSavedLeads,
+  deleteAllSavedLeads,
+  deleteSearches,
+  deleteAllSearches,
   recoverAbandonedSearches,
   FREE_SEARCH_HOLD_MINUTES,
   activeRuns,

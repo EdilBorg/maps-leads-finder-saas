@@ -271,7 +271,7 @@ router.post('/leads/save', requireAuth, requireVerifiedEmail, requireCsrf, async
     if (!ids.length) {
       return res.status(400).json({ error: 'Seleciona pelo menos um resultado.' });
     }
-    const result = await searchService.saveLeadsFromResults(req.session.userId, ids.slice(0, 100));
+    const result = await searchService.saveLeadsFromResults(req.session.userId, ids.slice(0, 500));
     return res.status(201).json({
       savedCount: result.savedCount,
       alreadySavedCount: result.alreadySavedCount,
@@ -282,6 +282,128 @@ router.post('/leads/save', requireAuth, requireVerifiedEmail, requireCsrf, async
     return next(err);
   }
 });
+
+
+// ——— Delete saved leads ———
+router.delete('/leads/saved/:id', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) {
+      return res.status(400).json({ error: 'ID inválido.' });
+    }
+    const result = await searchService.deleteSavedLeads(req.session.userId, [req.params.id]);
+    if (!result.deletedCount) {
+      return res.status(404).json({ error: 'Lead não encontrado.' });
+    }
+    return res.json({ deletedCount: result.deletedCount, deletedIds: result.deletedIds });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post('/leads/saved/delete', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    if (req.body && req.body.all === true) {
+      const result = await searchService.deleteAllSavedLeads(req.session.userId);
+      return res.json({ deletedCount: result.deletedCount });
+    }
+    const ids = Array.isArray(req.body && req.body.ids) ? req.body.ids : [];
+    const valid = ids.filter((id) => isUuid(id)).slice(0, 500);
+    if (!valid.length) {
+      return res.status(400).json({ error: 'Selecciona pelo menos um lead válido.' });
+    }
+    const result = await searchService.deleteSavedLeads(req.session.userId, valid);
+    return res.json({ deletedCount: result.deletedCount, deletedIds: result.deletedIds });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ——— Delete searches (history) ———
+router.delete('/:id', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) {
+      return res.status(400).json({ error: 'ID inválido.' });
+    }
+    const result = await searchService.deleteSearches(req.session.userId, [req.params.id]);
+    if (result.skippedRunning && result.skippedRunning.length) {
+      return res.status(409).json({
+        error: 'Não é possível eliminar uma pesquisa em execução. Cancela-a primeiro.',
+        skippedRunning: result.skippedRunning,
+      });
+    }
+    if (!result.deletedCount) {
+      return res.status(404).json({ error: 'Pesquisa não encontrada.' });
+    }
+    return res.json({ deletedCount: result.deletedCount, deletedIds: result.deletedIds });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post('/delete', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    if (req.body && req.body.all === true) {
+      const result = await searchService.deleteAllSearches(req.session.userId);
+      return res.json({
+        deletedCount: result.deletedCount,
+        skippedRunning: result.skippedRunning || [],
+      });
+    }
+    const ids = Array.isArray(req.body && req.body.ids) ? req.body.ids : [];
+    const valid = ids.filter((id) => isUuid(id)).slice(0, 500);
+    if (!valid.length) {
+      return res.status(400).json({ error: 'Selecciona pelo menos uma pesquisa válida.' });
+    }
+    const result = await searchService.deleteSearches(req.session.userId, valid);
+    if (result.skippedRunning && result.skippedRunning.length && !result.deletedCount) {
+      return res.status(409).json({
+        error: 'As pesquisas seleccionadas estão em execução. Cancela-as primeiro.',
+        skippedRunning: result.skippedRunning,
+      });
+    }
+    return res.json({
+      deletedCount: result.deletedCount,
+      deletedIds: result.deletedIds,
+      skippedRunning: result.skippedRunning || [],
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ——— Delete activities ———
+router.delete('/leads/saved/:id/activities/:activityId', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id) || !isUuid(req.params.activityId)) {
+      return res.status(400).json({ error: 'ID inválido.' });
+    }
+    const result = await activitiesService.deleteActivity(
+      req.session.userId, req.params.id, req.params.activityId
+    );
+    if (!result.deleted) {
+      return res.status(404).json({ error: 'Actividade não encontrada.' });
+    }
+    return res.json({ deleted: true, id: result.id });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.delete('/leads/saved/:id/activities', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) {
+      return res.status(400).json({ error: 'ID inválido.' });
+    }
+    const result = await activitiesService.clearActivities(req.session.userId, req.params.id);
+    return res.json({ deletedCount: result.deletedCount });
+  } catch (err) {
+    if (err && err.code === 'NOT_FOUND') {
+      return res.status(404).json({ error: err.message || 'Lead não encontrado.' });
+    }
+    return next(err);
+  }
+});
+
 
 router.get('/:id/status', requireAuth, requireVerifiedEmail, async (req, res, next) => {
   try {
