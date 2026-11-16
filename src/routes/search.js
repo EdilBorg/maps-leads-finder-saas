@@ -1,12 +1,14 @@
 /**
  * Search API — authenticated, CSRF on mutations.
  * Async start + status + cancel + results.
- * CRM Stage 1: filtered saved leads, detail and status/notes updates.
+ * CRM Stage 1+2: saved leads, status/notes, activities history, appointments.
  */
 const express = require('express');
 const { requireAuth, requireVerifiedEmail } = require('../middleware/auth');
 const { requireCsrf } = require('../middleware/csrf');
 const searchService = require('../services/searchService');
+const activitiesService = require('../services/savedLeadActivities');
+const appointmentsService = require('../services/savedLeadAppointments');
 const { ALLOWED_LIMITS, normalizeLimit } = require('../services/searchEngine');
 
 const router = express.Router();
@@ -111,6 +113,129 @@ router.patch('/leads/saved/:id', requireAuth, requireVerifiedEmail, requireCsrf,
     const lead = await searchService.updateSavedLead(req.session.userId, req.params.id, patch);
     if (!lead) return res.status(404).json({ error: 'Lead não encontrado.' });
     return res.json({ lead });
+  } catch (err) {
+    if (err.code === 'VALIDATION') {
+      return res.status(400).json({ error: err.message });
+    }
+    return next(err);
+  }
+});
+
+
+router.get('/leads/saved/:id/activities', requireAuth, requireVerifiedEmail, async (req, res, next) => {
+  try {
+    const data = await activitiesService.listActivities(req.session.userId, req.params.id, {
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    if (!data) return res.status(404).json({ error: 'Lead não encontrado.' });
+    return res.json(data);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post('/leads/saved/:id/activities', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const activity = await activitiesService.createActivity(req.session.userId, req.params.id, {
+      activityType: body.activityType,
+      description: body.description,
+      outcome: body.outcome,
+      occurredAt: body.occurredAt,
+    });
+    if (!activity) return res.status(404).json({ error: 'Lead não encontrado.' });
+    return res.status(201).json({ activity });
+  } catch (err) {
+    if (err.code === 'VALIDATION') {
+      return res.status(400).json({ error: err.message });
+    }
+    return next(err);
+  }
+});
+
+router.get('/leads/saved/:id/appointments', requireAuth, requireVerifiedEmail, async (req, res, next) => {
+  try {
+    const data = await appointmentsService.listAppointments(req.session.userId, req.params.id);
+    if (!data) return res.status(404).json({ error: 'Lead não encontrado.' });
+    return res.json(data);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post('/leads/saved/:id/appointments', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const appointment = await appointmentsService.createAppointment(req.session.userId, req.params.id, {
+      title: body.title,
+      description: body.description,
+      scheduledAt: body.scheduledAt,
+    });
+    if (!appointment) return res.status(404).json({ error: 'Lead não encontrado.' });
+    return res.status(201).json({ appointment });
+  } catch (err) {
+    if (err.code === 'VALIDATION') {
+      return res.status(400).json({ error: err.message });
+    }
+    return next(err);
+  }
+});
+
+router.get('/leads/saved/:id/appointments/:appointmentId', requireAuth, requireVerifiedEmail, async (req, res, next) => {
+  try {
+    const appointment = await appointmentsService.getAppointment(
+      req.session.userId, req.params.id, req.params.appointmentId
+    );
+    if (!appointment) return res.status(404).json({ error: 'Agendamento não encontrado.' });
+    return res.json({ appointment });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.patch('/leads/saved/:id/appointments/:appointmentId', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const patch = {};
+    if (Object.prototype.hasOwnProperty.call(body, 'title')) patch.title = body.title;
+    if (Object.prototype.hasOwnProperty.call(body, 'description')) patch.description = body.description;
+    if (Object.prototype.hasOwnProperty.call(body, 'scheduledAt')) patch.scheduledAt = body.scheduledAt;
+    const appointment = await appointmentsService.updateAppointment(
+      req.session.userId, req.params.id, req.params.appointmentId, patch
+    );
+    if (!appointment) return res.status(404).json({ error: 'Agendamento não encontrado.' });
+    return res.json({ appointment });
+  } catch (err) {
+    if (err.code === 'VALIDATION') {
+      return res.status(400).json({ error: err.message });
+    }
+    return next(err);
+  }
+});
+
+router.post('/leads/saved/:id/appointments/:appointmentId/complete', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    const appointment = await appointmentsService.completeAppointment(
+      req.session.userId, req.params.id, req.params.appointmentId
+    );
+    if (!appointment) return res.status(404).json({ error: 'Agendamento não encontrado.' });
+    return res.json({ appointment });
+  } catch (err) {
+    if (err.code === 'VALIDATION') {
+      return res.status(400).json({ error: err.message });
+    }
+    return next(err);
+  }
+});
+
+router.post('/leads/saved/:id/appointments/:appointmentId/cancel', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    const appointment = await appointmentsService.cancelAppointment(
+      req.session.userId, req.params.id, req.params.appointmentId
+    );
+    if (!appointment) return res.status(404).json({ error: 'Agendamento não encontrado.' });
+    return res.json({ appointment });
   } catch (err) {
     if (err.code === 'VALIDATION') {
       return res.status(400).json({ error: err.message });

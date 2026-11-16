@@ -990,6 +990,18 @@
     if (st) {
       st.addEventListener('change', () => saveLeadStatus());
     }
+    const btnAct = $('#leads-btn-add-activity');
+    if (btnAct) btnAct.addEventListener('click', () => showActivityForm(true));
+    const actCancel = $('#leads-activity-cancel');
+    if (actCancel) actCancel.addEventListener('click', () => showActivityForm(false));
+    const actSave = $('#leads-activity-save');
+    if (actSave) actSave.addEventListener('click', () => saveActivity());
+    const btnAppt = $('#leads-btn-add-appointment');
+    if (btnAppt) btnAppt.addEventListener('click', () => showAppointmentForm(true));
+    const apptCancel = $('#leads-appointment-cancel');
+    if (apptCancel) apptCancel.addEventListener('click', () => showAppointmentForm(false));
+    const apptSave = $('#leads-appointment-save');
+    if (apptSave) apptSave.addEventListener('click', () => saveAppointment());
   }
 
   async function loadLeads(opts) {
@@ -1155,6 +1167,10 @@
       }
       if (statusSel) statusSel.value = lead.status || 'Por contactar';
       if (notes) notes.value = lead.notes != null ? String(lead.notes) : '';
+      showActivityForm(false);
+      showAppointmentForm(false);
+      loadLeadActivities();
+      loadLeadAppointments();
     } catch (_) {
       if (nameEl) nameEl.textContent = 'Erro ao carregar o lead';
     }
@@ -1211,11 +1227,391 @@
       }
       if (statusMsg) statusMsg.textContent = 'Estado atualizado.';
       showToast('Estado atualizado.', 'success');
+      loadLeadActivities();
     } catch (_) {
       if (statusMsg) statusMsg.textContent = 'Erro de rede.';
     }
   }
 
+  const ACTIVITY_TYPE_LABEL = {
+    phone_call: 'Chamada telefónica',
+    whatsapp: 'Mensagem WhatsApp',
+    meeting: 'Reunião',
+    other: 'Outro contacto',
+    status_change: 'Alteração de estado',
+  };
+
+  const APPT_STATUS_LABEL = {
+    scheduled: 'Agendado',
+    completed: 'Concluído',
+    cancelled: 'Cancelado',
+  };
+
+  function toDatetimeLocalValue(d) {
+    const x = d instanceof Date ? d : new Date(d);
+    if (Number.isNaN(x.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    return x.getFullYear() + '-' + pad(x.getMonth() + 1) + '-' + pad(x.getDate()) +
+      'T' + pad(x.getHours()) + ':' + pad(x.getMinutes());
+  }
+
+  function showActivityForm(show) {
+    const form = $('#leads-activity-form');
+    if (!form) return;
+    form.hidden = !show;
+    if (show) {
+      const when = $('#leads-activity-when');
+      if (when && !when.value) when.value = toDatetimeLocalValue(new Date());
+      const msg = $('#leads-activity-msg');
+      if (msg) msg.textContent = '';
+    }
+  }
+
+  function showAppointmentForm(show, appt) {
+    const form = $('#leads-appointment-form');
+    if (!form) return;
+    form.hidden = !show;
+    const idEl = $('#leads-appointment-edit-id');
+    const titleEl = $('#leads-appointment-title');
+    const whenEl = $('#leads-appointment-when');
+    const descEl = $('#leads-appointment-desc');
+    const msg = $('#leads-appointment-msg');
+    if (msg) msg.textContent = '';
+    if (!show) {
+      if (idEl) idEl.value = '';
+      if (titleEl) titleEl.value = '';
+      if (whenEl) whenEl.value = '';
+      if (descEl) descEl.value = '';
+      return;
+    }
+    if (appt) {
+      if (idEl) idEl.value = appt.id || '';
+      if (titleEl) titleEl.value = appt.title || '';
+      if (whenEl) whenEl.value = toDatetimeLocalValue(appt.scheduledAt);
+      if (descEl) descEl.value = appt.description || '';
+    } else {
+      if (idEl) idEl.value = '';
+      if (titleEl) titleEl.value = '';
+      if (whenEl) whenEl.value = toDatetimeLocalValue(new Date());
+      if (descEl) descEl.value = '';
+    }
+  }
+
+  async function loadLeadActivities() {
+    const list = $('#leads-activities-list');
+    if (!list || !currentLeadId) return;
+    list.innerHTML = '';
+    const loading = document.createElement('p');
+    loading.className = 'empty-hint';
+    loading.textContent = 'A carregar histórico…';
+    list.appendChild(loading);
+    try {
+      const res = await api('/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) + '/activities');
+      list.innerHTML = '';
+      if (!res.ok) {
+        const p = document.createElement('p');
+        p.className = 'empty-hint';
+        p.textContent = 'Não foi possível carregar o histórico.';
+        list.appendChild(p);
+        return;
+      }
+      const items = (res.data && res.data.items) || [];
+      if (!items.length) {
+        const p = document.createElement('p');
+        p.className = 'empty-hint';
+        p.id = 'leads-activities-empty';
+        p.textContent = 'Sem actividades registadas.';
+        list.appendChild(p);
+        return;
+      }
+      items.forEach((a) => {
+        const el = document.createElement('div');
+        el.className = 'leads-crm-activity' + (a.activityType === 'status_change' ? ' is-status' : '');
+        const meta = document.createElement('div');
+        meta.className = 'leads-crm-activity-meta';
+        meta.textContent = formatDate(a.occurredAt);
+        const type = document.createElement('div');
+        type.className = 'leads-crm-activity-type';
+        type.textContent = ACTIVITY_TYPE_LABEL[a.activityType] || a.activityType || 'Actividade';
+        const desc = document.createElement('div');
+        desc.className = 'leads-crm-activity-desc';
+        desc.textContent = a.description || '';
+        el.appendChild(meta);
+        el.appendChild(type);
+        el.appendChild(desc);
+        if (a.outcome) {
+          const out = document.createElement('div');
+          out.className = 'leads-crm-activity-outcome';
+          out.textContent = a.outcome;
+          el.appendChild(out);
+        }
+        list.appendChild(el);
+      });
+    } catch (_) {
+      list.innerHTML = '';
+      const p = document.createElement('p');
+      p.className = 'empty-hint';
+      p.textContent = 'Erro de rede ao carregar o histórico.';
+      list.appendChild(p);
+    }
+  }
+
+  async function saveActivity() {
+    if (!currentLeadId) return;
+    const typeEl = $('#leads-activity-type');
+    const whenEl = $('#leads-activity-when');
+    const descEl = $('#leads-activity-desc');
+    const outEl = $('#leads-activity-outcome');
+    const msg = $('#leads-activity-msg');
+    const btn = $('#leads-activity-save');
+    const description = descEl ? String(descEl.value || '').trim() : '';
+    if (!description) {
+      if (msg) msg.textContent = 'A descrição é obrigatória.';
+      return;
+    }
+    let occurredAt = null;
+    if (whenEl && whenEl.value) {
+      const d = new Date(whenEl.value);
+      if (Number.isNaN(d.getTime())) {
+        if (msg) msg.textContent = 'Data/hora inválida.';
+        return;
+      }
+      occurredAt = d.toISOString();
+    }
+    if (btn) btn.disabled = true;
+    if (msg) msg.textContent = 'A guardar…';
+    try {
+      const token = await ensureCsrf();
+      const res = await api('/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) + '/activities', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': token },
+        body: {
+          activityType: typeEl ? typeEl.value : 'other',
+          description,
+          outcome: outEl ? outEl.value : '',
+          occurredAt,
+        },
+      });
+      if (!res.ok) {
+        if (msg) msg.textContent = (res.data && res.data.error) || 'Não foi possível guardar.';
+        return;
+      }
+      if (msg) msg.textContent = 'Actividade registada.';
+      if (descEl) descEl.value = '';
+      if (outEl) outEl.value = '';
+      showActivityForm(false);
+      showToast('Actividade registada.', 'success');
+      loadLeadActivities();
+    } catch (_) {
+      if (msg) msg.textContent = 'Erro de rede.';
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function loadLeadAppointments() {
+    const list = $('#leads-appointments-list');
+    if (!list || !currentLeadId) return;
+    list.innerHTML = '';
+    const loading = document.createElement('p');
+    loading.className = 'empty-hint';
+    loading.textContent = 'A carregar agendamentos…';
+    list.appendChild(loading);
+    try {
+      const res = await api('/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) + '/appointments');
+      list.innerHTML = '';
+      if (!res.ok) {
+        const p = document.createElement('p');
+        p.className = 'empty-hint';
+        p.textContent = 'Não foi possível carregar os agendamentos.';
+        list.appendChild(p);
+        return;
+      }
+      const data = res.data || {};
+      const upcoming = data.upcoming || [];
+      const completed = data.completed || [];
+      const cancelled = data.cancelled || [];
+      if (!upcoming.length && !completed.length && !cancelled.length) {
+        const p = document.createElement('p');
+        p.className = 'empty-hint';
+        p.id = 'leads-appointments-empty';
+        p.textContent = 'Sem agendamentos.';
+        list.appendChild(p);
+        return;
+      }
+      function renderGroup(title, items, withActions) {
+        if (!items.length) return;
+        const h = document.createElement('div');
+        h.className = 'leads-crm-appt-group-title';
+        h.textContent = title;
+        list.appendChild(h);
+        items.forEach((a) => list.appendChild(buildAppointmentCard(a, withActions)));
+      }
+      renderGroup('Próximos', upcoming, true);
+      renderGroup('Concluídos', completed, false);
+      renderGroup('Cancelados', cancelled, false);
+    } catch (_) {
+      list.innerHTML = '';
+      const p = document.createElement('p');
+      p.className = 'empty-hint';
+      p.textContent = 'Erro de rede ao carregar agendamentos.';
+      list.appendChild(p);
+    }
+  }
+
+  function buildAppointmentCard(a, withActions) {
+    const el = document.createElement('div');
+    el.className = 'leads-crm-appt';
+    const title = document.createElement('div');
+    title.className = 'leads-crm-appt-title';
+    title.textContent = a.title || 'Compromisso';
+    const when = document.createElement('div');
+    when.className = 'leads-crm-appt-when';
+    when.textContent = formatDate(a.scheduledAt);
+    const status = document.createElement('span');
+    status.className = 'leads-crm-appt-status is-' + (a.status || 'scheduled');
+    status.textContent = APPT_STATUS_LABEL[a.status] || a.status || '';
+    when.appendChild(document.createTextNode(' · '));
+    when.appendChild(status);
+    el.appendChild(title);
+    el.appendChild(when);
+    if (a.description) {
+      const desc = document.createElement('div');
+      desc.className = 'leads-crm-appt-desc';
+      desc.textContent = a.description;
+      el.appendChild(desc);
+    }
+    if (withActions && a.status === 'scheduled') {
+      const actions = document.createElement('div');
+      actions.className = 'leads-crm-appt-actions';
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'btn btn-ghost btn-sm';
+      editBtn.textContent = 'Editar';
+      editBtn.addEventListener('click', () => showAppointmentForm(true, a));
+      const doneBtn = document.createElement('button');
+      doneBtn.type = 'button';
+      doneBtn.className = 'btn btn-secondary btn-sm';
+      doneBtn.textContent = 'Concluir';
+      doneBtn.addEventListener('click', () => completeAppointment(a.id));
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'btn btn-ghost btn-sm';
+      cancelBtn.textContent = 'Cancelar';
+      cancelBtn.addEventListener('click', () => {
+        if (window.confirm('Cancelar este compromisso? O registo será preservado.')) {
+          cancelAppointment(a.id);
+        }
+      });
+      actions.appendChild(editBtn);
+      actions.appendChild(doneBtn);
+      actions.appendChild(cancelBtn);
+      el.appendChild(actions);
+    }
+    return el;
+  }
+
+  async function saveAppointment() {
+    if (!currentLeadId) return;
+    const idEl = $('#leads-appointment-edit-id');
+    const titleEl = $('#leads-appointment-title');
+    const whenEl = $('#leads-appointment-when');
+    const descEl = $('#leads-appointment-desc');
+    const msg = $('#leads-appointment-msg');
+    const btn = $('#leads-appointment-save');
+    const title = titleEl ? String(titleEl.value || '').trim() : '';
+    if (!title) {
+      if (msg) msg.textContent = 'O título é obrigatório.';
+      return;
+    }
+    if (!whenEl || !whenEl.value) {
+      if (msg) msg.textContent = 'Data e hora são obrigatórias.';
+      return;
+    }
+    const d = new Date(whenEl.value);
+    if (Number.isNaN(d.getTime())) {
+      if (msg) msg.textContent = 'Data/hora inválida.';
+      return;
+    }
+    const editId = idEl ? idEl.value : '';
+    if (btn) btn.disabled = true;
+    if (msg) msg.textContent = 'A guardar…';
+    try {
+      const token = await ensureCsrf();
+      const body = {
+        title,
+        description: descEl ? descEl.value : '',
+        scheduledAt: d.toISOString(),
+      };
+      let res;
+      if (editId) {
+        res = await api(
+          '/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) +
+            '/appointments/' + encodeURIComponent(editId),
+          { method: 'PATCH', headers: { 'X-CSRF-Token': token }, body }
+        );
+      } else {
+        res = await api(
+          '/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) + '/appointments',
+          { method: 'POST', headers: { 'X-CSRF-Token': token }, body }
+        );
+      }
+      if (!res.ok) {
+        if (msg) msg.textContent = (res.data && res.data.error) || 'Não foi possível guardar.';
+        return;
+      }
+      showAppointmentForm(false);
+      showToast(editId ? 'Agendamento atualizado.' : 'Agendamento criado.', 'success');
+      loadLeadAppointments();
+      loadLeadActivities();
+    } catch (_) {
+      if (msg) msg.textContent = 'Erro de rede.';
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function completeAppointment(appointmentId) {
+    if (!currentLeadId || !appointmentId) return;
+    try {
+      const token = await ensureCsrf();
+      const res = await api(
+        '/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) +
+          '/appointments/' + encodeURIComponent(appointmentId) + '/complete',
+        { method: 'POST', headers: { 'X-CSRF-Token': token }, body: {} }
+      );
+      if (!res.ok) {
+        showToast((res.data && res.data.error) || 'Não foi possível concluir.', 'error');
+        return;
+      }
+      showToast('Compromisso concluído.', 'success');
+      loadLeadAppointments();
+      loadLeadActivities();
+    } catch (_) {
+      showToast('Erro de rede.', 'error');
+    }
+  }
+
+  async function cancelAppointment(appointmentId) {
+    if (!currentLeadId || !appointmentId) return;
+    try {
+      const token = await ensureCsrf();
+      const res = await api(
+        '/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) +
+          '/appointments/' + encodeURIComponent(appointmentId) + '/cancel',
+        { method: 'POST', headers: { 'X-CSRF-Token': token }, body: {} }
+      );
+      if (!res.ok) {
+        showToast((res.data && res.data.error) || 'Não foi possível cancelar.', 'error');
+        return;
+      }
+      showToast('Compromisso cancelado.', 'success');
+      loadLeadAppointments();
+      loadLeadActivities();
+    } catch (_) {
+      showToast('Erro de rede.', 'error');
+    }
+  }
 
   async function loadDashboard() {
     const box = $('#dashboard-recent');

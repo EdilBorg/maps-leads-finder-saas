@@ -148,20 +148,18 @@ async function getSavedLead(userId, leadId) {
 }
 
 async function updateSavedLead(userId, leadId, patch) {
-  const updates = [];
-  const params = [];
-  let p = 1;
+  const { insertStatusChangeActivity } = require('./savedLeadActivities');
+
+  let nextStatus = null;
+  let nextNotes = undefined; // undefined = not provided
 
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'status')) {
-    const status = String(patch.status || '').trim();
-    if (!isValidCrmStatus(status)) {
+    nextStatus = String(patch.status || '').trim();
+    if (!isValidCrmStatus(nextStatus)) {
       const err = new Error('Estado comercial inválido.');
       err.code = 'VALIDATION';
       throw err;
     }
-    updates.push(`status = $${p}`);
-    params.push(status);
-    p += 1;
   }
 
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'notes')) {
@@ -173,31 +171,81 @@ async function updateSavedLead(userId, leadId, patch) {
       err.code = 'VALIDATION';
       throw err;
     }
-    updates.push(`notes = $${p}`);
-    params.push(notes);
-    p += 1;
+    nextNotes = notes;
   }
 
-  if (!updates.length) {
+  if (nextStatus == null && nextNotes === undefined) {
     const err = new Error('Nada para atualizar.');
     err.code = 'VALIDATION';
     throw err;
   }
 
-  updates.push('updated_at = NOW()');
-  params.push(leadId);
-  params.push(userId);
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  const { rows } = await getPool().query(
-    `UPDATE saved_leads
-     SET ${updates.join(', ')}
-     WHERE id = $${p} AND user_id = $${p + 1}
-     RETURNING id, name, address, phone, email, website, rating, reviews_count, category,
-               lat, lng, notes, status, created_at, updated_at`,
-    params
-  );
-  if (!rows[0]) return null;
-  return mapSavedLeadRow(rows[0]);
+    const cur = await client.query(
+      `SELECT id, name, address, phone, email, website, rating, reviews_count, category,
+              lat, lng, notes, status, created_at, updated_at
+       FROM saved_leads
+       WHERE id = $1 AND user_id = $2
+       FOR UPDATE`,
+      [leadId, userId]
+    );
+    if (!cur.rows[0]) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const current = cur.rows[0];
+    const prevStatus = current.status || 'Por contactar';
+
+    const updates = [];
+    const params = [];
+    let p = 1;
+
+    if (nextStatus != null) {
+      updates.push(`status = $${p}`);
+      params.push(nextStatus);
+      p += 1;
+    }
+    if (nextNotes !== undefined) {
+      updates.push(`notes = $${p}`);
+      params.push(nextNotes);
+      p += 1;
+    }
+    updates.push('updated_at = NOW()');
+    params.push(leadId, userId);
+
+    const { rows } = await client.query(
+      `UPDATE saved_leads
+       SET ${updates.join(', ')}
+       WHERE id = $${p} AND user_id = $${p + 1}
+       RETURNING id, name, address, phone, email, website, rating, reviews_count, category,
+                 lat, lng, notes, status, created_at, updated_at`,
+      params
+    );
+
+    // Atomic status history only when status actually changes
+    if (nextStatus != null && nextStatus !== prevStatus) {
+      await insertStatusChangeActivity(
+        client,
+        userId,
+        leadId,
+        prevStatus,
+        nextStatus,
+        new Date().toISOString()
+      );
+    }
+
+    await client.query('COMMIT');
+    return mapSavedLeadRow(rows[0]);
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 module.exports = {
