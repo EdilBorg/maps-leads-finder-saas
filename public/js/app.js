@@ -23,6 +23,10 @@
   let activeSearchId = null;
   let pollTimer = null;
   let abortRequested = false;
+  let selectedLeadIds = new Set();
+  let selectedHistoryIds = new Set();
+  let resultsSelectAllMode = false;
+
 
   function $(sel) { return document.querySelector(sel); }
   function $$(sel) { return Array.from(document.querySelectorAll(sel)); }
@@ -67,6 +71,45 @@
     el.hidden = false;
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { el.hidden = true; }, 4500);
+  }
+
+
+  let confirmResolver = null;
+  function openConfirmModal(message, opts) {
+    const modal = $('#confirm-modal');
+    const msgEl = $('#confirm-modal-message');
+    const okBtn = $('#confirm-modal-ok');
+    const titleEl = $('#confirm-modal-title');
+    if (!modal || !msgEl || !okBtn) {
+      return Promise.resolve(window.confirm(message));
+    }
+    if (titleEl) titleEl.textContent = (opts && opts.title) || 'Confirmar eliminação';
+    msgEl.textContent = message || '';
+    okBtn.disabled = false;
+    okBtn.textContent = (opts && opts.okLabel) || 'Eliminar';
+    modal.hidden = false;
+    return new Promise((resolve) => {
+      confirmResolver = resolve;
+    });
+  }
+  function closeConfirmModal(result) {
+    const modal = $('#confirm-modal');
+    if (modal) modal.hidden = true;
+    const r = confirmResolver;
+    confirmResolver = null;
+    if (r) r(!!result);
+  }
+  function initConfirmModal() {
+    const ok = $('#confirm-modal-ok');
+    if (ok) {
+      ok.addEventListener('click', () => {
+        ok.disabled = true;
+        closeConfirmModal(true);
+      });
+    }
+    $$('[data-confirm-cancel]').forEach((el) => {
+      el.addEventListener('click', () => closeConfirmModal(false));
+    });
   }
 
   function isGooglePlaceId(id) {
@@ -320,7 +363,11 @@
       const cb = document.createElement('input');
       cb.type = 'checkbox'; cb.className = 'result-check'; cb.value = r.id || '';
       cb.setAttribute('aria-label', 'Selecionar ' + displayName);
-      cb.addEventListener('change', updateSelectedCountLabel);
+      if (resultsSelectAllMode) cb.checked = true;
+      cb.addEventListener('change', () => {
+        if (!cb.checked) resultsSelectAllMode = false;
+        updateSelectedCountLabel();
+      });
       actions.appendChild(cb);
       const contactBtn = document.createElement('button');
       contactBtn.type = 'button'; contactBtn.className = 'btn btn-primary btn-sm';
@@ -409,11 +456,140 @@
     return 0;
   }
 
+    function getSelectedResultIds() {
+    if (resultsSelectAllMode && currentResults.length) {
+      return currentResults.map((r) => r && r.id).filter(Boolean).map(String);
+    }
+    return $$('.result-check:checked')
+      .map((el) => (el && el.value ? String(el.value).trim() : ''))
+      .filter(Boolean);
+  }
+
   function updateSelectedCountLabel() {
     const btn = $('#btn-save-leads');
-    if (!btn) return;
-    const n = $$('.result-check:checked').length;
-    btn.textContent = n > 0 ? ('Guardar selecionados (' + n + ')') : 'Guardar selecionados';
+    const master = $('#results-select-all');
+    const pageChecks = $$('.result-check');
+    const checkedPage = pageChecks.filter((c) => c.checked).length;
+    let n;
+    if (resultsSelectAllMode) {
+      n = currentResults.length;
+    } else {
+      n = checkedPage;
+    }
+    if (btn && btn.dataset.busy !== '1') {
+      btn.textContent = n > 0 ? ('Guardar seleccionados (' + n + ')') : 'Guardar seleccionados';
+    }
+    if (master) {
+      if (!pageChecks.length) {
+        master.checked = false;
+        master.indeterminate = false;
+      } else if (resultsSelectAllMode || checkedPage === pageChecks.length) {
+        master.checked = true;
+        master.indeterminate = false;
+      } else if (checkedPage === 0) {
+        master.checked = false;
+        master.indeterminate = false;
+      } else {
+        master.checked = false;
+        master.indeterminate = true;
+      }
+    }
+  }
+
+  function setResultsSelectAll(on) {
+    resultsSelectAllMode = !!on;
+    $$('.result-check').forEach((c) => { c.checked = !!on; });
+    updateSelectedCountLabel();
+  }
+
+  async function saveSelectedLeads() {
+    const btn = $('#btn-save-leads');
+    const ids = getSelectedResultIds();
+    if (!ids.length) {
+      showToast('Seleciona pelo menos um resultado.', 'error');
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.dataset.busy = '1';
+      btn.textContent = 'A guardar…';
+    }
+    try {
+      const token = await ensureCsrf();
+      const res = await api('/api/searches/leads/save', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': token },
+        body: { resultIds: ids },
+      });
+      const data = res.data || {};
+      if (res.ok) {
+        const saved = data.savedCount != null ? Number(data.savedCount) : 0;
+        const already = data.alreadySavedCount != null ? Number(data.alreadySavedCount) : 0;
+        let msg;
+        if (saved > 0 && already > 0) {
+          msg = saved + ' lead' + (saved === 1 ? '' : 's') + ' guardado' + (saved === 1 ? '' : 's') +
+            '. ' + already + ' já ' + (already === 1 ? 'estava' : 'estavam') + ' guardado' + (already === 1 ? '' : 's') + '.';
+        } else if (saved > 0) {
+          msg = saved + ' lead' + (saved === 1 ? '' : 's') + ' guardado' + (saved === 1 ? '' : 's') + ' com sucesso.';
+        } else if (already > 0) {
+          msg = already === 1
+            ? 'Este lead já estava guardado.'
+            : 'Os ' + already + ' leads seleccionados já estavam guardados.';
+        } else {
+          msg = 'Nenhum lead foi guardado.';
+        }
+        showToast(msg, saved > 0 ? 'success' : 'info');
+        // Clear selection of processed results
+        resultsSelectAllMode = false;
+        $$('.result-check').forEach((el) => { el.checked = false; });
+        updateSelectedCountLabel();
+        if (typeof loadDashboard === 'function') {
+          try { loadDashboard(); } catch (_) {}
+        }
+      } else if (res.status === 400) {
+        showToast((data && data.error) || 'Pedido inválido. Seleciona pelo menos um resultado.', 'error');
+      } else if (res.status === 401) {
+        showToast((data && data.error) || 'Sessão inválida. Inicia sessão novamente.', 'error');
+      } else if (res.status === 403) {
+        const err = (data && data.error) || '';
+        if (/csrf|token/i.test(err)) {
+          showToast(err || 'Pedido rejeitado (CSRF). Recarrega a página e tenta de novo.', 'error');
+        } else if (/email|verif/i.test(err)) {
+          showToast(err || 'Verifica o email da conta para guardar leads.', 'error');
+        } else {
+          showToast(err || 'Não tens permissão para guardar leads.', 'error');
+        }
+      } else if (res.status >= 500) {
+        showToast((data && data.error) || 'Erro interno ao guardar leads. Tenta novamente.', 'error');
+      } else {
+        showToast((data && data.error) || 'Não foi possível guardar os leads.', 'error');
+      }
+    } catch (_) {
+      showToast('Erro de rede ao guardar leads.', 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        delete btn.dataset.busy;
+      }
+      updateSelectedCountLabel();
+    }
+  }
+
+
+  async function saveAllLeads() {
+    if (!currentResults.length) {
+      showToast('Não há resultados para guardar.', 'error');
+      return;
+    }
+    const ok = await openConfirmModal(
+      'Vais guardar todos os ' + currentResults.length + ' resultados desta pesquisa. Continuar?',
+      { title: 'Guardar todos', okLabel: 'Guardar todos' }
+    );
+    if (!ok) return;
+    resultsSelectAllMode = true;
+    $$('.result-check').forEach((c) => { c.checked = true; });
+    updateSelectedCountLabel();
+    await saveSelectedLeads();
   }
 
   function setSummary(visible, text) {
@@ -760,7 +936,7 @@
       if (!res.ok) {
         const tr = document.createElement('tr');
         const td = document.createElement('td');
-        td.colSpan = 5;
+        td.colSpan = 7;
         td.textContent = res.status === 401 ? 'Inicia sessão para ver o histórico.' : 'Não foi possível carregar o histórico.';
         tr.appendChild(td);
         body.appendChild(tr);
@@ -773,7 +949,7 @@
       if (!items.length) {
         const tr = document.createElement('tr');
         const td = document.createElement('td');
-        td.colSpan = 5;
+        td.colSpan = 7;
         td.textContent = page === 1 ? 'Ainda não há pesquisas.' : 'Não há mais pesquisas nesta página.';
         tr.appendChild(td);
         body.appendChild(tr);
@@ -783,6 +959,22 @@
       }
       items.forEach((item) => {
         const tr = document.createElement('tr');
+        const tdCheck = document.createElement('td');
+        tdCheck.className = 'col-check';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'history-check';
+        cb.value = item.id || '';
+        cb.checked = selectedHistoryIds.has(String(item.id));
+        cb.addEventListener('click', (e) => e.stopPropagation());
+        cb.addEventListener('change', () => {
+          const id = String(item.id);
+          if (cb.checked) selectedHistoryIds.add(id);
+          else selectedHistoryIds.delete(id);
+          updateHistorySelectionUi();
+        });
+        tdCheck.appendChild(cb);
+        tr.appendChild(tdCheck);
         tr.style.cursor = 'pointer';
         tr.addEventListener('click', () => openSearch(item.id));
         [item.query, item.location, item.resultsCount != null ? item.resultsCount : '—', item.status, formatDate(item.createdAt)].forEach((val, idx) => {
@@ -797,8 +989,20 @@
           }
           tr.appendChild(td);
         });
+        const tdAct = document.createElement('td');
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'btn btn-danger btn-sm';
+        delBtn.textContent = 'Eliminar';
+        delBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deleteOneSearch(item.id, item.query || item.location || item.id);
+        });
+        tdAct.appendChild(delBtn);
+        tr.appendChild(tdAct);
         body.appendChild(tr);
       });
+      updateHistorySelectionUi();
       renderHistoryPagination(hasNext);
       if (options.scrollToTop) scrollActiveViewToTop();
     } catch (_) {
@@ -938,6 +1142,263 @@
     if (detail) detail.hidden = false;
   }
 
+
+  function updateLeadsSelectionUi() {
+    const countEl = $('#leads-selected-count');
+    const delBtn = $('#leads-delete-selected');
+    const master = $('#leads-select-page');
+    const n = selectedLeadIds.size;
+    if (countEl) countEl.textContent = n + ' seleccionado' + (n === 1 ? '' : 's');
+    if (delBtn) delBtn.disabled = n === 0;
+    const pageChecks = $$('.lead-check');
+    if (master && pageChecks.length) {
+      const checked = pageChecks.filter((c) => c.checked).length;
+      master.checked = checked === pageChecks.length;
+      master.indeterminate = checked > 0 && checked < pageChecks.length;
+    } else if (master) {
+      master.checked = false;
+      master.indeterminate = false;
+    }
+  }
+
+  function updateHistorySelectionUi() {
+    const countEl = $('#history-selected-count');
+    const delBtn = $('#history-delete-selected');
+    const master = $('#history-select-page');
+    const n = selectedHistoryIds.size;
+    if (countEl) countEl.textContent = n + ' seleccionada' + (n === 1 ? '' : 's');
+    if (delBtn) delBtn.disabled = n === 0;
+    const pageChecks = $$('.history-check');
+    if (master && pageChecks.length) {
+      const checked = pageChecks.filter((c) => c.checked).length;
+      master.checked = checked === pageChecks.length;
+      master.indeterminate = checked > 0 && checked < pageChecks.length;
+    } else if (master) {
+      master.checked = false;
+      master.indeterminate = false;
+    }
+  }
+
+  async function deleteOneLead(id, name) {
+    const ok = await openConfirmModal(
+      'Tens a certeza de que pretendes eliminar o lead «' + (name || id) + '»? As actividades e agendamentos associados também serão eliminados.'
+    );
+    if (!ok) return;
+    try {
+      const token = await ensureCsrf();
+      const res = await api('/api/searches/leads/saved/' + encodeURIComponent(id), {
+        method: 'DELETE',
+        headers: { 'X-CSRF-Token': token },
+      });
+      if (!res.ok) {
+        showToast((res.data && res.data.error) || 'Não foi possível eliminar o lead.', 'error');
+        return;
+      }
+      selectedLeadIds.delete(String(id));
+      showToast('Lead eliminado.', 'success');
+      if (currentLeadId && String(currentLeadId) === String(id)) {
+        currentLeadId = null;
+        const panel = $('#leads-detail-panel');
+        const list = $('#leads-list-panel');
+        if (panel) panel.hidden = true;
+        if (list) list.hidden = false;
+      }
+      loadLeads({ scrollToTop: false });
+      if (typeof loadDashboard === 'function') try { loadDashboard(); } catch (_) {}
+    } catch (_) {
+      showToast('Erro de rede ao eliminar o lead.', 'error');
+    }
+  }
+
+  async function deleteSelectedLeads() {
+    const ids = Array.from(selectedLeadIds);
+    if (!ids.length) return;
+    const ok = await openConfirmModal(
+      'Serão eliminados ' + ids.length + ' lead' + (ids.length === 1 ? '' : 's') +
+      ' seleccionado' + (ids.length === 1 ? '' : 's') + ' e os respectivos dados comerciais.'
+    );
+    if (!ok) return;
+    try {
+      const token = await ensureCsrf();
+      const res = await api('/api/searches/leads/saved/delete', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': token },
+        body: { ids },
+      });
+      if (!res.ok) {
+        showToast((res.data && res.data.error) || 'Não foi possível eliminar os leads.', 'error');
+        return;
+      }
+      const n = (res.data && res.data.deletedCount) || 0;
+      selectedLeadIds.clear();
+      showToast(n + ' lead' + (n === 1 ? '' : 's') + ' eliminado' + (n === 1 ? '' : 's') + '.', 'success');
+      loadLeads({ scrollToTop: false });
+      if (typeof loadDashboard === 'function') try { loadDashboard(); } catch (_) {}
+    } catch (_) {
+      showToast('Erro de rede ao eliminar leads.', 'error');
+    }
+  }
+
+  async function deleteAllLeads() {
+    const ok = await openConfirmModal(
+      'Esta operação eliminará TODOS os leads guardados da tua conta e os respectivos dados comerciais (notas, actividades e agendamentos). Esta acção não pode ser anulada.'
+    );
+    if (!ok) return;
+    try {
+      const token = await ensureCsrf();
+      const res = await api('/api/searches/leads/saved/delete', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': token },
+        body: { all: true },
+      });
+      if (!res.ok) {
+        showToast((res.data && res.data.error) || 'Não foi possível eliminar os leads.', 'error');
+        return;
+      }
+      const n = (res.data && res.data.deletedCount) || 0;
+      selectedLeadIds.clear();
+      showToast(n + ' lead' + (n === 1 ? '' : 's') + ' eliminado' + (n === 1 ? '' : 's') + '.', 'success');
+      loadLeads({ scrollToTop: true });
+      if (typeof loadDashboard === 'function') try { loadDashboard(); } catch (_) {}
+    } catch (_) {
+      showToast('Erro de rede ao eliminar leads.', 'error');
+    }
+  }
+
+  async function deleteOneSearch(id, label) {
+    const ok = await openConfirmModal(
+      'Tens a certeza de que pretendes eliminar a pesquisa «' + (label || id) + '»? Os leads guardados a partir desta pesquisa não serão afectados.'
+    );
+    if (!ok) return;
+    try {
+      const token = await ensureCsrf();
+      const res = await api('/api/searches/' + encodeURIComponent(id), {
+        method: 'DELETE',
+        headers: { 'X-CSRF-Token': token },
+      });
+      if (res.status === 409) {
+        showToast((res.data && res.data.error) || 'Pesquisa em execução. Cancela-a primeiro.', 'error');
+        return;
+      }
+      if (!res.ok) {
+        showToast((res.data && res.data.error) || 'Não foi possível eliminar a pesquisa.', 'error');
+        return;
+      }
+      selectedHistoryIds.delete(String(id));
+      showToast('Pesquisa eliminada.', 'success');
+      loadHistory({ scrollToTop: false });
+    } catch (_) {
+      showToast('Erro de rede ao eliminar a pesquisa.', 'error');
+    }
+  }
+
+  async function deleteSelectedSearches() {
+    const ids = Array.from(selectedHistoryIds);
+    if (!ids.length) return;
+    const ok = await openConfirmModal(
+      'Serão eliminadas ' + ids.length + ' pesquisa' + (ids.length === 1 ? '' : 's') +
+      ' seleccionada' + (ids.length === 1 ? '' : 's') + '. Os leads guardados não serão afectados.'
+    );
+    if (!ok) return;
+    try {
+      const token = await ensureCsrf();
+      const res = await api('/api/searches/delete', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': token },
+        body: { ids },
+      });
+      if (!res.ok && res.status !== 409) {
+        showToast((res.data && res.data.error) || 'Não foi possível eliminar as pesquisas.', 'error');
+        return;
+      }
+      const n = (res.data && res.data.deletedCount) || 0;
+      const skipped = (res.data && res.data.skippedRunning) || [];
+      selectedHistoryIds.clear();
+      let msg = n + ' pesquisa' + (n === 1 ? '' : 's') + ' eliminada' + (n === 1 ? '' : 's') + '.';
+      if (skipped.length) msg += ' ' + skipped.length + ' em execução foram ignoradas.';
+      showToast(msg, n > 0 ? 'success' : 'info');
+      loadHistory({ scrollToTop: false });
+    } catch (_) {
+      showToast('Erro de rede ao eliminar pesquisas.', 'error');
+    }
+  }
+
+  async function deleteAllSearches() {
+    const ok = await openConfirmModal(
+      'Esta operação eliminará todas as pesquisas do teu histórico. Os leads guardados não serão afectados. Pesquisas em execução serão ignoradas.'
+    );
+    if (!ok) return;
+    try {
+      const token = await ensureCsrf();
+      const res = await api('/api/searches/delete', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': token },
+        body: { all: true },
+      });
+      if (!res.ok) {
+        showToast((res.data && res.data.error) || 'Não foi possível eliminar o histórico.', 'error');
+        return;
+      }
+      const n = (res.data && res.data.deletedCount) || 0;
+      const skipped = (res.data && res.data.skippedRunning) || [];
+      selectedHistoryIds.clear();
+      let msg = n + ' pesquisa' + (n === 1 ? '' : 's') + ' eliminada' + (n === 1 ? '' : 's') + '.';
+      if (skipped.length) msg += ' ' + skipped.length + ' em execução foram ignoradas.';
+      showToast(msg, 'success');
+      historyPage = 1;
+      loadHistory({ scrollToTop: true });
+    } catch (_) {
+      showToast('Erro de rede ao eliminar o histórico.', 'error');
+    }
+  }
+
+  async function deleteOneActivity(activityId, summary) {
+    const ok = await openConfirmModal(
+      'Eliminar esta actividade?' + (summary ? ('\n' + summary) : '')
+    );
+    if (!ok || !currentLeadId) return;
+    try {
+      const token = await ensureCsrf();
+      const res = await api(
+        '/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) +
+        '/activities/' + encodeURIComponent(activityId),
+        { method: 'DELETE', headers: { 'X-CSRF-Token': token } }
+      );
+      if (!res.ok) {
+        showToast((res.data && res.data.error) || 'Não foi possível eliminar a actividade.', 'error');
+        return;
+      }
+      showToast('Actividade eliminada.', 'success');
+      loadLeadActivities();
+    } catch (_) {
+      showToast('Erro de rede ao eliminar a actividade.', 'error');
+    }
+  }
+
+  async function clearLeadActivities() {
+    if (!currentLeadId) return;
+    const ok = await openConfirmModal(
+      'Serão eliminadas todas as actividades deste lead (incluindo alterações de estado). As notas e os agendamentos serão preservados.'
+    );
+    if (!ok) return;
+    try {
+      const token = await ensureCsrf();
+      const res = await api(
+        '/api/searches/leads/saved/' + encodeURIComponent(currentLeadId) + '/activities',
+        { method: 'DELETE', headers: { 'X-CSRF-Token': token } }
+      );
+      if (!res.ok) {
+        showToast((res.data && res.data.error) || 'Não foi possível limpar o histórico.', 'error');
+        return;
+      }
+      const n = (res.data && res.data.deletedCount) || 0;
+      showToast(n + ' actividade' + (n === 1 ? '' : 's') + ' eliminada' + (n === 1 ? '' : 's') + '.', 'success');
+      loadLeadActivities();
+    } catch (_) {
+      showToast('Erro de rede ao limpar actividades.', 'error');
+    }
+  }
+
   function bindLeadsFiltersOnce() {
     if (leadsFiltersBound) return;
     leadsFiltersBound = true;
@@ -947,12 +1408,13 @@
     };
     ['leads-status', 'leads-category', 'leads-sort'].forEach((id) => {
       const el = $('#' + id);
-      if (el) el.addEventListener('change', reload);
+      if (el) el.addEventListener('change', () => { selectedLeadIds.clear(); reload(); });
     });
     const q = $('#leads-q');
     let t = null;
     if (q) {
       q.addEventListener('input', () => {
+        selectedLeadIds.clear();
         if (t) clearTimeout(t);
         t = setTimeout(reload, 350);
       });
@@ -960,6 +1422,7 @@
     const clearBtn = $('#leads-clear-filters');
     if (clearBtn) {
       clearBtn.addEventListener('click', () => {
+        selectedLeadIds.clear();
         if ($('#leads-q')) $('#leads-q').value = '';
         if ($('#leads-status')) $('#leads-status').value = '';
         if ($('#leads-category')) $('#leads-category').value = '';
@@ -1006,6 +1469,8 @@
     if (actSave) actSave.addEventListener('click', () => saveActivity());
     const btnAppt = $('#leads-btn-add-appointment');
     if (btnAppt) btnAppt.addEventListener('click', () => showAppointmentForm(true));
+    const btnApptSum = $('#leads-btn-add-appointment-summary');
+    if (btnApptSum) btnApptSum.addEventListener('click', () => showAppointmentForm(true));
     const apptCancel = $('#leads-appointment-cancel');
     if (apptCancel) apptCancel.addEventListener('click', () => showAppointmentForm(false));
     const apptSave = $('#leads-appointment-save');
@@ -1056,7 +1521,7 @@
       if (!items.length) {
         const tr = document.createElement('tr');
         const td = document.createElement('td');
-        td.colSpan = 6;
+        td.colSpan = 7;
         td.textContent = leadsTotal === 0 && !params.get('q') && !params.get('status') && !params.get('category')
           ? 'Ainda não há leads guardados.'
           : 'Nenhum lead corresponde aos filtros.';
@@ -1069,6 +1534,22 @@
 
       items.forEach((item) => {
         const tr = document.createElement('tr');
+        const tdCheck = document.createElement('td');
+        tdCheck.className = 'col-check';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'lead-check';
+        cb.value = item.id || '';
+        cb.checked = selectedLeadIds.has(String(item.id));
+        cb.addEventListener('click', (e) => e.stopPropagation());
+        cb.addEventListener('change', () => {
+          const id = String(item.id);
+          if (cb.checked) selectedLeadIds.add(id);
+          else selectedLeadIds.delete(id);
+          updateLeadsSelectionUi();
+        });
+        tdCheck.appendChild(cb);
+        tr.appendChild(tdCheck);
         const cells = [
           item.name || '—',
           item.category || '—',
@@ -1094,12 +1575,23 @@
           e.stopPropagation();
           openLeadDetail(item.id);
         });
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'btn btn-danger btn-sm';
+        delBtn.textContent = 'Eliminar';
+        delBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deleteOneLead(item.id, item.name || 'este lead');
+        });
         tdAction.appendChild(btn);
+        tdAction.appendChild(document.createTextNode(' '));
+        tdAction.appendChild(delBtn);
         tr.appendChild(tdAction);
         tr.style.cursor = 'pointer';
         tr.addEventListener('click', () => openLeadDetail(item.id));
         body.appendChild(tr);
       });
+      updateLeadsSelectionUi();
       renderLeadsPagination();
       if (options.scrollToTop) scrollActiveViewToTop();
     } catch (_) {
@@ -1107,7 +1599,7 @@
       body.innerHTML = '';
       const tr = document.createElement('tr');
       const td = document.createElement('td');
-      td.colSpan = 6;
+      td.colSpan = 7;
       td.textContent = 'Não foi possível carregar os leads.';
       tr.appendChild(td);
       body.appendChild(tr);
@@ -1211,7 +1703,6 @@
     const nameEl = $('#leads-detail-name');
     const fields = $('#leads-detail-fields');
     const meta = $('#leads-detail-meta');
-    const headerStatus = $('#leads-detail-header-status');
     const actions = $('#leads-detail-actions');
     const notesStatus = $('#leads-notes-status');
     const statusMsg = $('#leads-status-msg');
@@ -1219,7 +1710,6 @@
     if (nameEl) nameEl.textContent = 'A carregar…';
     if (fields) fields.innerHTML = '';
     if (meta) meta.innerHTML = '';
-    if (headerStatus) headerStatus.innerHTML = '';
     if (actions) actions.innerHTML = '';
     if (notesStatus) notesStatus.textContent = '';
     if (statusMsg) statusMsg.textContent = '';
@@ -1261,11 +1751,6 @@
           span.textContent = b;
           meta.appendChild(span);
         });
-      }
-
-      if (headerStatus) {
-        headerStatus.innerHTML = '';
-        headerStatus.appendChild(statusBadge(lead.status || 'Por contactar'));
       }
 
       if (actions) {
@@ -1485,16 +1970,29 @@
       items.forEach((a) => {
         const el = document.createElement('div');
         el.className = 'leads-crm-activity' + (a.activityType === 'status_change' ? ' is-status' : '');
+        const head = document.createElement('div');
+        head.className = 'leads-crm-activity-head';
         const meta = document.createElement('div');
         meta.className = 'leads-crm-activity-meta';
         meta.textContent = formatDate(a.occurredAt);
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'btn btn-ghost btn-sm leads-crm-activity-delete';
+        delBtn.textContent = 'Eliminar';
+        delBtn.addEventListener('click', () => {
+          const summary = (ACTIVITY_TYPE_LABEL[a.activityType] || a.activityType || '') +
+            (a.description ? (': ' + String(a.description).slice(0, 80)) : '');
+          deleteOneActivity(a.id, summary);
+        });
+        head.appendChild(meta);
+        head.appendChild(delBtn);
         const type = document.createElement('div');
         type.className = 'leads-crm-activity-type';
         type.textContent = ACTIVITY_TYPE_LABEL[a.activityType] || a.activityType || 'Actividade';
         const desc = document.createElement('div');
         desc.className = 'leads-crm-activity-desc';
         desc.textContent = a.description || '';
-        el.appendChild(meta);
+        el.appendChild(head);
         el.appendChild(type);
         el.appendChild(desc);
         if (a.outcome) {
@@ -2010,6 +2508,61 @@
     if (form) form.addEventListener('submit', (e) => { e.preventDefault(); runSearch(); });
     const btn = $('#btn-search');
     if (btn) btn.addEventListener('click', (e) => { e.preventDefault(); runSearch(); });
+    const saveBtn = $('#btn-save-leads');
+    if (saveBtn) saveBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      saveSelectedLeads();
+    });
+    const saveAll = $('#btn-save-all-leads');
+    if (saveAll) saveAll.addEventListener('click', (e) => {
+      e.preventDefault();
+      saveAllLeads();
+    });
+    const selAll = $('#results-select-all');
+    if (selAll) selAll.addEventListener('change', () => {
+      setResultsSelectAll(selAll.checked);
+    });
+  }
+
+  function initBulkActions() {
+    const leadsPage = $('#leads-select-page');
+    if (leadsPage) {
+      leadsPage.addEventListener('change', () => {
+        $$('.lead-check').forEach((c) => {
+          c.checked = leadsPage.checked;
+          const id = String(c.value || '');
+          if (!id) return;
+          if (leadsPage.checked) selectedLeadIds.add(id);
+          else selectedLeadIds.delete(id);
+        });
+        updateLeadsSelectionUi();
+      });
+    }
+    const leadsDelSel = $('#leads-delete-selected');
+    if (leadsDelSel) leadsDelSel.addEventListener('click', () => deleteSelectedLeads());
+    const leadsDelAll = $('#leads-delete-all');
+    if (leadsDelAll) leadsDelAll.addEventListener('click', () => deleteAllLeads());
+
+    const histPage = $('#history-select-page');
+    if (histPage) {
+      histPage.addEventListener('change', () => {
+        $$('.history-check').forEach((c) => {
+          c.checked = histPage.checked;
+          const id = String(c.value || '');
+          if (!id) return;
+          if (histPage.checked) selectedHistoryIds.add(id);
+          else selectedHistoryIds.delete(id);
+        });
+        updateHistorySelectionUi();
+      });
+    }
+    const histDelSel = $('#history-delete-selected');
+    if (histDelSel) histDelSel.addEventListener('click', () => deleteSelectedSearches());
+    const histDelAll = $('#history-delete-all');
+    if (histDelAll) histDelAll.addEventListener('click', () => deleteAllSearches());
+
+    const clearAct = $('#leads-btn-clear-activities');
+    if (clearAct) clearAct.addEventListener('click', () => clearLeadActivities());
   }
 
   function initContactModal() {
@@ -2074,6 +2627,8 @@
     initSearchForm();
     initContactModal();
     initSettingsRecovery();
+    initConfirmModal();
+    initBulkActions();
     showView('dashboard');
   }
 
