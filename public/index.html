@@ -174,7 +174,7 @@
             <div class="leads-crm-stats" id="leads-stats">
               <div class="leads-crm-stat"><span class="leads-crm-stat-label">Total</span><span class="leads-crm-stat-value" id="leads-stat-total">—</span></div>
               <div class="leads-crm-stat"><span class="leads-crm-stat-label">Por contactar</span><span class="leads-crm-stat-value" id="leads-stat-pending">—</span></div>
-              <div class="leads-crm-stat"><span class="leads-crm-stat-value" id="leads-stat-interested">—</span></div>
+              <div class="leads-crm-stat"><span class="leads-crm-stat-label">Interessados</span><span class="leads-crm-stat-value" id="leads-stat-interested">—</span></div>
               <div class="leads-crm-stat"><span class="leads-crm-stat-label">Clientes</span><span class="leads-crm-stat-value" id="leads-stat-clients">—</span></div>
             </div>
             <div class="leads-crm-toolbar card">
@@ -264,13 +264,13 @@
               <div class="leads-crm-detail-main">
                 <div class="card leads-crm-activities-card">
                   <div class="leads-crm-section-head">
-                    <h3 class="card-title">Histórico de actividades</h3>
+                    <h3 class="card-title">Histórico de actividades <span class="leads-crm-count" id="leads-activities-count" hidden></span></h3>
                     <div class="leads-crm-section-actions">
-                    <button type="button" class="btn btn-ghost btn-sm" id="leads-btn-clear-activities">Limpar histórico</button>
-                    <button type="button" class="btn btn-secondary btn-sm" id="leads-btn-add-activity">Registar actividade</button>
+                      <button type="button" class="btn btn-secondary btn-sm" id="leads-btn-add-activity">Registar actividade</button>
+                    </div>
                   </div>
-                  </div>
-                  <div id="leads-activity-form" class="leads-crm-inline-form" hidden>
+                  <p class="card-muted leads-crm-card-hint" id="leads-activities-hint">Actividades recentes</p>
+                  <div id="leads-activity-form" class="leads-crm-inline-form leads-crm-form-modal" hidden>
                     <div class="form-group">
                       <label class="form-label" for="leads-activity-type">Tipo</label>
                       <select class="select" id="leads-activity-type">
@@ -298,16 +298,22 @@
                       <span class="card-muted" id="leads-activity-msg"></span>
                     </div>
                   </div>
-                  <div id="leads-activities-list" class="leads-crm-timeline">
+                  <div id="leads-activities-list" class="leads-crm-timeline leads-crm-timeline-preview">
                     <p class="empty-hint" id="leads-activities-empty">Sem actividades registadas.</p>
+                  </div>
+                  <div class="leads-crm-card-footer">
+                    <span class="card-muted" id="leads-activities-preview-meta"></span>
+                    <button type="button" class="btn btn-ghost btn-sm" id="leads-btn-view-activities">Ver histórico completo</button>
+                    <button type="button" class="btn btn-ghost btn-sm" id="leads-btn-clear-activities">Limpar histórico</button>
                   </div>
                 </div>
                 <div class="card leads-crm-appointments-card">
                   <div class="leads-crm-section-head">
-                    <h3 class="card-title">Agendamentos</h3>
+                    <h3 class="card-title">Agendamentos <span class="leads-crm-count" id="leads-appointments-count" hidden></span></h3>
                     <button type="button" class="btn btn-secondary btn-sm" id="leads-btn-add-appointment">Novo agendamento</button>
                   </div>
-                  <div id="leads-appointment-form" class="leads-crm-inline-form" hidden>
+                  <p class="card-muted leads-crm-card-hint">Próximos compromissos</p>
+                  <div id="leads-appointment-form" class="leads-crm-inline-form leads-crm-form-modal" hidden>
                     <input type="hidden" id="leads-appointment-edit-id" value="">
                     <div class="form-group">
                       <label class="form-label" for="leads-appointment-title">Título</label>
@@ -327,15 +333,19 @@
                       <span class="card-muted" id="leads-appointment-msg"></span>
                     </div>
                   </div>
-                  <div id="leads-appointments-list" class="leads-crm-appointments">
-                    <p class="empty-hint" id="leads-appointments-empty">Sem agendamentos.</p>
+                  <div id="leads-appointments-list" class="leads-crm-appointments leads-crm-appointments-preview">
+                    <p class="empty-hint" id="leads-appointments-empty">Sem agendamentos futuros.</p>
+                  </div>
+                  <div class="leads-crm-card-footer">
+                    <span class="card-muted" id="leads-appointments-preview-meta"></span>
+                    <button type="button" class="btn btn-ghost btn-sm" id="leads-btn-manage-appointments">Gerir agendamentos</button>
                   </div>
                 </div>
               </div>
               <aside class="leads-crm-detail-side">
                 <div class="card leads-crm-side-block">
                   <h3 class="leads-crm-side-title">Estado comercial</h3>
-                  <div class="form-group" style="margin:0">
+                  <div class="form-group">
                     <label class="form-label visually-hidden" for="leads-detail-status">Estado comercial</label>
                     <select class="select" id="leads-detail-status">
                       <option value="Por contactar">Por contactar</option>
@@ -348,10 +358,10 @@
                       <option value="Cliente">Cliente</option>
                     </select>
                   </div>
-                  <p class="card-muted leads-crm-side-msg" id="leads-status-msg"></p>
+                  <p class="leads-crm-side-msg" id="leads-status-msg"></p>
                 </div>
                 <div class="card leads-crm-side-block">
-                  <h3 class="leads-crm-side-title">Informações do estabelecimento</h3>
+                  <h3 class="leads-crm-side-title">Informações</h3>
                   <div class="leads-crm-fields" id="leads-detail-fields"></div>
                 </div>
                 <div class="card leads-crm-side-block" id="leads-next-appt-block">
@@ -363,69 +373,93 @@
                 <div class="card leads-crm-side-block leads-crm-notes-block">
                   <div class="leads-crm-section-head">
                     <h3 class="leads-crm-side-title">Notas comerciais</h3>
-                    <button type="button" class="btn btn-ghost btn-sm" id="leads-edit-notes">Editar notas</button>
+                    <button type="button" class="btn btn-ghost btn-sm" id="leads-notes-edit-btn">Editar</button>
                   </div>
-                  <div id="leads-notes-view" class="leads-crm-notes-view">
-                    <p class="empty-hint" id="leads-notes-empty">Sem notas comerciais.</p>
-                    <div id="leads-notes-preview" class="leads-crm-notes-preview" hidden></div>
-                  </div>
+                  <div id="leads-notes-preview" class="leads-crm-notes-preview leads-crm-notes-clamp"></div>
                   <div id="leads-notes-edit" class="leads-crm-notes-edit" hidden>
-                    <textarea class="input" id="leads-notes" rows="5" maxlength="10000" placeholder="Escreve as tuas notas…"></textarea>
-                    <div class="toolbar" style="margin-top:var(--spacing-8)">
-                      <button type="button" class="btn btn-primary btn-sm" id="leads-save-notes">Guardar notas</button>
-                      <button type="button" class="btn btn-ghost btn-sm" id="leads-cancel-notes">Cancelar</button>
-                      <span class="card-muted" id="leads-notes-status"></span>
+                    <textarea class="input" id="leads-notes-textarea" rows="5" maxlength="10000"></textarea>
+                    <div class="toolbar" style="margin-top:8px">
+                      <button type="button" class="btn btn-primary btn-sm" id="leads-notes-save">Guardar</button>
+                      <button type="button" class="btn btn-ghost btn-sm" id="leads-notes-cancel">Cancelar</button>
                     </div>
+                    <p class="leads-crm-side-msg" id="leads-notes-msg"></p>
                   </div>
                 </div>
               </aside>
             </div>
           </div>
+
+          <div id="leads-activities-full-panel" class="leads-crm-full-panel" hidden>
+            <button type="button" class="btn btn-ghost btn-sm leads-crm-back" id="leads-activities-full-back">← Voltar à ficha</button>
+            <div class="leads-crm-full-header">
+              <h2 class="page-heading">Histórico de actividades</h2>
+              <p class="page-sub" id="leads-activities-full-sub">—</p>
+            </div>
+            <div class="leads-crm-full-toolbar card">
+              <div class="form-group">
+                <label class="form-label" for="leads-activities-full-q">Pesquisar</label>
+                <input class="input" id="leads-activities-full-q" type="search" placeholder="Descrição…" autocomplete="off">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="leads-activities-full-type">Tipo</label>
+                <select class="select" id="leads-activities-full-type">
+                  <option value="">Todos</option>
+                  <option value="phone_call">Chamada telefónica</option>
+                  <option value="whatsapp">Mensagem WhatsApp</option>
+                  <option value="meeting">Reunião</option>
+                  <option value="other">Outro contacto</option>
+                  <option value="status_change">Alteração de estado</option>
+                </select>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" id="leads-btn-add-activity-full">Registar actividade</button>
+            </div>
+            <div class="card">
+              <div id="leads-activities-full-list" class="leads-crm-timeline"></div>
+              <div id="leads-activities-full-pagination" class="results-pagination" hidden></div>
+            </div>
+          </div>
+
+          <div id="leads-appointments-full-panel" class="leads-crm-full-panel" hidden>
+            <button type="button" class="btn btn-ghost btn-sm leads-crm-back" id="leads-appointments-full-back">← Voltar à ficha</button>
+            <div class="leads-crm-full-header">
+              <div>
+                <h2 class="page-heading">Agendamentos</h2>
+                <p class="page-sub" id="leads-appointments-full-sub">—</p>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" id="leads-btn-add-appointment-full">Novo agendamento</button>
+            </div>
+            <div class="leads-crm-appt-stats" id="leads-appointments-full-stats"></div>
+            <div class="card">
+              <div id="leads-appointments-full-list" class="leads-crm-appointments"></div>
+            </div>
+          </div>
+
         </section>
         <section class="view" id="view-settings" aria-label="Configurações">
           <h2 class="page-heading">Configurações</h2>
-          <p class="page-sub">Conta e segurança</p>
+          <p class="page-sub">Conta e preferências</p>
           <div class="card stack-gap-16">
             <div><span class="form-label">Nome</span><div id="settings-name">—</div></div>
             <div><span class="form-label">Email</span><div id="settings-email">—</div></div>
-            <div><span class="form-label">Estado do email</span><div id="settings-verified">—</div></div>
-            <button type="button" class="btn btn-ghost" id="btn-show-reset-password">Alterar palavra-passe</button>
-            <div id="reset-password-panel" class="stack-gap-16" hidden style="margin-top:16px">
-              <div>
-                <span class="form-label">Email</span>
-                <span class="settings-value" id="reset-password-email">—</span>
-              </div>
-              <p class="card-muted" style="margin:0">O link será enviado apenas para este endereço.</p>
-              <div class="error-box" id="reset-password-error" role="alert"></div>
-              <div class="success-box" id="reset-password-ok" role="status"></div>
-              <div class="toolbar">
-                <div class="toolbar-left">
-                  <button type="button" class="btn btn-primary" id="btn-send-reset-link">Enviar link de recuperação</button>
-                  <button type="button" class="btn btn-ghost" id="btn-cancel-reset-password">Cancelar</button>
-                </div>
-              </div>
-            </div>
           </div>
         </section>
       </div>
     </div>
   </div>
-  <script src="/js/app.js"></script>
-
   <div id="confirm-modal" class="modal" hidden>
     <div class="modal-backdrop" data-confirm-cancel></div>
     <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
       <div class="modal-header">
         <h3 id="confirm-modal-title">Confirmar eliminação</h3>
-        <button type="button" class="btn btn-ghost btn-sm" id="confirm-modal-close" data-confirm-cancel>Fechar</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-confirm-cancel>Fechar</button>
       </div>
-      <p id="confirm-modal-message" class="card-muted" style="margin:0 0 var(--spacing-16)"></p>
-      <div class="toolbar">
-        <button type="button" class="btn btn-ghost btn-sm" id="confirm-modal-cancel" data-confirm-cancel>Cancelar</button>
-        <button type="button" class="btn btn-danger btn-sm" id="confirm-modal-ok">Eliminar</button>
+      <p id="confirm-modal-message" class="card-muted"></p>
+      <div class="toolbar" style="margin-top:12px">
+        <button type="button" class="btn btn-danger" id="confirm-modal-ok">Eliminar</button>
+        <button type="button" class="btn btn-ghost" data-confirm-cancel>Cancelar</button>
       </div>
     </div>
   </div>
-
+  <script src="/js/app.js"></script>
 </body>
 </html>
