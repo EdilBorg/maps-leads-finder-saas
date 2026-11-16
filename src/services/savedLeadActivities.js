@@ -209,6 +209,53 @@ async function insertOtherActivity(client, userId, leadId, description, occurred
   return mapActivityRow(rows[0]);
 }
 
+/**
+ * Delete one activity owned by user for the given lead.
+ */
+async function deleteActivity(userId, leadId, activityId) {
+  const pool = getPool();
+  const { rows } = await pool.query(
+    `DELETE FROM saved_lead_activities
+     WHERE id = $1 AND lead_id = $2 AND user_id = $3
+     RETURNING id`,
+    [activityId, leadId, userId]
+  );
+  return rows[0] ? { deleted: true, id: rows[0].id } : { deleted: false };
+}
+
+/**
+ * Delete all activities for a lead owned by user.
+ */
+async function clearActivities(userId, leadId) {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Ensure lead belongs to user
+    const lead = await client.query(
+      `SELECT id FROM saved_leads WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+      [leadId, userId]
+    );
+    if (!lead.rows[0]) {
+      await client.query('ROLLBACK');
+      const err = new Error('Lead não encontrado.');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    const { rows } = await client.query(
+      `DELETE FROM saved_lead_activities WHERE lead_id = $1 AND user_id = $2 RETURNING id`,
+      [leadId, userId]
+    );
+    await client.query('COMMIT');
+    return { deletedCount: rows.length };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   ACTIVITY_TYPES,
   MANUAL_ACTIVITY_TYPES,
@@ -221,4 +268,6 @@ module.exports = {
   insertStatusChangeActivity,
   insertOtherActivity,
   mapActivityRow,
+  deleteActivity,
+  clearActivities,
 };
