@@ -412,8 +412,83 @@
   function updateSelectedCountLabel() {
     const btn = $('#btn-save-leads');
     if (!btn) return;
+    if (btn.dataset.busy === '1') return;
     const n = $$('.result-check:checked').length;
     btn.textContent = n > 0 ? ('Guardar selecionados (' + n + ')') : 'Guardar selecionados';
+  }
+
+  async function saveSelectedLeads() {
+    const btn = $('#btn-save-leads');
+    const ids = $$('.result-check:checked')
+      .map((el) => (el && el.value ? String(el.value).trim() : ''))
+      .filter(Boolean);
+    if (!ids.length) {
+      showToast('Seleciona pelo menos um resultado.', 'error');
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.dataset.busy = '1';
+      btn.textContent = 'A guardar…';
+    }
+    try {
+      const token = await ensureCsrf();
+      const res = await api('/api/searches/leads/save', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': token },
+        body: { resultIds: ids },
+      });
+      const data = res.data || {};
+      if (res.ok) {
+        const saved = data.savedCount != null ? Number(data.savedCount) : 0;
+        const already = data.alreadySavedCount != null ? Number(data.alreadySavedCount) : 0;
+        let msg;
+        if (saved > 0 && already > 0) {
+          msg = saved + ' lead' + (saved === 1 ? '' : 's') + ' guardado' + (saved === 1 ? '' : 's') +
+            '. ' + already + ' já ' + (already === 1 ? 'estava' : 'estavam') + ' guardado' + (already === 1 ? '' : 's') + '.';
+        } else if (saved > 0) {
+          msg = saved + ' lead' + (saved === 1 ? '' : 's') + ' guardado' + (saved === 1 ? '' : 's') + ' com sucesso.';
+        } else if (already > 0) {
+          msg = already === 1
+            ? 'Este lead já estava guardado.'
+            : 'Os ' + already + ' leads seleccionados já estavam guardados.';
+        } else {
+          msg = 'Nenhum lead foi guardado.';
+        }
+        showToast(msg, saved > 0 ? 'success' : 'info');
+        // Clear selection of processed results
+        $$('.result-check:checked').forEach((el) => { el.checked = false; });
+        // Refresh dashboard lead count if visible
+        if (typeof loadDashboard === 'function') {
+          try { loadDashboard(); } catch (_) {}
+        }
+      } else if (res.status === 400) {
+        showToast((data && data.error) || 'Pedido inválido. Seleciona pelo menos um resultado.', 'error');
+      } else if (res.status === 401) {
+        showToast((data && data.error) || 'Sessão inválida. Inicia sessão novamente.', 'error');
+      } else if (res.status === 403) {
+        const err = (data && data.error) || '';
+        if (/csrf|token/i.test(err)) {
+          showToast(err || 'Pedido rejeitado (CSRF). Recarrega a página e tenta de novo.', 'error');
+        } else if (/email|verif/i.test(err)) {
+          showToast(err || 'Verifica o email da conta para guardar leads.', 'error');
+        } else {
+          showToast(err || 'Não tens permissão para guardar leads.', 'error');
+        }
+      } else if (res.status >= 500) {
+        showToast((data && data.error) || 'Erro interno ao guardar leads. Tenta novamente.', 'error');
+      } else {
+        showToast((data && data.error) || 'Não foi possível guardar os leads.', 'error');
+      }
+    } catch (_) {
+      showToast('Erro de rede ao guardar leads.', 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        delete btn.dataset.busy;
+      }
+      updateSelectedCountLabel();
+    }
   }
 
   function setSummary(visible, text) {
@@ -1006,6 +1081,8 @@
     if (actSave) actSave.addEventListener('click', () => saveActivity());
     const btnAppt = $('#leads-btn-add-appointment');
     if (btnAppt) btnAppt.addEventListener('click', () => showAppointmentForm(true));
+    const btnApptSum = $('#leads-btn-add-appointment-summary');
+    if (btnApptSum) btnApptSum.addEventListener('click', () => showAppointmentForm(true));
     const apptCancel = $('#leads-appointment-cancel');
     if (apptCancel) apptCancel.addEventListener('click', () => showAppointmentForm(false));
     const apptSave = $('#leads-appointment-save');
@@ -1211,7 +1288,6 @@
     const nameEl = $('#leads-detail-name');
     const fields = $('#leads-detail-fields');
     const meta = $('#leads-detail-meta');
-    const headerStatus = $('#leads-detail-header-status');
     const actions = $('#leads-detail-actions');
     const notesStatus = $('#leads-notes-status');
     const statusMsg = $('#leads-status-msg');
@@ -1219,7 +1295,6 @@
     if (nameEl) nameEl.textContent = 'A carregar…';
     if (fields) fields.innerHTML = '';
     if (meta) meta.innerHTML = '';
-    if (headerStatus) headerStatus.innerHTML = '';
     if (actions) actions.innerHTML = '';
     if (notesStatus) notesStatus.textContent = '';
     if (statusMsg) statusMsg.textContent = '';
@@ -1261,11 +1336,6 @@
           span.textContent = b;
           meta.appendChild(span);
         });
-      }
-
-      if (headerStatus) {
-        headerStatus.innerHTML = '';
-        headerStatus.appendChild(statusBadge(lead.status || 'Por contactar'));
       }
 
       if (actions) {
@@ -2010,6 +2080,11 @@
     if (form) form.addEventListener('submit', (e) => { e.preventDefault(); runSearch(); });
     const btn = $('#btn-search');
     if (btn) btn.addEventListener('click', (e) => { e.preventDefault(); runSearch(); });
+    const saveBtn = $('#btn-save-leads');
+    if (saveBtn) saveBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      saveSelectedLeads();
+    });
   }
 
   function initContactModal() {

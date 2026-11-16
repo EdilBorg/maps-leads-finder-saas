@@ -88,7 +88,7 @@ describe('CRM Phase 2 appointments — source contracts', () => {
 
   it('phase2 CSS stays under leads-crm namespace', () => {
     const css = fs.readFileSync(path.join(root, 'public/css/leads.css'), 'utf8');
-    assert.match(css, /\.leads-crm-phase2-grid/);
+    assert.match(css, /\.leads-crm-detail-body/);
     assert.match(css, /\.leads-crm-timeline/);
     assert.match(css, /\.leads-crm-appt/);
   });
