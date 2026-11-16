@@ -235,6 +235,19 @@ button { cursor: pointer; border: none; background: none; }
 
 .btn-sm { padding: 6px 10px; font-size: var(--text-label); }
 
+.btn-danger {
+  background: var(--color-coral-red);
+  color: var(--color-void);
+  border: 1px solid var(--color-coral-red);
+}
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.btn-danger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .card {
   background: var(--surface-panel);
   border: 1px solid var(--color-graphite);
