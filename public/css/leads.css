@@ -132,7 +132,7 @@
 .leads-crm-detail-body {
   display: grid;
   grid-template-columns: minmax(0, 1.85fr) minmax(260px, 1fr);
-  gap: var(--spacing-16);
+  gap: var(--spacing-12);
   align-items: start;
 }
 @media (max-width: 960px) {
@@ -142,22 +142,22 @@
 .leads-crm-detail-main {
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-16);
+  gap: var(--spacing-12);
   min-width: 0;
 }
 
 .leads-crm-detail-side {
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-12);
+  gap: var(--spacing-8);
   min-width: 0;
 }
 
 .leads-crm-side-block {
-  padding: var(--spacing-16);
+  padding: var(--spacing-12);
 }
 .leads-crm-side-title {
-  margin: 0 0 var(--spacing-12);
+  margin: 0 0 var(--spacing-8);
   font-size: var(--text-caption);
   font-weight: var(--font-weight-medium);
   color: var(--color-fog);
@@ -174,7 +174,7 @@
 .leads-crm-fields {
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-8);
+  gap: var(--spacing-4);
 }
 .leads-crm-field {
   display: grid;
@@ -231,8 +231,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--spacing-12);
-  margin-bottom: var(--spacing-12);
+  gap: var(--spacing-8);
+  margin-bottom: var(--spacing-8);
 }
 .leads-crm-section-head .card-title { margin: 0; }
 .leads-crm-section-head .leads-crm-side-title { margin: 0; }
@@ -241,18 +241,18 @@
   border: 1px solid var(--color-graphite);
   border-radius: var(--radius-inputs);
   padding: var(--spacing-12);
-  margin-bottom: var(--spacing-16);
+  margin-bottom: var(--spacing-12);
   background: var(--surface-elevated);
   display: flex;
   flex-direction: column;
   gap: var(--spacing-8);
 }
 
-/* Timeline — no artificial max-height */
+/* Timeline — no artificial max-height; compact */
 .leads-crm-timeline {
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-12);
+  gap: var(--spacing-8);
 }
 .leads-crm-activity {
   border-left: 2px solid var(--color-graphite);
@@ -262,34 +262,38 @@
 .leads-crm-activity-meta {
   font-size: var(--text-caption);
   color: var(--color-fog);
-  margin-bottom: 2px;
+  margin-bottom: 0;
+  line-height: 1.35;
 }
 .leads-crm-activity-type {
   font-weight: var(--font-weight-emphasis);
   color: var(--color-paper);
   font-size: var(--text-body-sm);
+  line-height: 1.35;
 }
 .leads-crm-activity-desc {
   color: var(--color-mist);
   font-size: var(--text-body-sm);
   margin-top: 2px;
+  line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
 }
 .leads-crm-activity-outcome {
   color: var(--color-fog);
   font-size: var(--text-caption);
-  margin-top: var(--spacing-4);
+  margin-top: 2px;
+  line-height: 1.35;
 }
 .leads-crm-activity.is-status .leads-crm-activity-type {
   color: var(--color-acid-lime);
 }
 
-/* Appointments — no artificial max-height */
+/* Appointments — no artificial max-height; compact */
 .leads-crm-appointments {
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-12);
+  gap: var(--spacing-8);
 }
 .leads-crm-appt-group {
   display: flex;
@@ -309,7 +313,7 @@
 .leads-crm-appt {
   border: 1px solid var(--color-graphite);
   border-radius: var(--radius-inputs);
-  padding: var(--spacing-12);
+  padding: var(--spacing-8) var(--spacing-12);
   background: var(--surface-elevated);
 }
 .leads-crm-appt.is-overdue {
@@ -331,7 +335,8 @@
 .leads-crm-appt-desc {
   font-size: var(--text-body-sm);
   color: var(--color-mist);
-  margin-top: 6px;
+  margin-top: var(--spacing-4);
+  line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -381,6 +386,30 @@
   transform: rotate(-90deg);
 }
 .leads-crm-group-body[hidden] { display: none; }
+
+/* Compact detail cards — override global .card padding */
+.leads-crm-activities-card,
+.leads-crm-appointments-card {
+  padding: var(--spacing-12);
+}
+.leads-crm-activities-card .empty-hint,
+.leads-crm-appointments-card .empty-hint {
+  margin: 0;
+  padding: 0;
+  font-size: var(--text-caption);
+  line-height: 1.4;
+}
+.leads-crm-side-block .empty-hint {
+  margin: 0;
+  font-size: var(--text-caption);
+  line-height: 1.4;
+}
+.leads-crm-detail-header {
+  margin-bottom: var(--spacing-12);
+}
+.leads-crm-back {
+  margin-bottom: var(--spacing-8);
+}
 
 .visually-hidden {
   position: absolute;
