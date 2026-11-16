@@ -1,1 +1,383 @@
-~
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Maps Leads Finder</title>
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/search.css">
+  <link rel="stylesheet" href="/css/leads.css">
+</head>
+<body>
+  <div class="sidebar-overlay" id="sidebar-overlay" aria-hidden="true"></div>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Navegação principal">
+      <div class="sidebar-brand">
+        <div class="brand-mark" aria-hidden="true">ML</div>
+        <div class="brand-text">
+          <h1>Maps Leads</h1>
+          <p>Finder SaaS</p>
+        </div>
+      </div>
+      <nav class="sidebar-nav">
+        <button type="button" class="nav-item active" data-view="dashboard" aria-current="page">Dashboard</button>
+        <button type="button" class="nav-item" data-view="search">Nova pesquisa</button>
+        <button type="button" class="nav-item" data-view="results">Resultados</button>
+        <button type="button" class="nav-item" data-view="history">Histórico</button>
+        <button type="button" class="nav-item" data-view="leads">Leads guardados</button>
+        <button type="button" class="nav-item" data-view="settings">Configurações</button>
+      </nav>
+      <div class="sidebar-footer">
+        <button type="button" class="nav-item nav-logout" id="btn-logout" hidden>Sair</button>
+      </div>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <button type="button" class="mobile-toggle" id="mobile-toggle" aria-label="Abrir menu">☰</button>
+          <span class="topbar-title" id="topbar-title">Dashboard</span>
+        </div>
+        <div class="topbar-actions" data-auth-state="loading">
+          <div id="guest-actions" class="topbar-group" hidden>
+            <a href="/pages/login.html" id="link-login" class="btn btn-ghost btn-sm">Entrar</a>
+            <a href="/pages/register.html" id="link-register" class="btn btn-primary btn-sm">Registar</a>
+          </div>
+          <div id="user-actions" class="topbar-group" hidden>
+            <span id="auth-badge" class="badge auth-badge" title=""></span>
+          </div>
+        </div>
+      </header>
+      <div class="demo-banner" id="app-banner" hidden></div>
+      <div class="content">
+        <section class="view active" id="view-dashboard" aria-label="Dashboard">
+          <h2 class="page-heading">Dashboard</h2>
+          <p class="page-sub">Resumo da tua atividade</p>
+          <div class="stats-row">
+            <div class="stat-card"><div class="stat-label">Pesquisas</div><div class="stat-value" id="stat-searches">—</div></div>
+            <div class="stat-card"><div class="stat-label">Resultados</div><div class="stat-value" id="stat-results">—</div></div>
+            <div class="stat-card"><div class="stat-label">Leads guardados</div><div class="stat-value" id="stat-leads">—</div></div>
+          </div>
+          <div class="card">
+            <h3 class="card-title">Pesquisas recentes</h3>
+            <div id="dashboard-recent"><p class="empty-hint" id="dashboard-recent-empty">Inicia sessão para ver a atividade da conta.</p></div>
+          </div>
+        </section>
+        <section class="view" id="view-search" aria-label="Nova pesquisa">
+          <h2 class="page-heading">Nova pesquisa</h2>
+          <p class="page-sub">Define categoria, localização e limite de resultados</p>
+          <div class="card">
+            <form id="search-form" class="stack-gap-16" novalidate>
+              <div class="form-grid cols-2">
+                <div class="form-group"><label class="form-label" for="query">Categoria / atividade</label><input class="input" id="query" name="query" type="text" placeholder="Ex.: clínicas dentárias" autocomplete="off"></div>
+                <div class="form-group"><label class="form-label" for="location">Localização</label><input class="input" id="location" name="location" type="text" placeholder="Ex.: Maputo, Beira" autocomplete="off"></div>
+              </div>
+              <div class="form-grid cols-2">
+                <div class="form-group"><label class="form-label" for="limit">Limite de resultados</label><select class="select" id="limit" name="limit"><option value="100" selected>100</option><option value="200">200</option><option value="300">300</option><option value="400">400</option><option value="500">500</option></select></div>
+                <div class="form-group"><label class="form-label" for="min-rating">Classificação mínima</label><select class="select" id="min-rating" name="minRating"><option value="">Qualquer</option><option value="3">3.0+</option><option value="4">4.0+</option><option value="4.5">4.5+</option></select></div>
+              </div>
+              <div class="form-group">
+                <span class="form-label">Filtros</span>
+                <div class="checkbox-row">
+                  <label class="checkbox-item"><input type="checkbox" name="hasPhone"> Com telefone</label>
+                  <label class="checkbox-item"><input type="checkbox" name="hasEmail"> Com email</label>
+                  <label class="checkbox-item"><input type="checkbox" name="noWebsite"> Sem website</label>
+                  <label class="checkbox-item"><input type="checkbox" name="minReviews"> Mín. avaliações</label>
+                </div>
+              </div>
+              <div class="toolbar">
+                <div class="toolbar-left"><button type="submit" class="btn btn-primary" id="btn-search">Pesquisar</button></div>
+                <span class="card-muted" id="search-status"></span>
+              </div>
+            </form>
+          </div>
+          <div id="search-progress" class="search-loading" hidden role="status" aria-live="polite">
+            <span class="search-spinner" aria-hidden="true"></span>
+            <span>A pesquisar estabelecimentos...</span>
+          </div>
+        </section>
+        <section class="view" id="view-results" aria-label="Resultados">
+          <div class="results-header">
+            <div class="results-header-left">
+              <h2 class="page-heading">Resultados</h2>
+              <p class="page-sub">Resultados da última pesquisa</p>
+            </div>
+            <div class="results-header-right">
+              <button type="button" class="btn btn-primary btn-sm" id="btn-save-leads">Guardar selecionados</button>
+              <span id="results-count">0 resultados</span>
+            </div>
+          </div>
+          <div id="results-empty" class="card state-box" hidden>
+            <h3>Sem resultados</h3>
+            <p>Executa uma pesquisa a partir de Nova pesquisa.</p>
+          </div>
+          <div id="results-progress" class="card" hidden style="margin-bottom:16px">
+            <p id="results-progress-text" class="card-muted" style="margin:0">Pesquisa em curso…</p>
+          </div>
+          <div id="results-cards" class="results-cards-grid"></div>
+          <div id="results-pagination" class="results-pagination" hidden></div>
+          <div id="contact-modal" class="modal" hidden>
+            <div class="modal-backdrop" data-close-modal></div>
+            <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="contact-modal-title">
+              <div class="modal-header">
+                <h3 id="contact-modal-title">Contacto</h3>
+                <button type="button" class="btn btn-ghost btn-sm" id="contact-modal-close">Fechar</button>
+              </div>
+              <p id="contact-modal-place" class="card-muted"></p>
+              <label class="form-label" for="contact-message">Mensagem</label>
+              <textarea class="input" id="contact-message" rows="4"></textarea>
+              <div class="toolbar" style="margin-top:12px">
+                <button type="button" class="btn btn-primary" id="btn-open-whatsapp">Abrir WhatsApp</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="view" id="view-history" aria-label="Histórico">
+          <h2 class="page-heading">Histórico de pesquisas</h2>
+          <p class="page-sub">Consultas anteriores</p>
+          <div class="card">
+            <div class="table-wrap">
+              <table class="data">
+                <thead>
+                  <tr><th>Categoria</th><th>Localização</th><th>Resultados</th><th>Estado</th><th>Data</th></tr>
+                </thead>
+                <tbody id="history-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        <section class="view" id="view-leads" aria-label="Leads guardados">
+          <div id="leads-list-panel" class="leads-crm">
+            <div class="leads-crm-header">
+              <h2 class="page-heading">Leads guardados</h2>
+              <p class="page-sub">Gere os estabelecimentos que guardaste e acompanha o teu processo comercial.</p>
+            </div>
+            <div class="leads-crm-stats" id="leads-stats">
+              <div class="leads-crm-stat"><span class="leads-crm-stat-label">Total</span><span class="leads-crm-stat-value" id="leads-stat-total">—</span></div>
+              <div class="leads-crm-stat"><span class="leads-crm-stat-label">Por contactar</span><span class="leads-crm-stat-value" id="leads-stat-pending">—</span></div>
+              <div class="leads-crm-stat"><span class="leads-crm-stat-value" id="leads-stat-interested">—</span></div>
+              <div class="leads-crm-stat"><span class="leads-crm-stat-label">Clientes</span><span class="leads-crm-stat-value" id="leads-stat-clients">—</span></div>
+            </div>
+            <div class="leads-crm-toolbar card">
+              <div class="leads-crm-toolbar-row">
+                <div class="form-group leads-crm-search">
+                  <label class="form-label" for="leads-q">Pesquisar</label>
+                  <input class="input" id="leads-q" type="search" placeholder="Nome ou telefone" autocomplete="off">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="leads-status">Estado</label>
+                  <select class="select" id="leads-status">
+                    <option value="">Todos os estados</option>
+                    <option value="Por contactar">Por contactar</option>
+                    <option value="Contactado">Contactado</option>
+                    <option value="Não atendeu">Não atendeu</option>
+                    <option value="Aguardando resposta">Aguardando resposta</option>
+                    <option value="Interessado">Interessado</option>
+                    <option value="Reunião agendada">Reunião agendada</option>
+                    <option value="Não interessado">Não interessado</option>
+                    <option value="Cliente">Cliente</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="leads-category">Categoria</label>
+                  <select class="select" id="leads-category">
+                    <option value="">Todas as categorias</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="leads-sort">Ordenação</label>
+                  <select class="select" id="leads-sort">
+                    <option value="recent">Mais recentes</option>
+                    <option value="oldest">Mais antigos</option>
+                    <option value="name_asc">Nome A–Z</option>
+                    <option value="name_desc">Nome Z–A</option>
+                  </select>
+                </div>
+                <div class="form-group leads-crm-toolbar-actions">
+                  <label class="form-label">&nbsp;</label>
+                  <button type="button" class="btn btn-ghost btn-sm" id="leads-clear-filters">Limpar filtros</button>
+                </div>
+              </div>
+            </div>
+            <div class="card leads-crm-table-card">
+              <div class="table-wrap">
+                <table class="data leads-crm-table">
+                  <thead>
+                    <tr>
+                      <th>Estabelecimento</th>
+                      <th>Categoria</th>
+                      <th>Telefone</th>
+                      <th>Estado</th>
+                      <th>Guardado em</th>
+                      <th>Ação</th>
+                    </tr>
+                  </thead>
+                  <tbody id="leads-body"></tbody>
+                </table>
+              </div>
+              <div id="leads-pagination" class="results-pagination" hidden></div>
+            </div>
+          </div>
+          <div id="leads-detail-panel" class="leads-crm-detail" hidden>
+            <header class="leads-crm-detail-header">
+              <button type="button" class="btn btn-ghost btn-sm leads-crm-back" id="leads-back">← Voltar aos leads</button>
+              <div class="leads-crm-detail-header-row">
+                <div class="leads-crm-detail-identity">
+                  <h2 class="leads-crm-detail-title" id="leads-detail-name">—</h2>
+                  <div class="leads-crm-detail-meta" id="leads-detail-meta"></div>
+                </div>
+                <div class="leads-crm-detail-header-right">
+                  <div id="leads-detail-header-status"></div>
+                  <div class="leads-crm-detail-actions" id="leads-detail-actions"></div>
+                </div>
+              </div>
+            </header>
+            <div class="leads-crm-detail-body">
+              <div class="leads-crm-detail-main">
+                <div class="card leads-crm-activities-card">
+                  <div class="leads-crm-section-head">
+                    <h3 class="card-title">Histórico de actividades</h3>
+                    <button type="button" class="btn btn-secondary btn-sm" id="leads-btn-add-activity">Registar actividade</button>
+                  </div>
+                  <div id="leads-activity-form" class="leads-crm-inline-form" hidden>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-activity-type">Tipo</label>
+                      <select class="select" id="leads-activity-type">
+                        <option value="phone_call">Chamada telefónica</option>
+                        <option value="whatsapp">Mensagem WhatsApp</option>
+                        <option value="meeting">Reunião</option>
+                        <option value="other">Outro contacto</option>
+                      </select>
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-activity-when">Data e hora</label>
+                      <input class="input" type="datetime-local" id="leads-activity-when">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-activity-desc">Descrição</label>
+                      <textarea class="input" id="leads-activity-desc" rows="3" maxlength="5000" placeholder="O que aconteceu…"></textarea>
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-activity-outcome">Resultado / observação (opcional)</label>
+                      <input class="input" type="text" id="leads-activity-outcome" maxlength="2000">
+                    </div>
+                    <div class="toolbar">
+                      <button type="button" class="btn btn-primary btn-sm" id="leads-activity-save">Guardar actividade</button>
+                      <button type="button" class="btn btn-ghost btn-sm" id="leads-activity-cancel">Cancelar</button>
+                      <span class="card-muted" id="leads-activity-msg"></span>
+                    </div>
+                  </div>
+                  <div id="leads-activities-list" class="leads-crm-timeline">
+                    <p class="empty-hint" id="leads-activities-empty">Sem actividades registadas.</p>
+                  </div>
+                </div>
+                <div class="card leads-crm-appointments-card">
+                  <div class="leads-crm-section-head">
+                    <h3 class="card-title">Agendamentos</h3>
+                    <button type="button" class="btn btn-secondary btn-sm" id="leads-btn-add-appointment">Novo agendamento</button>
+                  </div>
+                  <div id="leads-appointment-form" class="leads-crm-inline-form" hidden>
+                    <input type="hidden" id="leads-appointment-edit-id" value="">
+                    <div class="form-group">
+                      <label class="form-label" for="leads-appointment-title">Título</label>
+                      <input class="input" type="text" id="leads-appointment-title" maxlength="200" placeholder="Ex.: Reunião com o proprietário">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-appointment-when">Data e hora</label>
+                      <input class="input" type="datetime-local" id="leads-appointment-when">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-appointment-desc">Descrição (opcional)</label>
+                      <textarea class="input" id="leads-appointment-desc" rows="2" maxlength="5000"></textarea>
+                    </div>
+                    <div class="toolbar">
+                      <button type="button" class="btn btn-primary btn-sm" id="leads-appointment-save">Guardar</button>
+                      <button type="button" class="btn btn-ghost btn-sm" id="leads-appointment-cancel">Cancelar</button>
+                      <span class="card-muted" id="leads-appointment-msg"></span>
+                    </div>
+                  </div>
+                  <div id="leads-appointments-list" class="leads-crm-appointments">
+                    <p class="empty-hint" id="leads-appointments-empty">Sem agendamentos.</p>
+                  </div>
+                </div>
+              </div>
+              <aside class="leads-crm-detail-side">
+                <div class="card leads-crm-side-block">
+                  <h3 class="leads-crm-side-title">Estado comercial</h3>
+                  <div class="form-group" style="margin:0">
+                    <label class="form-label visually-hidden" for="leads-detail-status">Estado comercial</label>
+                    <select class="select" id="leads-detail-status">
+                      <option value="Por contactar">Por contactar</option>
+                      <option value="Contactado">Contactado</option>
+                      <option value="Não atendeu">Não atendeu</option>
+                      <option value="Aguardando resposta">Aguardando resposta</option>
+                      <option value="Interessado">Interessado</option>
+                      <option value="Reunião agendada">Reunião agendada</option>
+                      <option value="Não interessado">Não interessado</option>
+                      <option value="Cliente">Cliente</option>
+                    </select>
+                  </div>
+                  <p class="card-muted leads-crm-side-msg" id="leads-status-msg"></p>
+                </div>
+                <div class="card leads-crm-side-block">
+                  <h3 class="leads-crm-side-title">Informações do estabelecimento</h3>
+                  <div class="leads-crm-fields" id="leads-detail-fields"></div>
+                </div>
+                <div class="card leads-crm-side-block" id="leads-next-appt-block">
+                  <h3 class="leads-crm-side-title">Próximo agendamento</h3>
+                  <div id="leads-next-appt" class="leads-crm-next-appt">
+                    <p class="empty-hint" id="leads-next-appt-empty">Sem agendamentos futuros.</p>
+                  </div>
+                </div>
+                <div class="card leads-crm-side-block leads-crm-notes-block">
+                  <div class="leads-crm-section-head">
+                    <h3 class="leads-crm-side-title">Notas comerciais</h3>
+                    <button type="button" class="btn btn-ghost btn-sm" id="leads-edit-notes">Editar notas</button>
+                  </div>
+                  <div id="leads-notes-view" class="leads-crm-notes-view">
+                    <p class="empty-hint" id="leads-notes-empty">Sem notas comerciais.</p>
+                    <div id="leads-notes-preview" class="leads-crm-notes-preview" hidden></div>
+                  </div>
+                  <div id="leads-notes-edit" class="leads-crm-notes-edit" hidden>
+                    <textarea class="input" id="leads-notes" rows="5" maxlength="10000" placeholder="Escreve as tuas notas…"></textarea>
+                    <div class="toolbar" style="margin-top:var(--spacing-8)">
+                      <button type="button" class="btn btn-primary btn-sm" id="leads-save-notes">Guardar notas</button>
+                      <button type="button" class="btn btn-ghost btn-sm" id="leads-cancel-notes">Cancelar</button>
+                      <span class="card-muted" id="leads-notes-status"></span>
+                    </div>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </div>
+        </section>
+        <section class="view" id="view-settings" aria-label="Configurações">
+          <h2 class="page-heading">Configurações</h2>
+          <p class="page-sub">Conta e segurança</p>
+          <div class="card stack-gap-16">
+            <div><span class="form-label">Nome</span><div id="settings-name">—</div></div>
+            <div><span class="form-label">Email</span><div id="settings-email">—</div></div>
+            <div><span class="form-label">Estado do email</span><div id="settings-verified">—</div></div>
+            <button type="button" class="btn btn-ghost" id="btn-show-reset-password">Alterar palavra-passe</button>
+            <div id="reset-password-panel" class="stack-gap-16" hidden style="margin-top:16px">
+              <div>
+                <span class="form-label">Email</span>
+                <span class="settings-value" id="reset-password-email">—</span>
+              </div>
+              <p class="card-muted" style="margin:0">O link será enviado apenas para este endereço.</p>
+              <div class="error-box" id="reset-password-error" role="alert"></div>
+              <div class="success-box" id="reset-password-ok" role="status"></div>
+              <div class="toolbar">
+                <div class="toolbar-left">
+                  <button type="button" class="btn btn-primary" id="btn-send-reset-link">Enviar link de recuperação</button>
+                  <button type="button" class="btn btn-ghost" id="btn-cancel-reset-password">Cancelar</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+  <script src="/js/app.js"></script>
+</body>
+</html>
