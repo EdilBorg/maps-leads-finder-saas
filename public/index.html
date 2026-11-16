@@ -154,7 +154,7 @@
             <div class="leads-crm-stats" id="leads-stats">
               <div class="leads-crm-stat"><span class="leads-crm-stat-label">Total</span><span class="leads-crm-stat-value" id="leads-stat-total">—</span></div>
               <div class="leads-crm-stat"><span class="leads-crm-stat-label">Por contactar</span><span class="leads-crm-stat-value" id="leads-stat-pending">—</span></div>
-              <div class="leads-crm-stat"><span class="leads-crm-stat-label">Interessados</span><span class="leads-crm-stat-value" id="leads-stat-interested">—</span></div>
+              <div class="leads-crm-stat"><span class="leads-crm-stat-value" id="leads-stat-interested">—</span></div>
               <div class="leads-crm-stat"><span class="leads-crm-stat-label">Clientes</span><span class="leads-crm-stat-value" id="leads-stat-clients">—</span></div>
             </div>
             <div class="leads-crm-toolbar card">
@@ -217,7 +217,138 @@
               <div id="leads-pagination" class="results-pagination" hidden></div>
             </div>
           </div>
-PLACEHOLDER_DETAIL
+          <div id="leads-detail-panel" class="leads-crm-detail" hidden>
+            <header class="leads-crm-detail-header">
+              <button type="button" class="btn btn-ghost btn-sm leads-crm-back" id="leads-back">← Voltar aos leads</button>
+              <div class="leads-crm-detail-header-row">
+                <div class="leads-crm-detail-identity">
+                  <h2 class="leads-crm-detail-title" id="leads-detail-name">—</h2>
+                  <div class="leads-crm-detail-meta" id="leads-detail-meta"></div>
+                </div>
+                <div class="leads-crm-detail-header-right">
+                  <div id="leads-detail-header-status"></div>
+                  <div class="leads-crm-detail-actions" id="leads-detail-actions"></div>
+                </div>
+              </div>
+            </header>
+            <div class="leads-crm-detail-body">
+              <div class="leads-crm-detail-main">
+                <div class="card leads-crm-activities-card">
+                  <div class="leads-crm-section-head">
+                    <h3 class="card-title">Histórico de actividades</h3>
+                    <button type="button" class="btn btn-secondary btn-sm" id="leads-btn-add-activity">Registar actividade</button>
+                  </div>
+                  <div id="leads-activity-form" class="leads-crm-inline-form" hidden>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-activity-type">Tipo</label>
+                      <select class="select" id="leads-activity-type">
+                        <option value="phone_call">Chamada telefónica</option>
+                        <option value="whatsapp">Mensagem WhatsApp</option>
+                        <option value="meeting">Reunião</option>
+                        <option value="other">Outro contacto</option>
+                      </select>
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-activity-when">Data e hora</label>
+                      <input class="input" type="datetime-local" id="leads-activity-when">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-activity-desc">Descrição</label>
+                      <textarea class="input" id="leads-activity-desc" rows="3" maxlength="5000" placeholder="O que aconteceu…"></textarea>
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-activity-outcome">Resultado / observação (opcional)</label>
+                      <input class="input" type="text" id="leads-activity-outcome" maxlength="2000">
+                    </div>
+                    <div class="toolbar">
+                      <button type="button" class="btn btn-primary btn-sm" id="leads-activity-save">Guardar actividade</button>
+                      <button type="button" class="btn btn-ghost btn-sm" id="leads-activity-cancel">Cancelar</button>
+                      <span class="card-muted" id="leads-activity-msg"></span>
+                    </div>
+                  </div>
+                  <div id="leads-activities-list" class="leads-crm-timeline">
+                    <p class="empty-hint" id="leads-activities-empty">Sem actividades registadas.</p>
+                  </div>
+                </div>
+                <div class="card leads-crm-appointments-card">
+                  <div class="leads-crm-section-head">
+                    <h3 class="card-title">Agendamentos</h3>
+                    <button type="button" class="btn btn-secondary btn-sm" id="leads-btn-add-appointment">Novo agendamento</button>
+                  </div>
+                  <div id="leads-appointment-form" class="leads-crm-inline-form" hidden>
+                    <input type="hidden" id="leads-appointment-edit-id" value="">
+                    <div class="form-group">
+                      <label class="form-label" for="leads-appointment-title">Título</label>
+                      <input class="input" type="text" id="leads-appointment-title" maxlength="200" placeholder="Ex.: Reunião com o proprietário">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-appointment-when">Data e hora</label>
+                      <input class="input" type="datetime-local" id="leads-appointment-when">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="leads-appointment-desc">Descrição (opcional)</label>
+                      <textarea class="input" id="leads-appointment-desc" rows="2" maxlength="5000"></textarea>
+                    </div>
+                    <div class="toolbar">
+                      <button type="button" class="btn btn-primary btn-sm" id="leads-appointment-save">Guardar</button>
+                      <button type="button" class="btn btn-ghost btn-sm" id="leads-appointment-cancel">Cancelar</button>
+                      <span class="card-muted" id="leads-appointment-msg"></span>
+                    </div>
+                  </div>
+                  <div id="leads-appointments-list" class="leads-crm-appointments">
+                    <p class="empty-hint" id="leads-appointments-empty">Sem agendamentos.</p>
+                  </div>
+                </div>
+              </div>
+              <aside class="leads-crm-detail-side">
+                <div class="card leads-crm-side-block">
+                  <h3 class="leads-crm-side-title">Estado comercial</h3>
+                  <div class="form-group" style="margin:0">
+                    <label class="form-label visually-hidden" for="leads-detail-status">Estado comercial</label>
+                    <select class="select" id="leads-detail-status">
+                      <option value="Por contactar">Por contactar</option>
+                      <option value="Contactado">Contactado</option>
+                      <option value="Não atendeu">Não atendeu</option>
+                      <option value="Aguardando resposta">Aguardando resposta</option>
+                      <option value="Interessado">Interessado</option>
+                      <option value="Reunião agendada">Reunião agendada</option>
+                      <option value="Não interessado">Não interessado</option>
+                      <option value="Cliente">Cliente</option>
+                    </select>
+                  </div>
+                  <p class="card-muted leads-crm-side-msg" id="leads-status-msg"></p>
+                </div>
+                <div class="card leads-crm-side-block">
+                  <h3 class="leads-crm-side-title">Informações do estabelecimento</h3>
+                  <div class="leads-crm-fields" id="leads-detail-fields"></div>
+                </div>
+                <div class="card leads-crm-side-block" id="leads-next-appt-block">
+                  <h3 class="leads-crm-side-title">Próximo agendamento</h3>
+                  <div id="leads-next-appt" class="leads-crm-next-appt">
+                    <p class="empty-hint" id="leads-next-appt-empty">Sem agendamentos futuros.</p>
+                  </div>
+                </div>
+                <div class="card leads-crm-side-block leads-crm-notes-block">
+                  <div class="leads-crm-section-head">
+                    <h3 class="leads-crm-side-title">Notas comerciais</h3>
+                    <button type="button" class="btn btn-ghost btn-sm" id="leads-edit-notes">Editar notas</button>
+                  </div>
+                  <div id="leads-notes-view" class="leads-crm-notes-view">
+                    <p class="empty-hint" id="leads-notes-empty">Sem notas comerciais.</p>
+                    <div id="leads-notes-preview" class="leads-crm-notes-preview" hidden></div>
+                  </div>
+                  <div id="leads-notes-edit" class="leads-crm-notes-edit" hidden>
+                    <textarea class="input" id="leads-notes" rows="5" maxlength="10000" placeholder="Escreve as tuas notas…"></textarea>
+                    <div class="toolbar" style="margin-top:var(--spacing-8)">
+                      <button type="button" class="btn btn-primary btn-sm" id="leads-save-notes">Guardar notas</button>
+                      <button type="button" class="btn btn-ghost btn-sm" id="leads-cancel-notes">Cancelar</button>
+                      <span class="card-muted" id="leads-notes-status"></span>
+                    </div>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </div>
         </section>
         <section class="view" id="view-settings" aria-label="Configurações">
           <h2 class="page-heading">Configurações</h2>
