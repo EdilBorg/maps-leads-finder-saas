@@ -1256,18 +1256,30 @@
     if (!ok) return;
     const BATCH = 500;
     let totalDeleted = 0;
-    const remaining = ids.slice();
+    let remaining = ids.map(String);
+    let stoppedEarly = false;
     try {
       const token = await ensureCsrf();
       while (remaining.length) {
-        const batch = remaining.splice(0, BATCH);
-        const res = await api('/api/searches/leads/saved/delete', {
-          method: 'POST',
-          headers: { 'X-CSRF-Token': token },
-          body: { ids: batch },
-        });
+        const batch = remaining.slice(0, BATCH);
+        let res;
+        try {
+          res = await api('/api/searches/leads/saved/delete', {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': token },
+            body: { ids: batch },
+          });
+        } catch (networkErr) {
+          batch.forEach((id) => selectedLeadIds.add(String(id)));
+          remaining.forEach((id) => selectedLeadIds.add(String(id)));
+          showToast(
+            (totalDeleted ? (totalDeleted + ' eliminados. ') : '') + 'Erro de rede ao eliminar leads.',
+            'error'
+          );
+          stoppedEarly = true;
+          break;
+        }
         if (!res.ok) {
-          // Keep failed batch in selection
           batch.forEach((id) => selectedLeadIds.add(String(id)));
           remaining.forEach((id) => selectedLeadIds.add(String(id)));
           showToast(
@@ -1275,19 +1287,34 @@
             ((res.data && res.data.error) || 'Não foi possível eliminar todos os leads seleccionados.'),
             'error'
           );
-          loadLeads({ scrollToTop: false });
-          return;
+          stoppedEarly = true;
+          break;
         }
-        const deletedIds = (res.data && res.data.deletedIds) || [];
-        const n = (res.data && res.data.deletedCount) != null ? res.data.deletedCount : deletedIds.length;
-        totalDeleted += n;
-        batch.forEach((id) => selectedLeadIds.delete(String(id)));
-        deletedIds.forEach((id) => selectedLeadIds.delete(String(id)));
+        const deletedIds = ((res.data && res.data.deletedIds) || []).map(String);
+        const deletedSet = new Set(deletedIds);
+        deletedSet.forEach((id) => selectedLeadIds.delete(id));
+        totalDeleted += deletedSet.size;
+        const notDeleted = batch.filter((id) => !deletedSet.has(String(id)));
+        if (notDeleted.length) {
+          notDeleted.forEach((id) => selectedLeadIds.add(String(id)));
+          remaining = notDeleted.concat(remaining.slice(BATCH));
+          showToast(
+            (totalDeleted ? (totalDeleted + ' eliminados. ') : '') +
+            notDeleted.length + ' não eliminados permanecem seleccionados.',
+            'error'
+          );
+          stoppedEarly = true;
+          break;
+        }
+        remaining = remaining.slice(BATCH);
       }
-      showToast(totalDeleted + ' lead' + (totalDeleted === 1 ? '' : 's') + ' eliminado' + (totalDeleted === 1 ? '' : 's') + '.', 'success');
+      if (!stoppedEarly) {
+        showToast(totalDeleted + ' lead' + (totalDeleted === 1 ? '' : 's') + ' eliminado' + (totalDeleted === 1 ? '' : 's') + '.', 'success');
+        if (typeof loadDashboard === 'function') try { loadDashboard(); } catch (_) {}
+      }
       loadLeads({ scrollToTop: false });
-      if (typeof loadDashboard === 'function') try { loadDashboard(); } catch (_) {}
     } catch (_) {
+      remaining.forEach((id) => selectedLeadIds.add(String(id)));
       showToast(
         (totalDeleted ? (totalDeleted + ' eliminados. ') : '') + 'Erro de rede ao eliminar leads.',
         'error'
@@ -1360,16 +1387,29 @@
     const BATCH = 500;
     let totalDeleted = 0;
     let totalSkipped = [];
-    const remaining = ids.slice();
+    let remaining = ids.map(String);
+    let stoppedEarly = false;
     try {
       const token = await ensureCsrf();
       while (remaining.length) {
-        const batch = remaining.splice(0, BATCH);
-        const res = await api('/api/searches/delete', {
-          method: 'POST',
-          headers: { 'X-CSRF-Token': token },
-          body: { ids: batch },
-        });
+        const batch = remaining.slice(0, BATCH);
+        let res;
+        try {
+          res = await api('/api/searches/delete', {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': token },
+            body: { ids: batch },
+          });
+        } catch (networkErr) {
+          batch.forEach((id) => selectedHistoryIds.add(String(id)));
+          remaining.forEach((id) => selectedHistoryIds.add(String(id)));
+          showToast(
+            (totalDeleted ? (totalDeleted + ' eliminadas. ') : '') + 'Erro de rede ao eliminar pesquisas.',
+            'error'
+          );
+          stoppedEarly = true;
+          break;
+        }
         if (!res.ok && res.status !== 409) {
           batch.forEach((id) => selectedHistoryIds.add(String(id)));
           remaining.forEach((id) => selectedHistoryIds.add(String(id)));
@@ -1378,24 +1418,43 @@
             ((res.data && res.data.error) || 'Não foi possível eliminar todas as pesquisas seleccionadas.'),
             'error'
           );
-          loadHistory({ scrollToTop: false });
-          return;
+          stoppedEarly = true;
+          break;
         }
-        const n = (res.data && res.data.deletedCount) || 0;
-        const skipped = (res.data && res.data.skippedRunning) || [];
-        totalDeleted += n;
+        const deletedIds = ((res.data && res.data.deletedIds) || []).map(String);
+        const skipped = ((res.data && res.data.skippedRunning) || []).map(String);
+        const deletedSet = new Set(deletedIds);
+        const skippedSet = new Set(skipped);
+        deletedSet.forEach((id) => selectedHistoryIds.delete(id));
+        totalDeleted += deletedSet.size;
         totalSkipped = totalSkipped.concat(skipped);
-        const deletedIds = (res.data && res.data.deletedIds) || [];
-        batch.forEach((id) => {
-          if (!skipped.map(String).includes(String(id))) selectedHistoryIds.delete(String(id));
-        });
-        deletedIds.forEach((id) => selectedHistoryIds.delete(String(id)));
+        skipped.forEach((id) => selectedHistoryIds.add(String(id)));
+        const unresolved = batch.filter(
+          (id) => !deletedSet.has(String(id)) && !skippedSet.has(String(id))
+        );
+        if (unresolved.length) {
+          unresolved.forEach((id) => selectedHistoryIds.add(String(id)));
+          remaining = unresolved.concat(
+            batch.filter((id) => skippedSet.has(String(id)))
+          ).concat(remaining.slice(BATCH));
+          showToast(
+            (totalDeleted ? (totalDeleted + ' eliminadas. ') : '') +
+            unresolved.length + ' não eliminadas permanecem seleccionadas.',
+            'error'
+          );
+          stoppedEarly = true;
+          break;
+        }
+        remaining = remaining.slice(BATCH);
       }
-      let msg = totalDeleted + ' pesquisa' + (totalDeleted === 1 ? '' : 's') + ' eliminada' + (totalDeleted === 1 ? '' : 's') + '.';
-      if (totalSkipped.length) msg += ' ' + totalSkipped.length + ' em execução foram ignoradas.';
-      showToast(msg, totalSkipped.length && !totalDeleted ? 'error' : 'success');
+      if (!stoppedEarly) {
+        let msg = totalDeleted + ' pesquisa' + (totalDeleted === 1 ? '' : 's') + ' eliminada' + (totalDeleted === 1 ? '' : 's') + '.';
+        if (totalSkipped.length) msg += ' ' + totalSkipped.length + ' em execução foram ignoradas.';
+        showToast(msg, totalSkipped.length && !totalDeleted ? 'error' : 'success');
+      }
       loadHistory({ scrollToTop: false });
     } catch (_) {
+      remaining.forEach((id) => selectedHistoryIds.add(String(id)));
       showToast(
         (totalDeleted ? (totalDeleted + ' eliminadas. ') : '') + 'Erro de rede ao eliminar pesquisas.',
         'error'
