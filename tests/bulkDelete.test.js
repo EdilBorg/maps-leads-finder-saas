@@ -13,7 +13,7 @@ describe('save leads limit raised to 500', () => {
     const svc = fs.readFileSync(path.join(root, 'src/services/searchService.js'), 'utf8');
     const route = fs.readFileSync(path.join(root, 'src/routes/search.js'), 'utf8');
     assert.match(svc, /slice\(0,\s*500\)/);
-    assert.match(route, /slice\(0,\s*500\)/);
+    assert.match(route, /searchService\.deleteSavedLeads\(req\.session\.userId,\s*ids\)/);
     assert.doesNotMatch(svc, /slice\(0,\s*100\)/);
   });
 });

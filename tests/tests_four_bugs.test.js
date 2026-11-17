@@ -81,7 +81,7 @@ describe('Bug1 — global selection with exclusions', () => {
 describe('Bug2 — bulk delete batches', () => {
   it('frontend batches lead deletes', () => {
     const js = readProj('public', 'js', 'app.js');
-    assert.match(js, /BATCH_SIZE\s*=\s*500/);
+    assert.match(js, /const BATCH\s*=\s*500/);
     assert.match(js, /deleteSelectedLeads|bulkDelete|leads\/saved\/delete/);
   });
 
