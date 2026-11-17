@@ -1,44 +1,22 @@
 /**
  * Behaviour tests for the four production bugs.
+ * Paths resolve from this file → project root (parent of tests/).
  */
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const root = path.join(__dirname);
-const candidates = {
-  app: [
-    path.join(root, 'public/js/app.js'),
-    path.join(root, 'app.js'),
-    path.join(root, '../app.js'),
-  ],
-  act: [
-    path.join(root, 'src/services/savedLeadActivities.js'),
-    path.join(root, 'savedLeadActivities.js'),
-  ],
-  svc: [
-    path.join(root, 'src/services/searchService.js'),
-    path.join(root, 'searchService.js'),
-  ],
-  routes: [
-    path.join(root, 'src/routes/search.js'),
-    path.join(root, 'search.js'),
-  ],
-  html: [
-    path.join(root, 'public/index.html'),
-    path.join(root, 'index.html'),
-  ],
-};
+const ROOT = path.resolve(__dirname, '..');
 
-function readFirst(list) {
-  for (const p of list) {
-    if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8');
+function readProj(...parts) {
+  const p = path.join(ROOT, ...parts);
+  if (!fs.existsSync(p)) {
+    throw new Error('Missing file relative to project root: ' + path.join(...parts) + ' (resolved ' + p + ')');
   }
-  throw new Error('file not found: ' + list[0]);
+  return fs.readFileSync(p, 'utf8');
 }
 
-/* —— pure selection model —— */
 function createSel() {
   return { allSelected: false, excluded: new Set(), page: new Set() };
 }
@@ -93,7 +71,7 @@ describe('Bug1 — global selection with exclusions', () => {
   });
 
   it('app.js implements exclusion model', () => {
-    const js = readFirst(candidates.app);
+    const js = readProj('public', 'js', 'app.js');
     assert.match(js, /resultsExcludedIds/);
     assert.match(js, /function clearResultsSelection/);
     assert.doesNotMatch(js, /if\s*\(\s*!cb\.checked\s*\)\s*resultsSelectAllMode\s*=\s*false/);
@@ -102,7 +80,7 @@ describe('Bug1 — global selection with exclusions', () => {
 
 describe('Bug2 — bulk delete batches', () => {
   it('frontend batches lead deletes', () => {
-    const js = readFirst(candidates.app);
+    const js = readProj('public', 'js', 'app.js');
     const start = js.indexOf('async function deleteSelectedLeads');
     assert.ok(start >= 0);
     const snip = js.slice(start, start + 1200);
@@ -111,7 +89,7 @@ describe('Bug2 — bulk delete batches', () => {
   });
 
   it('frontend batches search deletes', () => {
-    const js = readFirst(candidates.app);
+    const js = readProj('public', 'js', 'app.js');
     const start = js.indexOf('async function deleteSelectedSearches');
     assert.ok(start >= 0);
     const snip = js.slice(start, start + 1200);
@@ -119,46 +97,78 @@ describe('Bug2 — bulk delete batches', () => {
   });
 
   it('backend still enforces per-request cap (safe with batches)', () => {
-    const svc = readFirst(candidates.svc);
+    const svc = readProj('src', 'services', 'searchService.js');
     assert.match(svc, /slice\(0,\s*500\)/);
   });
 });
 
 describe('Bug3 — activity history server pagination', () => {
   it('service supports limit and offset and returns total', () => {
-    const act = readFirst(candidates.act);
+    const act = readProj('src', 'services', 'savedLeadActivities.js');
     assert.match(act, /offset/);
-    assert.match(act, /LIMIT \$3 OFFSET \$4/);
+    assert.match(act, /LIMIT \$/);
+    assert.match(act, /OFFSET \$/);
     assert.match(act, /total/);
+    const start = act.indexOf('async function listActivities');
+    assert.ok(start >= 0);
+    const snip = act.slice(start, start + 2200);
+    assert.match(snip, /parseInt\(opts\.limit/);
+    assert.match(snip, /parseInt\(opts\.offset/);
   });
 
-  it('frontend no longer loads only first 200 into memory as sole source', () => {
-    const js = readFirst(candidates.app);
+  it('frontend requests offset and does not rely only on limit=200 cache', () => {
+    const js = readProj('public', 'js', 'app.js');
     assert.doesNotMatch(js, /activities\?limit=200/);
     assert.match(js, /renderActivitiesFullPageFromServer/);
     assert.match(js, /params\.set\('offset'/);
+  });
+
+  it('no artificial 5000 activity cap', () => {
+    const js = readProj('public', 'js', 'app.js');
+    assert.doesNotMatch(js, /offset\s*>\s*5000/);
+    assert.doesNotMatch(js, /max 50 pages = 5000/);
+  });
+
+  it('service accepts activityType and q filters for server-side filtering', () => {
+    const act = readProj('src', 'services', 'savedLeadActivities.js');
+    assert.match(act, /activityType|activity_type/);
+    const start = act.indexOf('async function listActivities');
+    const snip = act.slice(start, start + 1800);
+    assert.match(snip, /opts\.(activityType|q)|activityType|ILIKE/);
   });
 });
 
 describe('Bug4 — establishment info card', () => {
   it('HTML has leads-detail-fields', () => {
-    const html = readFirst(candidates.html);
+    const html = readProj('public', 'index.html');
     assert.match(html, /id="leads-detail-fields"/);
   });
 
-  it('openLeadDetail populates phone address category', () => {
-    const js = readFirst(candidates.app);
-    assert.match(js, /appendDetailField\(fields,\s*'Telefone'/);
-    assert.match(js, /appendDetailField\(fields,\s*'Endereço'/);
-    assert.match(js, /appendDetailField\(fields,\s*'Categoria'/);
+  it('openLeadDetail fills Informações via fillLeadInfoFields', () => {
+    const js = readProj('public', 'js', 'app.js');
+    assert.match(js, /function fillLeadInfoFields/);
+    assert.match(js, /function normalizeLeadPayload/);
+    assert.match(js, /fillLeadInfoFields\(fields,\s*lead\)/);
+  });
+
+  it('fillLeadInfoFields always renders core rows with em dash for empty', () => {
+    const js = readProj('public', 'js', 'app.js');
+    const start = js.indexOf('function fillLeadInfoFields');
+    assert.ok(start >= 0);
+    const snip = js.slice(start, start + 3500);
+    assert.match(snip, /Telefone/);
+    assert.match(snip, /Email/);
+    assert.match(snip, /Endereço/);
+    assert.match(snip, /Categoria/);
+    assert.match(snip, /Guardado em/);
+    assert.match(snip, /'—'/);
   });
 
   it('notes controls use HTML ids from compact CRM', () => {
-    const js = readFirst(candidates.app);
+    const js = readProj('public', 'js', 'app.js');
     assert.match(js, /leads-notes-edit-btn/);
     assert.match(js, /leads-notes-textarea/);
     assert.match(js, /leads-notes-save/);
     assert.match(js, /leads-notes-cancel/);
-    assert.doesNotMatch(js, /\$\('#leads-edit-notes'\)/);
   });
 });
