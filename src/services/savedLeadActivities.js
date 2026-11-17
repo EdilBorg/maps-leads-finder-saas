@@ -49,6 +49,8 @@ function mapActivityRow(r) {
 
 /**
  * List activities for a lead owned by userId (newest first).
+ * Supports optional activityType and q (description/outcome ILIKE) filters.
+ * total always reflects the filtered set.
  */
 async function listActivities(userId, leadId, opts = {}) {
   const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 50, 1), 100);
@@ -61,21 +63,42 @@ async function listActivities(userId, leadId, opts = {}) {
   );
   if (!own.rows[0]) return null;
 
+  const where = ['user_id = $1', 'lead_id = $2'];
+  const params = [userId, leadId];
+  let p = 3;
+
+  const activityType = opts.activityType != null ? String(opts.activityType).trim() : '';
+  if (activityType && isValidActivityType(activityType)) {
+    where.push(`activity_type = $${p}`);
+    params.push(activityType);
+    p += 1;
+  }
+
+  const q = opts.q != null ? String(opts.q).trim() : '';
+  if (q) {
+    where.push(`(description ILIKE $${p} OR COALESCE(outcome, '') ILIKE $${p})`);
+    params.push('%' + q.replace(/[%_]/g, '\\$&') + '%');
+    p += 1;
+  }
+
+  const whereSql = where.join(' AND ');
+
+  const listParams = params.concat([limit, offset]);
   const { rows } = await pool.query(
     `SELECT id, lead_id, activity_type, description, outcome, occurred_at,
             from_status, to_status, created_at
      FROM saved_lead_activities
-     WHERE user_id = $1 AND lead_id = $2
+     WHERE ${whereSql}
      ORDER BY occurred_at DESC, created_at DESC
-     LIMIT $3 OFFSET $4`,
-    [userId, leadId, limit, offset]
+     LIMIT $${p} OFFSET $${p + 1}`,
+    listParams
   );
 
   const countRes = await pool.query(
     `SELECT COUNT(*)::int AS total
      FROM saved_lead_activities
-     WHERE user_id = $1 AND lead_id = $2`,
-    [userId, leadId]
+     WHERE ${whereSql}`,
+    params
   );
 
   return {
@@ -231,7 +254,6 @@ async function clearActivities(userId, leadId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Ensure lead belongs to user
     const lead = await client.query(
       `SELECT id FROM saved_leads WHERE id = $1 AND user_id = $2 FOR UPDATE`,
       [leadId, userId]
