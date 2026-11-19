@@ -1,12 +1,6 @@
 'use strict';
-const parts = [
-  require('./searchService.chunk0'),
-  require('./searchService.chunk1'),
-  require('./searchService.chunk2'),
-  require('./searchService.chunk3'),
-  require('./searchService.chunk4'),
-].join('');
-const src = Buffer.from(parts, 'base64').toString('utf8');
+const parts = [0,1,2,3,4,5,6].map((i) => require('./searchService.wchunk' + i));
+const src = Buffer.from(parts.join(''), 'base64').toString('utf8');
 const Module = require('module');
 const path = require('path');
 const m = new Module(__filename);
