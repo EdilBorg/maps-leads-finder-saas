@@ -37,19 +37,25 @@ const ISO3_TO_ISO2 = Object.freeze({
   ZWE: 'ZW',
 });
 
+/** Set of valid ISO 3166-1 alpha-2 codes derived from the ISO3 map (never invent). */
+const ISO2_SET = Object.freeze(new Set(Object.values(ISO3_TO_ISO2)));
+
 /**
  * Normalize a country code to ISO 3166-1 alpha-2.
- * Accepts ISO2 or ISO3. Returns null if unknown — never invents.
+ * Accepts known ISO2 or ISO3 only. Returns null for unknown/invalid — never invents.
+ * Arbitrary two-letter codes (e.g. XX, ZZ) are rejected.
  */
 function toIso2Country(value) {
   if (value == null) return null;
   const raw = String(value).trim().toUpperCase();
   if (!raw) return null;
-  if (/^[A-Z]{2}$/.test(raw)) return raw;
+  if (/^[A-Z]{2}$/.test(raw)) {
+    return ISO2_SET.has(raw) ? raw : null;
+  }
   if (/^[A-Z]{3}$/.test(raw)) {
     return ISO3_TO_ISO2[raw] || null;
   }
   return null;
 }
 
-module.exports = { ISO3_TO_ISO2, toIso2Country };
+module.exports = { ISO3_TO_ISO2, ISO2_SET, toIso2Country };
