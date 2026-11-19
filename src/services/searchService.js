@@ -170,21 +170,48 @@ async function startSearch(opts) {
     try {
       await client.query('BEGIN');
       const limit = normalizeLimit(opts.limit);
+
+      // 1) Create search row first so every reservation is keyed by a real searchId
+      const ins = await client.query(
+        `INSERT INTO searches (
+           user_id, query, location, filters, status, providers_used, started_at, expires_at
+         ) VALUES ($1,$2,$3,$4::jsonb,'running',$5::jsonb,NOW(), NOW() + ($6 || ' days')::interval)
+         RETURNING id`,
+        [
+          opts.userId, opts.query, opts.location,
+          JSON.stringify({ ...(opts.filters || {}), limit, quotaMode: 'pending' }),
+          JSON.stringify([
+            { code: 'apify', status: 'pending', count: 0 },
+            { code: 'tomtom', status: 'pending', count: 0 },
+            { code: 'brightdata', status: 'pending', count: 0 },
+          ]),
+          String(RETENTION_DAYS),
+        ]
+      );
+      searchId = ins.rows[0].id;
+
+      // 2) Authorize + reserve with the definitive searchId (unique idempotency keys)
       auth = await quotaService.authorizeAndReserve(client, {
         userId: opts.userId,
-        searchId: null,
+        searchId,
         requestedLimit: limit,
       });
+
       if (auth.mode === 'denied') {
-        await client.query('ROLLBACK');
+        await client.query(
+          `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2
+           WHERE id=$1 AND user_id=$3`,
+          [searchId, auth.reason || 'quota_denied', opts.userId]
+        );
+        await client.query('COMMIT');
         const err = new Error(auth.message || 'Quota indisponível.');
         err.code = 'QUOTA';
         err.reason = auth.reason;
         throw err;
       }
+
       holdToken = auth.holdToken || null;
       const effectiveLimit = auth.limit != null ? normalizeLimit(Math.min(auth.limit, limit)) : limit;
-      // Trial hard-cap 200 final leads
       const finalLimit = auth.mode === 'trial' ? Math.min(effectiveLimit, 200) : effectiveLimit;
       const allowedCodes = (auth.providers || []).filter((p) => p.allowed).map((p) => p.code);
       const providersInit = ['apify', 'tomtom', 'brightdata'].map((code) => {
@@ -193,13 +220,11 @@ async function startSearch(opts) {
         return { code, status: 'pending', count: 0 };
       });
 
-      const ins = await client.query(
-        `INSERT INTO searches (
-           user_id, query, location, filters, status, providers_used, started_at, expires_at
-         ) VALUES ($1,$2,$3,$4::jsonb,'running',$5::jsonb,NOW(), NOW() + ($6 || ' days')::interval)
-         RETURNING id`,
+      await client.query(
+        `UPDATE searches SET filters=$2::jsonb, providers_used=$3::jsonb
+         WHERE id=$1 AND user_id=$4`,
         [
-          opts.userId, opts.query, opts.location,
+          searchId,
           JSON.stringify({
             ...(opts.filters || {}),
             limit: finalLimit,
@@ -211,10 +236,9 @@ async function startSearch(opts) {
             })),
           }),
           JSON.stringify(providersInit),
-          String(RETENTION_DAYS),
+          opts.userId,
         ]
       );
-      searchId = ins.rows[0].id;
 
       if (auth.mode === 'trial' && holdToken) {
         const bound = await bindHoldToSearch(client, opts.userId, holdToken, searchId);
@@ -233,7 +257,7 @@ async function startSearch(opts) {
       if (holdToken && err.code !== 'QUOTA' && err.code !== 'HOLD_BIND_FAILED') {
         try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
       }
-      if (auth && auth.mode === 'paid' && auth.providers) {
+      if (auth && auth.mode === 'paid' && auth.providers && searchId) {
         try { await quotaService.releaseAllReservations(opts.userId, searchId, auth.providers); } catch (_) {}
       }
       client.release();
@@ -511,6 +535,25 @@ async function cancelSearch(userId, searchId) {
     }
     await client.query('COMMIT');
     activeRuns.delete(String(searchId));
+
+    // Paid path: release or protect reservations after DB commit (no open TX during this)
+    const quotaMode = filters.quotaMode || (run && run.quotaMode) || null;
+    if (quotaMode === 'paid') {
+      const reservations = Array.isArray(filters.reservations) ? filters.reservations : [];
+      const providers = reservations.map((r) => ({
+        code: r.code,
+        allowed: true,
+        reserve: r.reserve,
+      }));
+      // Prefer in-memory providers if present (more complete reserve objects)
+      const fromRun = run && Array.isArray(run.providers) ? run.providers : providers;
+      try {
+        await quotaService.releaseAllReservations(userId, searchId, fromRun);
+      } catch (e) {
+        console.error('[cancel-quota-release]', searchId, e && e.message);
+      }
+    }
+
     return { ok: true, status: 'cancelled' };
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}

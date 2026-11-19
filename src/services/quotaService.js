@@ -46,6 +46,16 @@ async function authorizeAndReserve(client, {
     };
   }
 
+  if (!searchId) {
+    return {
+      mode: 'denied',
+      reason: 'MISSING_SEARCH_ID',
+      message: 'Identificador de pesquisa em falta para reserva de quotas.',
+      holdToken: null,
+      providers: [],
+    };
+  }
+
   const sub = await subscriptionService.getActiveSubscription(userId, client);
   if (!sub) {
     return {
@@ -57,8 +67,8 @@ async function authorizeAndReserve(client, {
     };
   }
 
-  const periodDays = await subscriptionService.getPeriodDays(client);
-  const window = subscriptionService.resolvePeriodWindow(sub, new Date(), periodDays);
+  // Period window uses immutable subscription.periodDays (not mutable global setting)
+  const window = subscriptionService.resolvePeriodWindow(sub, new Date());
   if (!window) {
     return {
       mode: 'denied',
@@ -97,7 +107,8 @@ async function authorizeAndReserve(client, {
       const estCalls = Math.max(3, Math.ceil(wantResults / 100) + 1);
       globalReserve = await providerUsageService.reserveGlobalTomTomCalls(estCalls, {
         searchId,
-        idempotencyKey: `greserve:${userId}:${searchId || 'new'}:tomtom`,
+        userId,
+        idempotencyKey: `greserve:${userId}:${searchId}:tomtom`,
       });
       if (!globalReserve.ok) {
         skipped.push({ code, allowed: false, reason: 'GLOBAL_TOMTOM_LIMIT', reserve: null });
@@ -114,7 +125,7 @@ async function authorizeAndReserve(client, {
       apiCalls: code === 'tomtom' ? Math.max(3, Math.ceil(wantResults / 100) + 1) : 1,
       includeFixedCost: code === 'apify',
       searchId,
-      idempotencyKey: `reserve:${userId}:${searchId || 'new'}:${code}`,
+      idempotencyKey: `reserve:${userId}:${searchId}:${code}`,
       limits: { maxResults, maxCostMicroUsd: maxCost, maxApiCalls },
       client,
     });
@@ -122,7 +133,10 @@ async function authorizeAndReserve(client, {
     if (!reserveResult.ok) {
       if (globalReserve && globalReserve.ok && !globalReserve.unlimited) {
         await providerUsageService.releaseGlobalTomTomCalls(
-          globalReserve.periodStart, globalReserve.reservedCalls
+          globalReserve.periodStart, globalReserve.reservedCalls, {
+            idempotencyKey: `grelease:${userId}:${searchId}:tomtom`,
+            searchId, userId,
+          }
         );
       }
       skipped.push({ code, allowed: false, reason: reserveResult.reason, reserve: null });
@@ -195,17 +209,22 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
     await providerUsageService.commitGlobalTomTomCalls(
       reservation.global.periodStart,
       reservation.global.reservedCalls || 0,
-      calls
+      calls,
+      { idempotencyKey: `gcommit:${userId}:${searchId}:tomtom`, searchId, userId }
     );
   }
 
   if (providerCode === 'brightdata' && geocodeCalls > 0) {
     const g = await providerUsageService.reserveGlobalTomTomCalls(geocodeCalls, {
       searchId,
+      userId,
       idempotencyKey: `greserve-geo:${userId}:${searchId}:bd`,
     });
     if (g.ok && !g.unlimited) {
-      await providerUsageService.commitGlobalTomTomCalls(g.periodStart, g.reservedCalls, geocodeCalls);
+      await providerUsageService.commitGlobalTomTomCalls(
+        g.periodStart, g.reservedCalls, geocodeCalls,
+        { idempotencyKey: `gcommit-geo:${userId}:${searchId}:bd`, searchId, userId }
+      );
     }
   }
 
@@ -251,7 +270,8 @@ async function releaseAllReservations(userId, searchId, providers, { force = fal
       }
       if (p.reserve.global && p.reserve.global.periodStart) {
         await providerUsageService.releaseGlobalTomTomCalls(
-          p.reserve.global.periodStart, p.reserve.global.reservedCalls || 0
+          p.reserve.global.periodStart, p.reserve.global.reservedCalls || 0,
+          { idempotencyKey: `grelease:${userId}:${searchId}:${p.code}:tomtom`, searchId, userId }
         );
       }
     } catch (_) { /* best-effort */ }
@@ -273,8 +293,7 @@ async function getClientQuotaView(userId) {
   let usage = [];
   let limits = [];
   if (sub) {
-    const periodDays = await subscriptionService.getPeriodDays();
-    period = subscriptionService.resolvePeriodWindow(sub, new Date(), periodDays);
+    period = subscriptionService.resolvePeriodWindow(sub, new Date());
     if (period) {
       usage = await providerUsageService.getUserUsageSummary(userId, period.periodStart);
       limits = await planService.listProviderLimits(sub.planId);

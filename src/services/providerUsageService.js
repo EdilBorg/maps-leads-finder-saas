@@ -298,15 +298,34 @@ function globalPeriodWindow(periodDays, now = new Date()) {
   };
 }
 
-async function reserveGlobalTomTomCalls(calls, { searchId = null, idempotencyKey = null } = {}) {
+async function reserveGlobalTomTomCalls(calls, { searchId = null, userId = null, idempotencyKey = null } = {}) {
   const cfg = await getTomTomGlobalConfig();
   if (cfg.maxCallsPerPeriod == null) {
     return { ok: true, unlimited: true, reservedCalls: calls };
+  }
+  if (!idempotencyKey) {
+    const err = new Error('idempotencyKey required for TomTom global reserve');
+    err.code = 'VALIDATION';
+    throw err;
   }
   const window = globalPeriodWindow(cfg.periodDays);
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    const existing = await client.query(
+      `SELECT * FROM provider_global_usage_events WHERE idempotency_key = $1`, [idempotencyKey]
+    );
+    if (existing.rows[0]) {
+      await client.query('COMMIT');
+      return {
+        ok: true,
+        replayed: true,
+        reservedCalls: existing.rows[0].calls_delta,
+        periodStart: existing.rows[0].period_start,
+        periodEnd: window.periodEnd,
+        idempotencyKey,
+      };
+    }
     await client.query(
       `INSERT INTO provider_global_usage (provider_code, period_start, period_end)
        VALUES ('tomtom', $1, $2) ON CONFLICT (provider_code, period_start) DO NOTHING`,
@@ -327,6 +346,12 @@ async function reserveGlobalTomTomCalls(calls, { searchId = null, idempotencyKey
        WHERE provider_code='tomtom' AND period_start=$1`,
       [window.periodStart, calls]
     );
+    await client.query(
+      `INSERT INTO provider_global_usage_events (
+         provider_code, event_type, period_start, calls_delta, search_id, user_id, idempotency_key, metadata
+       ) VALUES ('tomtom','reserve',$1,$2,$3,$4,$5,$6::jsonb)`,
+      [window.periodStart, calls, searchId, userId, idempotencyKey, JSON.stringify({ periodEnd: window.periodEnd })]
+    );
     await client.query('COMMIT');
     return { ok: true, reservedCalls: calls, periodStart: window.periodStart, periodEnd: window.periodEnd, idempotencyKey };
   } catch (err) {
@@ -337,11 +362,20 @@ async function reserveGlobalTomTomCalls(calls, { searchId = null, idempotencyKey
   }
 }
 
-async function commitGlobalTomTomCalls(periodStart, reservedCalls, actualCalls) {
+async function commitGlobalTomTomCalls(periodStart, reservedCalls, actualCalls, { idempotencyKey = null, searchId = null, userId = null } = {}) {
   if (!periodStart) return { ok: true, skipped: true };
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    if (idempotencyKey) {
+      const existing = await client.query(
+        `SELECT id FROM provider_global_usage_events WHERE idempotency_key = $1`, [idempotencyKey]
+      );
+      if (existing.rows[0]) {
+        await client.query('COMMIT');
+        return { ok: true, replayed: true };
+      }
+    }
     await client.query(
       `UPDATE provider_global_usage SET
          calls_reserved = GREATEST(0, calls_reserved - $2),
@@ -349,6 +383,14 @@ async function commitGlobalTomTomCalls(periodStart, reservedCalls, actualCalls) 
        WHERE provider_code='tomtom' AND period_start=$1`,
       [periodStart, reservedCalls, actualCalls]
     );
+    if (idempotencyKey) {
+      await client.query(
+        `INSERT INTO provider_global_usage_events (
+           provider_code, event_type, period_start, calls_delta, search_id, user_id, idempotency_key
+         ) VALUES ('tomtom',$1,$2,$3,$4,$5,$6)`,
+        [actualCalls > 0 ? 'commit' : 'release', periodStart, actualCalls, searchId, userId, idempotencyKey]
+      );
+    }
     await client.query('COMMIT');
     return { ok: true };
   } catch (err) {
@@ -359,8 +401,8 @@ async function commitGlobalTomTomCalls(periodStart, reservedCalls, actualCalls) 
   }
 }
 
-async function releaseGlobalTomTomCalls(periodStart, reservedCalls) {
-  return commitGlobalTomTomCalls(periodStart, reservedCalls, 0);
+async function releaseGlobalTomTomCalls(periodStart, reservedCalls, opts = {}) {
+  return commitGlobalTomTomCalls(periodStart, reservedCalls, 0, opts);
 }
 
 async function getUserUsageSummary(userId, periodStart) {
