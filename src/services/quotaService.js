@@ -2,6 +2,7 @@
  * Authorisation gate: trial vs paid quotas per provider.
  * Policy: if trial still available, prefer trial (does not consume paid quotas).
  * Paid path only when free_search_used or hold blocked for non-in-progress reasons.
+ * Global TomTom quota is always enforced, including trial.
  */
 const planService = require('./planService');
 const subscriptionService = require('./subscriptionService');
@@ -17,6 +18,31 @@ const DEFAULT_PAID_LIMITS = Object.freeze({
 });
 
 /**
+ * Reserve global TomTom calls when the provider list includes tomtom or when
+ * Bright Data may perform geocoding (1 call). Used by both trial and paid paths.
+ */
+async function reserveTrialGlobalTomTom(userId, searchId, providerCodes) {
+  const needsTomTom = providerCodes.includes('tomtom');
+  const needsGeo = providerCodes.includes('brightdata');
+  // Conservative estimate for trial: pagination + possible geocode
+  let estCalls = 0;
+  if (needsTomTom) estCalls += Math.max(3, Math.ceil(TRIAL_MAX_LEADS / 100) + 1);
+  if (needsGeo) estCalls += 1;
+  if (estCalls === 0) return null;
+
+  const globalReserve = await providerUsageService.reserveGlobalTomTomCalls(estCalls, {
+    searchId,
+    userId,
+    idempotencyKey: `greserve-trial:${userId}:${searchId || 'none'}:tomtom`,
+  });
+  if (!globalReserve.ok) {
+    return { denied: true, reason: 'GLOBAL_TOMTOM_LIMIT', remaining: globalReserve.remaining };
+  }
+  if (globalReserve.unlimited) return { unlimited: true };
+  return globalReserve;
+}
+
+/**
  * @param {object} client - pg client inside open transaction
  */
 async function authorizeAndReserve(client, {
@@ -27,12 +53,29 @@ async function authorizeAndReserve(client, {
 }) {
   const hold = await acquireFreeSearchHold(client, userId, searchId);
   if (hold.allowed) {
+    // Trial path: still must respect global TomTom quota
+    const global = await reserveTrialGlobalTomTom(userId, searchId, providerCodes);
+    if (global && global.denied) {
+      return {
+        mode: 'denied',
+        reason: 'GLOBAL_TOMTOM_LIMIT',
+        message: 'Quota global TomTom esgotada. Tente mais tarde.',
+        holdToken: null,
+        providers: [],
+      };
+    }
     return {
       mode: 'trial',
       holdToken: hold.holdToken,
       holdUntil: hold.holdUntil,
       limit: Math.min(requestedLimit, TRIAL_MAX_LEADS),
-      providers: providerCodes.map((code) => ({ code, allowed: true, reason: null, reserve: null })),
+      providers: providerCodes.map((code) => ({
+        code,
+        allowed: true,
+        reason: null,
+        reserve: null,
+      })),
+      globalTomTom: global && !global.unlimited ? global : null,
     };
   }
 
@@ -116,6 +159,24 @@ async function authorizeAndReserve(client, {
       }
     }
 
+    // Bright Data may need 1 TomTom geocode call — reserve proactively
+    if (code === 'brightdata') {
+      const geoReserve = await providerUsageService.reserveGlobalTomTomCalls(1, {
+        searchId,
+        userId,
+        idempotencyKey: `greserve-geo:${userId}:${searchId}:bd`,
+      });
+      if (!geoReserve.ok) {
+        // Geocode blocked — still allow Bright Data if explicit coords will be used,
+        // but mark that geocode is unavailable. Provider will fail if coords missing.
+        // We do not skip the provider entirely; the engine/provider decides.
+      } else if (!geoReserve.unlimited) {
+        // Attach to reserve for later commit/release
+        globalReserve = globalReserve || {};
+        globalReserve.geo = geoReserve;
+      }
+    }
+
     const reserveResult = await providerUsageService.reserve({
       userId,
       providerCode: code,
@@ -139,6 +200,14 @@ async function authorizeAndReserve(client, {
           }
         );
       }
+      if (globalReserve && globalReserve.geo && !globalReserve.geo.unlimited) {
+        await providerUsageService.releaseGlobalTomTomCalls(
+          globalReserve.geo.periodStart, globalReserve.geo.reservedCalls, {
+            idempotencyKey: `grelease-geo:${userId}:${searchId}:bd`,
+            searchId, userId,
+          }
+        );
+      }
       skipped.push({ code, allowed: false, reason: reserveResult.reason, reserve: null });
       continue;
     }
@@ -152,6 +221,10 @@ async function authorizeAndReserve(client, {
         periodStart: window.periodStart,
         periodEnd: window.periodEnd,
         global: globalReserve && !globalReserve.unlimited ? globalReserve : null,
+        // Preserve pricing snapshot fields from reserveResult
+        unitCostMicroUsd: reserveResult.unitCostMicroUsd,
+        fixedExecutionCostMicroUsd: reserveResult.fixedExecutionCostMicroUsd,
+        includeFixedCost: reserveResult.includeFixedCost,
       },
     });
   }
@@ -197,13 +270,19 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
     reservedApiCalls: reservation.reservedApiCalls || 0,
     actualResults: Number.isFinite(actualResults) ? actualResults : 0,
     actualApiCalls: Number.isFinite(actualApiCalls) ? actualApiCalls : 0,
-    includeFixedCost: providerCode === 'apify',
+    includeFixedCost: reservation.includeFixedCost != null
+      ? reservation.includeFixedCost
+      : (providerCode === 'apify'),
     searchId,
     idempotencyKey: `commit:${userId}:${searchId}:${providerCode}`,
     pendingRemote,
+    // Immutable snapshot from reserve
+    unitCostMicroUsd: reservation.unitCostMicroUsd,
+    fixedExecutionCostMicroUsd: reservation.fixedExecutionCostMicroUsd,
   });
 
-  if (reservation.global && reservation.global.periodStart) {
+  // Commit TomTom search calls (paid path)
+  if (reservation.global && reservation.global.periodStart && !reservation.global.geo) {
     const calls = (Number.isFinite(actualApiCalls) ? actualApiCalls : 0)
       + (Number.isFinite(geocodeCalls) ? geocodeCalls : 0);
     await providerUsageService.commitGlobalTomTomCalls(
@@ -214,16 +293,26 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
     );
   }
 
-  if (providerCode === 'brightdata' && geocodeCalls > 0) {
+  // Commit pre-reserved Bright Data geocode (or release if unused)
+  if (reservation.global && reservation.global.geo && reservation.global.geo.periodStart) {
+    const usedGeo = Number.isFinite(geocodeCalls) ? geocodeCalls : 0;
+    await providerUsageService.commitGlobalTomTomCalls(
+      reservation.global.geo.periodStart,
+      reservation.global.geo.reservedCalls || 0,
+      usedGeo,
+      { idempotencyKey: `gcommit-geo:${userId}:${searchId}:bd`, searchId, userId }
+    );
+  } else if (providerCode === 'brightdata' && geocodeCalls > 0) {
+    // Legacy path: no pre-reserve (should not happen after this fix)
     const g = await providerUsageService.reserveGlobalTomTomCalls(geocodeCalls, {
       searchId,
       userId,
-      idempotencyKey: `greserve-geo:${userId}:${searchId}:bd`,
+      idempotencyKey: `greserve-geo-late:${userId}:${searchId}:bd`,
     });
     if (g.ok && !g.unlimited) {
       await providerUsageService.commitGlobalTomTomCalls(
         g.periodStart, g.reservedCalls, geocodeCalls,
-        { idempotencyKey: `gcommit-geo:${userId}:${searchId}:bd`, searchId, userId }
+        { idempotencyKey: `gcommit-geo-late:${userId}:${searchId}:bd`, searchId, userId }
       );
     }
   }
@@ -232,11 +321,29 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
 }
 
 /**
+ * Commit trial global TomTom usage (or release if no calls made).
+ */
+async function commitTrialGlobalTomTom(userId, searchId, globalReserve, metricsByProvider) {
+  if (!globalReserve || globalReserve.unlimited || !globalReserve.periodStart) return;
+  let actual = 0;
+  for (const m of Object.values(metricsByProvider || {})) {
+    if (m && Number.isFinite(m.apiCalls)) actual += m.apiCalls;
+    if (m && Number.isFinite(m.geocodeCalls)) actual += m.geocodeCalls;
+  }
+  await providerUsageService.commitGlobalTomTomCalls(
+    globalReserve.periodStart,
+    globalReserve.reservedCalls || 0,
+    actual,
+    { idempotencyKey: `gcommit-trial:${userId}:${searchId}:tomtom`, searchId, userId }
+  );
+}
+
+/**
  * Release only when safe (no pending remote cost risk).
  * For apify/brightdata failures after trigger, prefer commit with actualResults=0 + pendingRemote
  * rather than silent release when execution may have been billed.
  */
-async function releaseAllReservations(userId, searchId, providers, { force = false } = {}) {
+async function releaseAllReservations(userId, searchId, providers, { force = false, globalTomTom = null } = {}) {
   for (const p of providers || []) {
     if (!p.allowed || !p.reserve) continue;
     try {
@@ -255,6 +362,8 @@ async function releaseAllReservations(userId, searchId, providers, { force = fal
           searchId,
           idempotencyKey: `commit-fail:${userId}:${searchId}:${p.code}`,
           pendingRemote: true,
+          unitCostMicroUsd: p.reserve.unitCostMicroUsd,
+          fixedExecutionCostMicroUsd: p.reserve.fixedExecutionCostMicroUsd,
         });
       } else {
         await providerUsageService.release({
@@ -268,12 +377,27 @@ async function releaseAllReservations(userId, searchId, providers, { force = fal
           idempotencyKey: `release:${userId}:${searchId}:${p.code}`,
         });
       }
-      if (p.reserve.global && p.reserve.global.periodStart) {
+      if (p.reserve.global && p.reserve.global.periodStart && !p.reserve.global.geo) {
         await providerUsageService.releaseGlobalTomTomCalls(
           p.reserve.global.periodStart, p.reserve.global.reservedCalls || 0,
           { idempotencyKey: `grelease:${userId}:${searchId}:${p.code}:tomtom`, searchId, userId }
         );
       }
+      if (p.reserve.global && p.reserve.global.geo && p.reserve.global.geo.periodStart) {
+        await providerUsageService.releaseGlobalTomTomCalls(
+          p.reserve.global.geo.periodStart, p.reserve.global.geo.reservedCalls || 0,
+          { idempotencyKey: `grelease-geo:${userId}:${searchId}:bd`, searchId, userId }
+        );
+      }
+    } catch (_) { /* best-effort */ }
+  }
+  // Trial global release
+  if (globalTomTom && globalTomTom.periodStart && !globalTomTom.unlimited) {
+    try {
+      await providerUsageService.releaseGlobalTomTomCalls(
+        globalTomTom.periodStart, globalTomTom.reservedCalls || 0,
+        { idempotencyKey: `grelease-trial:${userId}:${searchId}:tomtom`, searchId, userId }
+      );
     } catch (_) { /* best-effort */ }
   }
 }
@@ -336,5 +460,6 @@ async function getClientQuotaView(userId) {
 
 module.exports = {
   TRIAL_MAX_LEADS, DEFAULT_PAID_LIMITS,
-  authorizeAndReserve, commitProviderMetrics, releaseAllReservations, getClientQuotaView,
+  authorizeAndReserve, commitProviderMetrics, commitTrialGlobalTomTom,
+  releaseAllReservations, getClientQuotaView,
 };
