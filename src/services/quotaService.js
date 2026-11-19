@@ -3,6 +3,11 @@
  * Policy: if trial still available, prefer trial (does not consume paid quotas).
  * Paid path only when free_search_used or hold blocked for non-in-progress reasons.
  * Global TomTom quota is always enforced, including trial.
+ *
+ * pendingRemote: when a remote provider may still bill after local cancel/fail,
+ * reservations are NOT released. A pending_remote_executions row is created for
+ * later reconciliation. Never commit(actual=0) while pendingRemote — that would
+ * free the financial reserve incorrectly.
  */
 const planService = require('./planService');
 const subscriptionService = require('./subscriptionService');
@@ -17,6 +22,10 @@ const DEFAULT_PAID_LIMITS = Object.freeze({
   tomtom: { maxResults: null, maxCostMicroUsd: null, maxApiCalls: null },
 });
 
+function getPool() {
+  return require('../db/pool').getPool();
+}
+
 /**
  * Reserve global TomTom calls when the provider list includes tomtom or when
  * Bright Data may perform geocoding (1 call). Used by both trial and paid paths.
@@ -24,7 +33,6 @@ const DEFAULT_PAID_LIMITS = Object.freeze({
 async function reserveTrialGlobalTomTom(userId, searchId, providerCodes) {
   const needsTomTom = providerCodes.includes('tomtom');
   const needsGeo = providerCodes.includes('brightdata');
-  // Conservative estimate for trial: pagination + possible geocode
   let estCalls = 0;
   if (needsTomTom) estCalls += Math.max(3, Math.ceil(TRIAL_MAX_LEADS / 100) + 1);
   if (needsGeo) estCalls += 1;
@@ -53,7 +61,6 @@ async function authorizeAndReserve(client, {
 }) {
   const hold = await acquireFreeSearchHold(client, userId, searchId);
   if (hold.allowed) {
-    // Trial path: still must respect global TomTom quota
     const global = await reserveTrialGlobalTomTom(userId, searchId, providerCodes);
     if (global && global.denied) {
       return {
@@ -110,7 +117,6 @@ async function authorizeAndReserve(client, {
     };
   }
 
-  // Period window uses immutable subscription.periodDays (not mutable global setting)
   const window = subscriptionService.resolvePeriodWindow(sub, new Date());
   if (!window) {
     return {
@@ -146,6 +152,8 @@ async function authorizeAndReserve(client, {
     );
 
     let globalReserve = null;
+    let geoBlocked = false;
+
     if (code === 'tomtom') {
       const estCalls = Math.max(3, Math.ceil(wantResults / 100) + 1);
       globalReserve = await providerUsageService.reserveGlobalTomTomCalls(estCalls, {
@@ -159,7 +167,8 @@ async function authorizeAndReserve(client, {
       }
     }
 
-    // Bright Data may need 1 TomTom geocode call — reserve proactively
+    // Bright Data geocode: pre-reserve is mandatory before any TomTom geocode call.
+    // If pre-reserve fails, mark geoBlocked so provider must not call TomTom.
     if (code === 'brightdata') {
       const geoReserve = await providerUsageService.reserveGlobalTomTomCalls(1, {
         searchId,
@@ -167,11 +176,8 @@ async function authorizeAndReserve(client, {
         idempotencyKey: `greserve-geo:${userId}:${searchId}:bd`,
       });
       if (!geoReserve.ok) {
-        // Geocode blocked — still allow Bright Data if explicit coords will be used,
-        // but mark that geocode is unavailable. Provider will fail if coords missing.
-        // We do not skip the provider entirely; the engine/provider decides.
+        geoBlocked = true;
       } else if (!geoReserve.unlimited) {
-        // Attach to reserve for later commit/release
         globalReserve = globalReserve || {};
         globalReserve.geo = geoReserve;
       }
@@ -192,7 +198,7 @@ async function authorizeAndReserve(client, {
     });
 
     if (!reserveResult.ok) {
-      if (globalReserve && globalReserve.ok && !globalReserve.unlimited) {
+      if (globalReserve && globalReserve.ok && !globalReserve.unlimited && globalReserve.periodStart) {
         await providerUsageService.releaseGlobalTomTomCalls(
           globalReserve.periodStart, globalReserve.reservedCalls, {
             idempotencyKey: `grelease:${userId}:${searchId}:tomtom`,
@@ -216,15 +222,18 @@ async function authorizeAndReserve(client, {
       code,
       allowed: true,
       reason: null,
+      geoBlocked: !!geoBlocked,
       reserve: {
         ...reserveResult,
         periodStart: window.periodStart,
         periodEnd: window.periodEnd,
-        global: globalReserve && !globalReserve.unlimited ? globalReserve : null,
-        // Preserve pricing snapshot fields from reserveResult
+        global: globalReserve && (globalReserve.periodStart || globalReserve.geo)
+          ? globalReserve
+          : null,
         unitCostMicroUsd: reserveResult.unitCostMicroUsd,
         fixedExecutionCostMicroUsd: reserveResult.fixedExecutionCostMicroUsd,
         includeFixedCost: reserveResult.includeFixedCost,
+        geoBlocked: !!geoBlocked,
       },
     });
   }
@@ -261,6 +270,13 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
   const geocodeCalls = metrics && metrics.geocodeCalls != null ? Number(metrics.geocodeCalls) : 0;
   const pendingRemote = !!(metrics && metrics.pendingRemote);
 
+  // Never commit actual=0 with pendingRemote via this path when we want to keep the reserve.
+  // pendingRemote handling belongs in markPendingRemote / reconciler.
+  if (pendingRemote) {
+    await markPendingRemote(userId, searchId, providerCode, reservation, metrics);
+    return { ok: true, pendingRemote: true };
+  }
+
   const result = await providerUsageService.commit({
     userId,
     providerCode,
@@ -275,13 +291,11 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
       : (providerCode === 'apify'),
     searchId,
     idempotencyKey: `commit:${userId}:${searchId}:${providerCode}`,
-    pendingRemote,
-    // Immutable snapshot from reserve
+    pendingRemote: false,
     unitCostMicroUsd: reservation.unitCostMicroUsd,
     fixedExecutionCostMicroUsd: reservation.fixedExecutionCostMicroUsd,
   });
 
-  // Commit TomTom search calls (paid path)
   if (reservation.global && reservation.global.periodStart && !reservation.global.geo) {
     const calls = (Number.isFinite(actualApiCalls) ? actualApiCalls : 0)
       + (Number.isFinite(geocodeCalls) ? geocodeCalls : 0);
@@ -293,7 +307,6 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
     );
   }
 
-  // Commit pre-reserved Bright Data geocode (or release if unused)
   if (reservation.global && reservation.global.geo && reservation.global.geo.periodStart) {
     const usedGeo = Number.isFinite(geocodeCalls) ? geocodeCalls : 0;
     await providerUsageService.commitGlobalTomTomCalls(
@@ -302,27 +315,62 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
       usedGeo,
       { idempotencyKey: `gcommit-geo:${userId}:${searchId}:bd`, searchId, userId }
     );
-  } else if (providerCode === 'brightdata' && geocodeCalls > 0) {
-    // Legacy path: no pre-reserve (should not happen after this fix)
-    const g = await providerUsageService.reserveGlobalTomTomCalls(geocodeCalls, {
-      searchId,
-      userId,
-      idempotencyKey: `greserve-geo-late:${userId}:${searchId}:bd`,
-    });
-    if (g.ok && !g.unlimited) {
-      await providerUsageService.commitGlobalTomTomCalls(
-        g.periodStart, g.reservedCalls, geocodeCalls,
-        { idempotencyKey: `gcommit-geo-late:${userId}:${searchId}:bd`, searchId, userId }
-      );
-    }
   }
+  // No post-facto / late reserve path — geocode must be pre-reserved.
 
   return result;
 }
 
 /**
- * Commit trial global TomTom usage (or release if no calls made).
+ * Persist a pending remote execution and KEEP the usage reservation held.
+ * Does not call commit/release on provider_usage.
  */
+async function markPendingRemote(userId, searchId, providerCode, reservation, metrics = {}) {
+  if (!reservation || !reservation.periodStart) return null;
+  if (providerCode !== 'apify' && providerCode !== 'brightdata') return null;
+
+  const externalRunId = metrics.externalRunId || metrics.runId || metrics.snapshotId || null;
+  const pool = getPool();
+  try {
+    await pool.query(
+      `INSERT INTO pending_remote_executions (
+         user_id, search_id, provider_code, status, external_run_id,
+         period_start, reserved_results, reserved_cost_micro_usd, reserved_api_calls,
+         unit_cost_micro_usd, fixed_execution_cost_micro_usd, include_fixed_cost,
+         pricing_version, metadata
+       ) VALUES ($1,$2,$3,'pending',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
+       ON CONFLICT (search_id, provider_code)
+         WHERE search_id IS NOT NULL AND status IN ('pending', 'reconciling')
+       DO UPDATE SET
+         external_run_id = COALESCE(EXCLUDED.external_run_id, pending_remote_executions.external_run_id),
+         updated_at = NOW()
+       RETURNING id`,
+      [
+        userId,
+        searchId,
+        providerCode,
+        externalRunId,
+        reservation.periodStart,
+        reservation.reservedResults || 0,
+        String(reservation.reservedCostMicroUsd || 0),
+        reservation.reservedApiCalls || 0,
+        reservation.unitCostMicroUsd != null ? String(reservation.unitCostMicroUsd) : null,
+        reservation.fixedExecutionCostMicroUsd != null ? String(reservation.fixedExecutionCostMicroUsd) : null,
+        !!reservation.includeFixedCost,
+        reservation.pricingVersion || null,
+        JSON.stringify({
+          source: 'markPendingRemote',
+          global: reservation.global || null,
+        }),
+      ]
+    );
+  } catch (err) {
+    // Table may not exist yet in some envs; log and keep reservation by doing nothing.
+    console.error('[markPendingRemote]', searchId, providerCode, err && err.message);
+  }
+  return { ok: true, pendingRemote: true };
+}
+
 async function commitTrialGlobalTomTom(userId, searchId, globalReserve, metricsByProvider) {
   if (!globalReserve || globalReserve.unlimited || !globalReserve.periodStart) return;
   let actual = 0;
@@ -339,44 +387,36 @@ async function commitTrialGlobalTomTom(userId, searchId, globalReserve, metricsB
 }
 
 /**
- * Release only when safe (no pending remote cost risk).
- * For apify/brightdata failures after trigger, prefer commit with actualResults=0 + pendingRemote
- * rather than silent release when execution may have been billed.
+ * Release reservations only when safe.
+ * For apify/brightdata after a remote trigger may have started: mark pendingRemote
+ * and DO NOT release financial reserves. Reconciler will commit actual or release later.
+ *
+ * force=true: hard release (admin / confirmed no remote cost).
  */
 async function releaseAllReservations(userId, searchId, providers, { force = false, globalTomTom = null } = {}) {
   for (const p of providers || []) {
     if (!p.allowed || !p.reserve) continue;
     try {
       if (!force && (p.code === 'apify' || p.code === 'brightdata')) {
-        // Commit zero results but keep audit trail; fixed cost may still apply for apify if flagged
-        await providerUsageService.commit({
-          userId,
-          providerCode: p.code,
-          periodStart: p.reserve.periodStart,
-          reservedResults: p.reserve.reservedResults || 0,
-          reservedCostMicroUsd: p.reserve.reservedCostMicroUsd || 0,
-          reservedApiCalls: p.reserve.reservedApiCalls || 0,
-          actualResults: 0,
-          actualApiCalls: 0,
-          includeFixedCost: false,
-          searchId,
-          idempotencyKey: `commit-fail:${userId}:${searchId}:${p.code}`,
+        // Keep reservation; record pending remote for reconciliation.
+        await markPendingRemote(userId, searchId, p.code, p.reserve, {
           pendingRemote: true,
-          unitCostMicroUsd: p.reserve.unitCostMicroUsd,
-          fixedExecutionCostMicroUsd: p.reserve.fixedExecutionCostMicroUsd,
         });
-      } else {
-        await providerUsageService.release({
-          userId,
-          providerCode: p.code,
-          periodStart: p.reserve.periodStart,
-          reservedResults: p.reserve.reservedResults || 0,
-          reservedCostMicroUsd: p.reserve.reservedCostMicroUsd || 0,
-          reservedApiCalls: p.reserve.reservedApiCalls || 0,
-          searchId,
-          idempotencyKey: `release:${userId}:${searchId}:${p.code}`,
-        });
+        // Do NOT commit or release provider_usage here.
+        continue;
       }
+
+      await providerUsageService.release({
+        userId,
+        providerCode: p.code,
+        periodStart: p.reserve.periodStart,
+        reservedResults: p.reserve.reservedResults || 0,
+        reservedCostMicroUsd: p.reserve.reservedCostMicroUsd || 0,
+        reservedApiCalls: p.reserve.reservedApiCalls || 0,
+        searchId,
+        idempotencyKey: `release:${userId}:${searchId}:${p.code}`,
+      });
+
       if (p.reserve.global && p.reserve.global.periodStart && !p.reserve.global.geo) {
         await providerUsageService.releaseGlobalTomTomCalls(
           p.reserve.global.periodStart, p.reserve.global.reservedCalls || 0,
@@ -391,7 +431,7 @@ async function releaseAllReservations(userId, searchId, providers, { force = fal
       }
     } catch (_) { /* best-effort */ }
   }
-  // Trial global release
+
   if (globalTomTom && globalTomTom.periodStart && !globalTomTom.unlimited) {
     try {
       await providerUsageService.releaseGlobalTomTomCalls(
@@ -403,7 +443,7 @@ async function releaseAllReservations(userId, searchId, providers, { force = fal
 }
 
 async function getClientQuotaView(userId) {
-  const pool = require('../db/pool').getPool();
+  const pool = getPool();
   const { rows: userRows } = await pool.query(
     `SELECT free_search_used, free_search_hold_token, free_search_hold_until FROM users WHERE id = $1`,
     [userId]
@@ -461,5 +501,5 @@ async function getClientQuotaView(userId) {
 module.exports = {
   TRIAL_MAX_LEADS, DEFAULT_PAID_LIMITS,
   authorizeAndReserve, commitProviderMetrics, commitTrialGlobalTomTom,
-  releaseAllReservations, getClientQuotaView,
+  releaseAllReservations, markPendingRemote, getClientQuotaView,
 };
