@@ -1,5 +1,6 @@
 /**
  * Manual payments; hybrid architecture ready for gateway.
+ * Creation is idempotent under concurrency via unique idempotency_key + catch of unique_violation.
  */
 const crypto = require('crypto');
 const subscriptionService = require('./subscriptionService');
@@ -12,12 +13,22 @@ async function createManualPayment({
 }) {
   const pool = getPool();
   const key = idempotencyKey || `pay:${userId}:${planId}:${crypto.randomUUID()}`;
+
+  // Fast path (outside tx) — reduces contention for pure replays
   const existing = await pool.query(`SELECT * FROM payments WHERE idempotency_key = $1`, [key]);
   if (existing.rows[0]) return { payment: mapPayment(existing.rows[0]), replayed: true };
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Re-check under transaction to close the race window
+    const again = await client.query(`SELECT * FROM payments WHERE idempotency_key = $1 FOR SHARE`, [key]);
+    if (again.rows[0]) {
+      await client.query('COMMIT');
+      return { payment: mapPayment(again.rows[0]), replayed: true };
+    }
+
     const subIns = await client.query(
       `INSERT INTO subscriptions (user_id, plan_id, status, source)
        VALUES ($1, $2, 'pending', 'manual') RETURNING id`,
@@ -35,6 +46,11 @@ async function createManualPayment({
     return { payment: mapPayment(rows[0]), subscriptionId, replayed: false };
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
+    // Unique violation on idempotency_key → another concurrent request won; return that row
+    if (err && (err.code === '23505' || /unique/i.test(String(err.message || '')))) {
+      const { rows } = await pool.query(`SELECT * FROM payments WHERE idempotency_key = $1`, [key]);
+      if (rows[0]) return { payment: mapPayment(rows[0]), replayed: true };
+    }
     throw err;
   } finally {
     client.release();

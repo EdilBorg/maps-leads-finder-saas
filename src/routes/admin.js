@@ -110,10 +110,32 @@ router.get('/settings/tomtom-quota', async (req, res, next) => {
 
 router.put('/settings/tomtom-quota', requireCsrf, async (req, res, next) => {
   try {
-    const max = req.body && req.body.maxCallsPerPeriod;
-    const periodDays = req.body && req.body.periodDays != null ? Number(req.body.periodDays) : 30;
+    const body = req.body || {};
+    let maxCalls = null;
+    if (body.maxCallsPerPeriod != null && body.maxCallsPerPeriod !== '') {
+      const n = Number(body.maxCallsPerPeriod);
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+        return res.status(400).json({
+          ok: false,
+          error: 'maxCallsPerPeriod deve ser inteiro >= 0 ou null (ilimitado)',
+        });
+      }
+      // 0 means zero allowance (deny all); null means unlimited
+      maxCalls = n;
+    }
+    let periodDays = 30;
+    if (body.periodDays != null && body.periodDays !== '') {
+      const d = Number(body.periodDays);
+      if (!Number.isFinite(d) || !Number.isInteger(d) || d < 1 || d > 366) {
+        return res.status(400).json({
+          ok: false,
+          error: 'periodDays deve ser inteiro entre 1 e 366',
+        });
+      }
+      periodDays = d;
+    }
     const value = {
-      max_calls_per_period: max == null || max === '' ? null : Number(max),
+      max_calls_per_period: maxCalls,
       period_days: periodDays,
       note: 'Configured by admin',
     };
