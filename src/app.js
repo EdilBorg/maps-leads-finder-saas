@@ -19,6 +19,7 @@ const healthRouter = require('./routes/health');
 const authRouter = require('./routes/auth');
 const searchRouter = require('./routes/search');
 const adminRouter = require('./routes/admin');
+const billingRouter = require('./routes/billing');
 const { loginRateKey, clientIp } = require('./middleware/rateLimitKeys');
 
 validateConfig();
@@ -65,16 +66,10 @@ function createApp(options = {}) {
 
   app.use(loadUser);
 
-  /**
-   * Dashboard is only for authenticated + email-verified users.
-   * Disable static index auto-serve so / and /index.html are controlled here.
-   * Auth pages under /pages/* and CSS/JS remain publicly available.
-   */
   function gateDashboard(req, res, next) {
     if (!req.session || !req.session.userId) {
       return res.redirect(302, '/pages/login.html');
     }
-    // loadUser refreshes emailVerified from the database on each request.
     if (!req.session.emailVerified) {
       return res.redirect(302, '/pages/check-email.html');
     }
@@ -92,6 +87,7 @@ function createApp(options = {}) {
   app.use(
     express.static(path.join(__dirname, '..', 'public'), {
       index: false,
+      maxAge: config.isProduction ? '1h' : 0,
     })
   );
 
@@ -99,15 +95,7 @@ function createApp(options = {}) {
   app.use('/api/auth', authRouter);
   app.use('/api/searches', searchRouter);
   app.use('/api/admin', adminRouter);
-
-  if (process.env.ENABLE_TEST_ROUTES === '1' && process.env.NODE_ENV !== 'production') {
-    app.get('/__test/client-ip', (req, res) => {
-      res.json({ ip: req.ip || null, ips: req.ips || [] });
-    });
-    app.get('/__test/rate-key', (req, res) => {
-      res.json({ ip: clientIp(req), rateKey: loginRateKey(req) });
-    });
-  }
+  app.use('/api/billing', billingRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
@@ -115,4 +103,4 @@ function createApp(options = {}) {
   return app;
 }
 
-module.exports = { createApp, config };
+module.exports = { createApp };
