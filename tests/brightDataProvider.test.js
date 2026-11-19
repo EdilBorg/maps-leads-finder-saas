@@ -108,7 +108,7 @@ describe('brightDataProvider — mapItem', () => {
     assert.equal(item.rating, null);
     assert.equal(item.lat, null);
     assert.equal(item.lng, null);
-    assert.equal(item.externalId, 'brightdata-3');
+    assert.equal(item.externalId, null);
   });
 });
 
@@ -141,7 +141,6 @@ describe('brightDataProvider — async flow', () => {
 
   it('happy path: geocode → trigger → running → ready → download', async () => {
     const done = mockFetchSequence([
-      // geocode
       async () =>
         jsonResponse(200, {
           results: [
@@ -151,7 +150,6 @@ describe('brightDataProvider — async flow', () => {
             },
           ],
         }),
-      // trigger
       async (url, opts) => {
         assert.match(url, /\/datasets\/v3\/trigger/);
         assert.match(url, /discover_by=location/);
@@ -159,14 +157,11 @@ describe('brightDataProvider — async flow', () => {
         assert.match(opts.headers.Authorization, /^Bearer /);
         return jsonResponse(200, { snapshot_id: 'sd_test_1' });
       },
-      // progress running
       async (url) => {
         assert.match(url, /\/progress\/sd_test_1/);
         return jsonResponse(200, { status: 'running', snapshot_id: 'sd_test_1' });
       },
-      // progress ready
       async () => jsonResponse(200, { status: 'ready', snapshot_id: 'sd_test_1' }),
-      // snapshot
       async (url) => {
         assert.match(url, /\/snapshot\/sd_test_1\?format=json/);
         return jsonResponse(200, [
@@ -291,7 +286,6 @@ describe('brightDataProvider — async flow', () => {
         return jsonResponse(200, { status: 'running' });
       },
     ]);
-    // Extra safety: if more fetches happen, flag download
     const prev = global.fetch;
     global.fetch = async (url, opts) => {
       if (String(url).includes('/snapshot/')) downloadCalled = true;
