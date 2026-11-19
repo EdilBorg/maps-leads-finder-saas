@@ -294,7 +294,10 @@ async function search(criteria, signalOrOpts) {
       throw err;
     }
 
+    let geocodeCalls = 0;
+    const hadExplicitCoords = criteria.lat != null || criteria.lng != null || criteria.long != null;
     const geo = await resolveGeo(criteria, signal);
+    if (geo && !hadExplicitCoords && String(criteria.location || '').trim()) geocodeCalls = 1;
     if (!geo) {
       return errorResult(
         'GEOCODE_FAILED',
@@ -441,7 +444,11 @@ async function search(criteria, signalOrOpts) {
       const mapped = mapItem(items[i], i);
       if (mapped) results.push(mapped);
     }
-    return okResult(results);
+    return okResult(results, {
+      rawCount: Array.isArray(items) ? items.length : results.length,
+      apiCalls: 1,
+      geocodeCalls,
+    });
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
       return errorResult('CANCELLED', 'Bright Data search cancelled');

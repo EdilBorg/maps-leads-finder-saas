@@ -38,13 +38,22 @@ function emptyResult() {
   return { status: 'empty', results: [], errorCode: null, errorMessage: null };
 }
 
-function okResult(results) {
-  return {
-    status: results.length ? 'ok' : 'empty',
+function okResult(results, metrics) {
+  const out = {
+    status: results && results.length ? 'ok' : 'empty',
     results: results || [],
     errorCode: null,
     errorMessage: null,
   };
+  if (metrics && typeof metrics === 'object') {
+    out.metrics = {
+      rawCount: metrics.rawCount != null ? Number(metrics.rawCount) : (results ? results.length : 0),
+      apiCalls: metrics.apiCalls != null ? Number(metrics.apiCalls) : 0,
+      geocodeCalls: metrics.geocodeCalls != null ? Number(metrics.geocodeCalls) : 0,
+      pendingRemote: Boolean(metrics.pendingRemote),
+    };
+  }
+  return out;
 }
 
 function errorResult(code, message) {

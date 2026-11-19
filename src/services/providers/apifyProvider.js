@@ -276,7 +276,11 @@ async function search(criteria, signal) {
       const mapped = mapItem(items[i], i, criteria);
       if (mapped) results.push(mapped);
     }
-    return okResult(results);
+    return okResult(results, {
+      rawCount: Array.isArray(items) ? items.length : results.length,
+      apiCalls: 1,
+      geocodeCalls: 0,
+    });
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
       if (runId) {

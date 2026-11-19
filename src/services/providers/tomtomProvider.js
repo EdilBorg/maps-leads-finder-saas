@@ -84,6 +84,8 @@ async function search(criteria, signalOrOpts) {
   try {
     const all = [];
     let ofs = 0;
+    let apiCalls = 0;
+    let rawCount = 0;
     while (all.length < want) {
       if (signal && signal.aborted) {
         const err = new Error('cancelled');
@@ -95,6 +97,7 @@ async function search(criteria, signalOrOpts) {
         `https://api.tomtom.com/search/2/poiSearch/${q}.json` +
         `?key=${encodeURIComponent(key)}&limit=${pageSize}&ofs=${ofs}&language=pt-PT`;
 
+      apiCalls += 1;
       const data = await withTimeout(
         fetch(url, {
           method: 'GET',
@@ -117,6 +120,7 @@ async function search(criteria, signalOrOpts) {
       const results = Array.isArray(data.results) ? data.results : [];
       if (!results.length) break;
       for (const r of results) {
+        rawCount += 1;
         const item = mapItem(r, all.length, criteria);
         if (item) all.push(item);
         if (all.length >= want) break;
@@ -125,7 +129,11 @@ async function search(criteria, signalOrOpts) {
       ofs += results.length;
       if (ofs >= 2000) break;
     }
-    return okResult(all.slice(0, want));
+    return okResult(all.slice(0, want), {
+      rawCount,
+      apiCalls,
+      geocodeCalls: 0,
+    });
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
       return errorResult('CANCELLED', 'TomTom search cancelled');

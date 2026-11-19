@@ -25,6 +25,7 @@
         <button type="button" class="nav-item" data-view="results">Resultados</button>
         <button type="button" class="nav-item" data-view="history">Histórico</button>
         <button type="button" class="nav-item" data-view="leads">Leads guardados</button>
+        <button type="button" class="nav-item" data-view="plans">Planos</button>
         <button type="button" class="nav-item" data-view="settings">Configurações</button>
       </nav>
       <div class="sidebar-footer">
@@ -435,7 +436,15 @@
           </div>
 
         </section>
-        <section class="view" id="view-settings" aria-label="Configurações">
+                <section class="view" id="view-plans" hidden>
+          <h1 class="page-title">Planos e quotas</h1>
+          <div id="plans-quota-panel" class="card" style="padding:1rem">
+            <p class="muted">A carregar informação da conta…</p>
+          </div>
+          <div id="plans-list-panel" class="card" style="padding:1rem;margin-top:1rem"></div>
+          <div id="plans-payments-panel" class="card" style="padding:1rem;margin-top:1rem"></div>
+        </section>
+<section class="view" id="view-settings" aria-label="Configurações">
           <h2 class="page-heading">Configurações</h2>
           <p class="page-sub">Conta e preferências</p>
           <div class="card stack-gap-16">

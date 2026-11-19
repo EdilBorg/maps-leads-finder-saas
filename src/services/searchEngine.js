@@ -409,12 +409,21 @@ async function executeSearch(input, opts = {}) {
       totals: { raw: 0, normalized: 0, afterDedup: 0, afterFilters: 0, returned: 0, limit: globalLimit }, results: [], cancelled: true };
   }
   const registry = { ...DEFAULT_PROVIDERS, ...(input.providers || {}) };
-  const selected = PROVIDER_CODES.map((code) => {
+  const allowList = Array.isArray(input.allowedProviders) && input.allowedProviders.length
+    ? input.allowedProviders.map(String)
+    : PROVIDER_CODES.slice();
+  const selected = PROVIDER_CODES.filter((code) => allowList.includes(code)).map((code) => {
     const p = registry[code];
     return (!p || typeof p.search !== 'function')
       ? { code, search: null }
       : { code, search: p.search.bind(p) };
   });
+  const skippedQuota = PROVIDER_CODES.filter((code) => !allowList.includes(code)).map((code) => ({
+    code,
+    status: 'skipped_quota',
+    count: 0,
+    metrics: { rawCount: 0, apiCalls: 0, geocodeCalls: 0 },
+  }));
   const started = Date.now();
 
   const providerResults = await Promise.all(
@@ -449,19 +458,25 @@ async function executeSearch(input, opts = {}) {
   }
 
   const allRaw = [];
-  const internalProviders = [];
+  const internalProviders = skippedQuota.slice();
   for (const pr of providerResults) {
     const r = pr.result;
+    const metrics = r.metrics || {
+      rawCount: Array.isArray(r.results) ? r.results.length : 0,
+      apiCalls: 0,
+      geocodeCalls: 0,
+    };
     internalProviders.push({
       code: pr.code,
       status: r.status,
-      count: r.results.length,
+      count: Array.isArray(r.results) ? r.results.length : 0,
+      metrics,
       errorCode: r.errorCode,
       errorMessage: r.errorMessage,
       errorStage: r.errorStage,
       httpStatus: r.httpStatus,
     });
-    for (const item of r.results) allRaw.push(item);
+    for (const item of (r.results || [])) allRaw.push(item);
   }
 
   const normalized = [];

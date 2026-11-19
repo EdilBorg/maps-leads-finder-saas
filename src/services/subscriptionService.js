@@ -4,14 +4,20 @@
 const PERIOD_DAYS_DEFAULT = 30;
 function getPool() { return require('../db/pool').getPool(); }
 
-async function getPeriodDays() {
+async function getPeriodDays(client) {
+  const db = client || getPool();
   try {
-    const { rows } = await getPool().query(
+    const { rows } = await db.query(
       `SELECT value FROM system_settings WHERE key = 'subscription_period_days'`
     );
     const days = rows[0] && rows[0].value && Number(rows[0].value.days);
     return Number.isFinite(days) && days > 0 ? days : PERIOD_DAYS_DEFAULT;
-  } catch (_) { return PERIOD_DAYS_DEFAULT; }
+  } catch (err) {
+    // Missing settings row/table → default. Propagate connection failures in test if flagged.
+    if (err && (err.code === '42P01' || err.code === '42703')) return PERIOD_DAYS_DEFAULT;
+    if (process.env.STRICT_DB_ERRORS === '1') throw err;
+    return PERIOD_DAYS_DEFAULT;
+  }
 }
 
 async function getActiveSubscription(userId, client) {
@@ -51,21 +57,31 @@ function resolvePeriodWindow(subscription, now = new Date(), periodDays = PERIOD
 }
 
 async function activateSubscription({ userId, planId, source = 'manual', externalRef = null, client }) {
-  const db = client || getPool();
-  const periodDays = await getPeriodDays();
-  const startsAt = new Date();
-  const endsAt = new Date(startsAt.getTime() + periodDays * 24 * 60 * 60 * 1000);
-  await db.query(
-    `UPDATE subscriptions SET status = 'expired', updated_at = NOW()
-     WHERE user_id = $1 AND status = 'active'`,
-    [userId]
-  );
-  const { rows } = await db.query(
-    `INSERT INTO subscriptions (user_id, plan_id, status, starts_at, ends_at, source, external_ref)
-     VALUES ($1,$2,'active',$3,$4,$5,$6) RETURNING *`,
-    [userId, planId, startsAt.toISOString(), endsAt.toISOString(), source, externalRef]
-  );
-  return mapSubscription(rows[0]);
+  const own = !client;
+  const db = client || (await getPool().connect());
+  try {
+    if (own) await db.query('BEGIN');
+    const periodDays = await getPeriodDays(db);
+    const startsAt = new Date();
+    const endsAt = new Date(startsAt.getTime() + periodDays * 24 * 60 * 60 * 1000);
+    await db.query(
+      `UPDATE subscriptions SET status = 'expired', updated_at = NOW()
+       WHERE user_id = $1 AND status = 'active'`,
+      [userId]
+    );
+    const { rows } = await db.query(
+      `INSERT INTO subscriptions (user_id, plan_id, status, starts_at, ends_at, source, external_ref)
+       VALUES ($1,$2,'active',$3,$4,$5,$6) RETURNING *`,
+      [userId, planId, startsAt.toISOString(), endsAt.toISOString(), source, externalRef]
+    );
+    if (own) await db.query('COMMIT');
+    return mapSubscription(rows[0]);
+  } catch (err) {
+    if (own) { try { await db.query('ROLLBACK'); } catch (_) {} }
+    throw err;
+  } finally {
+    if (own && typeof db.release === 'function') db.release();
+  }
 }
 
 async function cancelSubscription(subscriptionId, userId, { client } = {}) {

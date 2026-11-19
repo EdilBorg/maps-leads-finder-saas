@@ -1,0 +1,388 @@
+/**
+ * Atomic provider usage ledger: reserve → commit/release.
+ * Never holds a transaction open across external HTTP calls.
+ */
+const crypto = require('crypto');
+
+function getPool() {
+  return require('../db/pool').getPool();
+}
+
+function toBigIntSafe(v) {
+  if (v == null) return 0n;
+  if (typeof v === 'bigint') return v;
+  return BigInt(String(v));
+}
+
+function bigToNumber(v) {
+  // For JSON responses only; internal math uses BigInt
+  const b = toBigIntSafe(v);
+  if (b > BigInt(Number.MAX_SAFE_INTEGER)) return b.toString();
+  return Number(b);
+}
+
+async function getActivePricing(providerCode, client) {
+  const db = client || getPool();
+  const { rows } = await db.query(
+    `SELECT * FROM provider_pricing
+     WHERE provider_code = $1 AND active = TRUE
+       AND effective_from <= NOW()
+       AND (effective_until IS NULL OR effective_until > NOW())
+     ORDER BY effective_from DESC LIMIT 1`,
+    [providerCode]
+  );
+  if (!rows[0]) {
+    return { pricingVersion: 'unset', unitCostMicroUsd: 0n, fixedExecutionCostMicroUsd: 0n };
+  }
+  return {
+    pricingVersion: rows[0].pricing_version,
+    unitCostMicroUsd: toBigIntSafe(rows[0].unit_cost_micro_usd),
+    fixedExecutionCostMicroUsd: toBigIntSafe(rows[0].fixed_execution_cost_micro_usd),
+  };
+}
+
+async function ensureUsageRow(client, userId, providerCode, periodStart, periodEnd) {
+  const { rows } = await client.query(
+    `INSERT INTO provider_usage (user_id, provider_code, period_start, period_end)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, provider_code, period_start) DO UPDATE SET updated_at = provider_usage.updated_at
+     RETURNING *`,
+    [userId, providerCode, periodStart, periodEnd]
+  );
+  return rows[0];
+}
+
+async function reserve({
+  userId, providerCode, periodStart, periodEnd,
+  results, apiCalls = 0, includeFixedCost = false,
+  searchId = null, idempotencyKey = null, limits = {}, client: externalClient,
+}) {
+  const ownClient = !externalClient;
+  const client = externalClient || (await getPool().connect());
+  const key = idempotencyKey || `reserve:${userId}:${providerCode}:${searchId || crypto.randomUUID()}`;
+
+  try {
+    if (ownClient) await client.query('BEGIN');
+
+    const existing = await client.query(
+      `SELECT * FROM provider_usage_events WHERE idempotency_key = $1`, [key]
+    );
+    if (existing.rows[0]) {
+      if (ownClient) await client.query('COMMIT');
+      return { ok: true, replayed: true, event: existing.rows[0] };
+    }
+
+    await ensureUsageRow(client, userId, providerCode, periodStart, periodEnd);
+    await client.query(
+      `SELECT id FROM provider_usage WHERE user_id=$1 AND provider_code=$2 AND period_start=$3 FOR UPDATE`,
+      [userId, providerCode, periodStart]
+    );
+
+    const pricing = await getActivePricing(providerCode, client);
+    const cost = BigInt(results) * pricing.unitCostMicroUsd
+      + (includeFixedCost ? pricing.fixedExecutionCostMicroUsd : 0n);
+
+    const { rows: usageRows } = await client.query(
+      `SELECT * FROM provider_usage WHERE user_id=$1 AND provider_code=$2 AND period_start=$3`,
+      [userId, providerCode, periodStart]
+    );
+    const u = usageRows[0];
+    const resultsCommitted = u.results_used + u.results_reserved;
+    const costCommitted = toBigIntSafe(u.cost_micro_usd_used) + toBigIntSafe(u.cost_micro_usd_reserved);
+    const callsCommitted = u.api_calls_used + u.api_calls_reserved;
+
+    if (limits.maxResults != null && resultsCommitted + results > limits.maxResults) {
+      if (ownClient) await client.query('ROLLBACK');
+      return { ok: false, reason: 'RESULTS_LIMIT', remaining: Math.max(0, limits.maxResults - resultsCommitted) };
+    }
+    if (limits.maxCostMicroUsd != null && costCommitted + cost > BigInt(limits.maxCostMicroUsd)) {
+      if (ownClient) await client.query('ROLLBACK');
+      return { ok: false, reason: 'COST_LIMIT' };
+    }
+    if (limits.maxApiCalls != null && callsCommitted + apiCalls > limits.maxApiCalls) {
+      if (ownClient) await client.query('ROLLBACK');
+      return { ok: false, reason: 'API_CALLS_LIMIT', remainingCalls: Math.max(0, limits.maxApiCalls - callsCommitted) };
+    }
+
+    await client.query(
+      `UPDATE provider_usage SET
+         results_reserved = results_reserved + $4,
+         cost_micro_usd_reserved = cost_micro_usd_reserved + $5,
+         api_calls_reserved = api_calls_reserved + $6,
+         updated_at = NOW()
+       WHERE user_id=$1 AND provider_code=$2 AND period_start=$3`,
+      [userId, providerCode, periodStart, results, cost.toString(), apiCalls]
+    );
+
+    const { rows: ev } = await client.query(
+      `INSERT INTO provider_usage_events (
+         user_id, search_id, provider_code, event_type,
+         results_delta, api_calls_delta, cost_micro_usd_delta,
+         idempotency_key, pricing_version, metadata
+       ) VALUES ($1,$2,$3,'reserve',$4,$5,$6,$7,$8,$9::jsonb) RETURNING *`,
+      [userId, searchId, providerCode, results, apiCalls, cost.toString(), key, pricing.pricingVersion,
+        JSON.stringify({ periodStart, periodEnd })]
+    );
+
+    if (ownClient) await client.query('COMMIT');
+    return {
+      ok: true,
+      reservedResults: results,
+      reservedCostMicroUsd: cost.toString(),
+      reservedApiCalls: apiCalls,
+      pricingVersion: pricing.pricingVersion,
+      idempotencyKey: key,
+      eventId: ev[0].id,
+    };
+  } catch (err) {
+    if (ownClient) { try { await client.query('ROLLBACK'); } catch (_) {} }
+    throw err;
+  } finally {
+    if (ownClient) client.release();
+  }
+}
+
+async function commit({
+  userId, providerCode, periodStart,
+  reservedResults, reservedCostMicroUsd, reservedApiCalls = 0,
+  actualResults, actualApiCalls = 0, includeFixedCost = false,
+  searchId = null, idempotencyKey = null, client: externalClient,
+  pendingRemote = false,
+}) {
+  const ownClient = !externalClient;
+  const client = externalClient || (await getPool().connect());
+  const key = idempotencyKey || `commit:${userId}:${providerCode}:${searchId || crypto.randomUUID()}`;
+
+  try {
+    if (ownClient) await client.query('BEGIN');
+    const existing = await client.query(`SELECT * FROM provider_usage_events WHERE idempotency_key = $1`, [key]);
+    if (existing.rows[0]) {
+      if (ownClient) await client.query('COMMIT');
+      return { ok: true, replayed: true };
+    }
+
+    await client.query(
+      `SELECT id FROM provider_usage WHERE user_id=$1 AND provider_code=$2 AND period_start=$3 FOR UPDATE`,
+      [userId, providerCode, periodStart]
+    );
+
+    const pricing = await getActivePricing(providerCode, client);
+    const actualCost = BigInt(actualResults) * pricing.unitCostMicroUsd
+      + (includeFixedCost ? pricing.fixedExecutionCostMicroUsd : 0n);
+    const reservedCost = toBigIntSafe(reservedCostMicroUsd);
+
+    const excessResults = Math.max(0, actualResults - reservedResults);
+    const excessCost = actualCost > reservedCost ? actualCost - reservedCost : 0n;
+
+    // Clear full reservation, then add actual used (may exceed original reservation)
+    await client.query(
+      `UPDATE provider_usage SET
+         results_reserved = GREATEST(0, results_reserved - $4),
+         cost_micro_usd_reserved = GREATEST(0, cost_micro_usd_reserved - $5),
+         api_calls_reserved = GREATEST(0, api_calls_reserved - $6),
+         results_used = results_used + $7,
+         cost_micro_usd_used = cost_micro_usd_used + $8,
+         api_calls_used = api_calls_used + $9,
+         updated_at = NOW()
+       WHERE user_id=$1 AND provider_code=$2 AND period_start=$3`,
+      [
+        userId, providerCode, periodStart,
+        reservedResults, reservedCost.toString(), reservedApiCalls,
+        actualResults, actualCost.toString(), actualApiCalls,
+      ]
+    );
+
+    const eventType = excessResults > 0 || excessCost > 0n ? 'excess' : 'commit';
+    await client.query(
+      `INSERT INTO provider_usage_events (
+         user_id, search_id, provider_code, event_type,
+         results_delta, api_calls_delta, cost_micro_usd_delta,
+         excess_results, excess_cost_micro_usd,
+         idempotency_key, pricing_version, metadata
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
+      [
+        userId, searchId, providerCode, eventType,
+        actualResults, actualApiCalls, actualCost.toString(),
+        excessResults, excessCost.toString(),
+        key, pricing.pricingVersion,
+        JSON.stringify({ reservedResults, reservedCostMicroUsd: reservedCost.toString(), pendingRemote: !!pendingRemote }),
+      ]
+    );
+
+    if (ownClient) await client.query('COMMIT');
+    return {
+      ok: true,
+      usedResults: actualResults,
+      usedCostMicroUsd: actualCost.toString(),
+      usedApiCalls: actualApiCalls,
+      excessResults,
+      excessCostMicroUsd: excessCost.toString(),
+      pricingVersion: pricing.pricingVersion,
+    };
+  } catch (err) {
+    if (ownClient) { try { await client.query('ROLLBACK'); } catch (_) {} }
+    throw err;
+  } finally {
+    if (ownClient) client.release();
+  }
+}
+
+async function release({
+  userId, providerCode, periodStart,
+  reservedResults, reservedCostMicroUsd, reservedApiCalls = 0,
+  searchId = null, idempotencyKey = null, client: externalClient,
+  reason = 'release',
+}) {
+  const ownClient = !externalClient;
+  const client = externalClient || (await getPool().connect());
+  const key = idempotencyKey || `release:${userId}:${providerCode}:${searchId || crypto.randomUUID()}`;
+
+  try {
+    if (ownClient) await client.query('BEGIN');
+    const existing = await client.query(`SELECT id FROM provider_usage_events WHERE idempotency_key = $1`, [key]);
+    if (existing.rows[0]) {
+      if (ownClient) await client.query('COMMIT');
+      return { ok: true, replayed: true };
+    }
+
+    await client.query(
+      `UPDATE provider_usage SET
+         results_reserved = GREATEST(0, results_reserved - $4),
+         cost_micro_usd_reserved = GREATEST(0, cost_micro_usd_reserved - $5),
+         api_calls_reserved = GREATEST(0, api_calls_reserved - $6),
+         updated_at = NOW()
+       WHERE user_id=$1 AND provider_code=$2 AND period_start=$3`,
+      [userId, providerCode, periodStart, reservedResults, String(reservedCostMicroUsd || 0), reservedApiCalls]
+    );
+
+    await client.query(
+      `INSERT INTO provider_usage_events (
+         user_id, search_id, provider_code, event_type,
+         results_delta, api_calls_delta, cost_micro_usd_delta,
+         idempotency_key, metadata
+       ) VALUES ($1,$2,$3,'release',$4,$5,$6,$7,$8::jsonb)`,
+      [userId, searchId, providerCode, -reservedResults, -reservedApiCalls, String(-(Number(reservedCostMicroUsd) || 0)), key, JSON.stringify({ reason })]
+    );
+
+    if (ownClient) await client.query('COMMIT');
+    return { ok: true };
+  } catch (err) {
+    if (ownClient) { try { await client.query('ROLLBACK'); } catch (_) {} }
+    throw err;
+  } finally {
+    if (ownClient) client.release();
+  }
+}
+
+async function getTomTomGlobalConfig() {
+  try {
+    const { rows } = await getPool().query(`SELECT value FROM system_settings WHERE key = 'tomtom_global_quota'`);
+    const v = rows[0] && rows[0].value ? rows[0].value : {};
+    const max = v.max_calls_per_period != null ? Number(v.max_calls_per_period) : null;
+    const periodDays = v.period_days != null ? Number(v.period_days) : 30;
+    return {
+      maxCallsPerPeriod: Number.isFinite(max) && max > 0 ? max : null,
+      periodDays: Number.isFinite(periodDays) && periodDays > 0 ? periodDays : 30,
+    };
+  } catch (_) {
+    return { maxCallsPerPeriod: null, periodDays: 30 };
+  }
+}
+
+function globalPeriodWindow(periodDays, now = new Date()) {
+  const dayMs = periodDays * 24 * 60 * 60 * 1000;
+  const startMs = Math.floor(now.getTime() / dayMs) * dayMs;
+  return {
+    periodStart: new Date(startMs).toISOString(),
+    periodEnd: new Date(startMs + dayMs).toISOString(),
+  };
+}
+
+async function reserveGlobalTomTomCalls(calls, { searchId = null, idempotencyKey = null } = {}) {
+  const cfg = await getTomTomGlobalConfig();
+  if (cfg.maxCallsPerPeriod == null) {
+    return { ok: true, unlimited: true, reservedCalls: calls };
+  }
+  const window = globalPeriodWindow(cfg.periodDays);
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO provider_global_usage (provider_code, period_start, period_end)
+       VALUES ('tomtom', $1, $2) ON CONFLICT (provider_code, period_start) DO NOTHING`,
+      [window.periodStart, window.periodEnd]
+    );
+    const { rows } = await client.query(
+      `SELECT * FROM provider_global_usage WHERE provider_code='tomtom' AND period_start=$1 FOR UPDATE`,
+      [window.periodStart]
+    );
+    const row = rows[0];
+    const committed = row.calls_used + row.calls_reserved;
+    if (committed + calls > cfg.maxCallsPerPeriod) {
+      await client.query('ROLLBACK');
+      return { ok: false, reason: 'GLOBAL_TOMTOM_LIMIT', remaining: Math.max(0, cfg.maxCallsPerPeriod - committed) };
+    }
+    await client.query(
+      `UPDATE provider_global_usage SET calls_reserved = calls_reserved + $2, updated_at = NOW()
+       WHERE provider_code='tomtom' AND period_start=$1`,
+      [window.periodStart, calls]
+    );
+    await client.query('COMMIT');
+    return { ok: true, reservedCalls: calls, periodStart: window.periodStart, periodEnd: window.periodEnd, idempotencyKey };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function commitGlobalTomTomCalls(periodStart, reservedCalls, actualCalls) {
+  if (!periodStart) return { ok: true, skipped: true };
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE provider_global_usage SET
+         calls_reserved = GREATEST(0, calls_reserved - $2),
+         calls_used = calls_used + $3, updated_at = NOW()
+       WHERE provider_code='tomtom' AND period_start=$1`,
+      [periodStart, reservedCalls, actualCalls]
+    );
+    await client.query('COMMIT');
+    return { ok: true };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function releaseGlobalTomTomCalls(periodStart, reservedCalls) {
+  return commitGlobalTomTomCalls(periodStart, reservedCalls, 0);
+}
+
+async function getUserUsageSummary(userId, periodStart) {
+  const { rows } = await getPool().query(
+    `SELECT * FROM provider_usage WHERE user_id=$1 AND period_start=$2 ORDER BY provider_code`,
+    [userId, periodStart]
+  );
+  return rows.map((r) => ({
+    providerCode: r.provider_code,
+    periodStart: r.period_start,
+    periodEnd: r.period_end,
+    resultsUsed: r.results_used,
+    resultsReserved: r.results_reserved,
+    costMicroUsdUsed: bigToNumber(r.cost_micro_usd_used),
+    costMicroUsdReserved: bigToNumber(r.cost_micro_usd_reserved),
+    apiCallsUsed: r.api_calls_used,
+    apiCallsReserved: r.api_calls_reserved,
+  }));
+}
+
+module.exports = {
+  getActivePricing, reserve, commit, release,
+  getTomTomGlobalConfig, reserveGlobalTomTomCalls, commitGlobalTomTomCalls, releaseGlobalTomTomCalls,
+  getUserUsageSummary, globalPeriodWindow, toBigIntSafe, bigToNumber,
+};
