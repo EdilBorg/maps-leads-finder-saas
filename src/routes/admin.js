@@ -1,6 +1,6 @@
 /**
  * Admin routes.
- * Legacy OSM diagnostic endpoint removed — providers are apify/tomtom/foursquare only.
+ * Legacy OSM diagnostic endpoint removed — providers are apify/tomtom/brightdata only.
  */
 
 const express = require('express');
