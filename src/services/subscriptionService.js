@@ -13,7 +13,6 @@ async function getPeriodDays(client) {
     const days = rows[0] && rows[0].value && Number(rows[0].value.days);
     return Number.isFinite(days) && days > 0 ? days : PERIOD_DAYS_DEFAULT;
   } catch (err) {
-    // Missing settings row/table → default. Propagate connection failures in test if flagged.
     if (err && (err.code === '42P01' || err.code === '42703')) return PERIOD_DAYS_DEFAULT;
     if (process.env.STRICT_DB_ERRORS === '1') throw err;
     return PERIOD_DAYS_DEFAULT;
@@ -33,8 +32,14 @@ async function getActiveSubscription(userId, client) {
   return rows[0] ? mapSubscription(rows[0]) : null;
 }
 
-function resolvePeriodWindow(subscription, now = new Date(), periodDays = PERIOD_DAYS_DEFAULT) {
+function resolvePeriodWindow(subscription, now = new Date(), periodDaysOverride = null) {
   if (!subscription || !subscription.startsAt) return null;
+  let periodDays = PERIOD_DAYS_DEFAULT;
+  if (subscription.periodDays != null && Number.isFinite(Number(subscription.periodDays)) && Number(subscription.periodDays) > 0) {
+    periodDays = Number(subscription.periodDays);
+  } else if (periodDaysOverride != null && Number.isFinite(Number(periodDaysOverride)) && Number(periodDaysOverride) > 0) {
+    periodDays = Number(periodDaysOverride);
+  }
   const startMs = new Date(subscription.startsAt).getTime();
   const nowMs = now.getTime();
   if (nowMs < startMs) return null;
@@ -61,7 +66,8 @@ async function activateSubscription({ userId, planId, source = 'manual', externa
   const db = client || (await getPool().connect());
   try {
     if (own) await db.query('BEGIN');
-    const periodDays = await getPeriodDays(db);
+    await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [userId]);
+    const periodDays = PERIOD_DAYS_DEFAULT;
     const startsAt = new Date();
     const endsAt = new Date(startsAt.getTime() + periodDays * 24 * 60 * 60 * 1000);
     await db.query(
@@ -70,9 +76,10 @@ async function activateSubscription({ userId, planId, source = 'manual', externa
       [userId]
     );
     const { rows } = await db.query(
-      `INSERT INTO subscriptions (user_id, plan_id, status, starts_at, ends_at, source, external_ref)
-       VALUES ($1,$2,'active',$3,$4,$5,$6) RETURNING *`,
-      [userId, planId, startsAt.toISOString(), endsAt.toISOString(), source, externalRef]
+      `INSERT INTO subscriptions (
+         user_id, plan_id, status, starts_at, ends_at, source, external_ref, period_days
+       ) VALUES ($1,$2,'active',$3,$4,$5,$6,$7) RETURNING *`,
+      [userId, planId, startsAt.toISOString(), endsAt.toISOString(), source, externalRef, periodDays]
     );
     if (own) await db.query('COMMIT');
     return mapSubscription(rows[0]);
@@ -110,6 +117,7 @@ function mapSubscription(row) {
     planName: row.plan_name || null, status: row.status,
     startsAt: row.starts_at, endsAt: row.ends_at, source: row.source,
     externalRef: row.external_ref,
+    periodDays: row.period_days != null ? Number(row.period_days) : PERIOD_DAYS_DEFAULT,
     maxResultsPerSearch: row.max_results_per_search != null ? row.max_results_per_search : null,
     features: row.features || null,
     createdAt: row.created_at, updatedAt: row.updated_at,
