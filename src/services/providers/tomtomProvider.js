@@ -57,6 +57,10 @@ function mapItem(r, idx, criteria) {
   };
 }
 
+/**
+ * @param {object} criteria
+ * @param {{ signal?: AbortSignal }} [opts]
+ */
 function resolveSignal(second) {
   if (!second) return undefined;
   if (typeof second.aborted === 'boolean') return second;

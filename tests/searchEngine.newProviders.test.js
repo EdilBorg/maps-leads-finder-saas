@@ -13,18 +13,18 @@ const {
 } = require('../src/services/searchEngine');
 
 describe('new search engine', () => {
-  it('uses apify, tomtom, foursquare', () => {
-    assert.deepEqual(PROVIDER_CODES, ['apify', 'tomtom', 'foursquare']);
+  it('uses apify, tomtom, brightdata', () => {
+    assert.deepEqual(PROVIDER_CODES, ['apify', 'tomtom', 'brightdata']);
   });
 
-  it('provider max limits are 200/200/50', () => {
+  it('provider max limits are 200/200/200', () => {
     assert.equal(PROVIDER_MAX.apify, 200);
     assert.equal(PROVIDER_MAX.tomtom, 200);
-    assert.equal(PROVIDER_MAX.foursquare, 50);
+    assert.equal(PROVIDER_MAX.brightdata, 200);
     assert.equal(providerLimit('apify', 500), 200);
     assert.equal(providerLimit('tomtom', 300), 200);
-    assert.equal(providerLimit('foursquare', 500), 50);
-    assert.equal(providerLimit('foursquare', 100), 50);
+    assert.equal(providerLimit('brightdata', 500), 200);
+    assert.equal(providerLimit('brightdata', 100), 100);
     assert.equal(providerLimit('apify', 100), 100);
   });
 
@@ -120,12 +120,12 @@ describe('new search engine', () => {
         code: 'tomtom',
         search: async () => ({ status: 'error', results: [], errorCode: 'HTTP_ERROR', httpStatus: 500, errorStage: 'poi' }),
       },
-      foursquare: {
-        code: 'foursquare',
+      brightdata: {
+        code: 'brightdata',
         search: async () => ({
           status: 'ok',
           results: [
-            { name: 'B', phone: '922222222', address: 'R2', sourceProvider: 'foursquare', externalId: '2' },
+            { name: 'B', phone: '922222222', address: 'R2', sourceProvider: 'brightdata', externalId: '2' },
           ],
         }),
       },
@@ -139,7 +139,7 @@ describe('new search engine', () => {
     assert.ok(result2.results.length >= 1);
     assert.ok(['partial', 'completed'].includes(result2.searchStatus));
     const codes = result2._providers.map((p) => p.code).sort();
-    assert.deepEqual(codes, ['apify', 'foursquare', 'tomtom']);
+    assert.deepEqual(codes, ['apify', 'brightdata', 'tomtom']);
     const tt = result2._providers.find((p) => p.code === 'tomtom');
     assert.equal(tt.errorCode, 'HTTP_ERROR');
   });
@@ -155,8 +155,8 @@ describe('new search engine', () => {
         code: 'tomtom',
         search: async () => ({ status: 'empty', results: [] }),
       },
-      foursquare: {
-        code: 'foursquare',
+      brightdata: {
+        code: 'brightdata',
         search: async () => ({ status: 'not_configured', results: [] }),
       },
     };
@@ -167,7 +167,7 @@ describe('new search engine', () => {
     const codes = new Set(events.map((e) => e.code));
     assert.ok(codes.has('apify'));
     assert.ok(codes.has('tomtom'));
-    assert.ok(codes.has('foursquare'));
+    assert.ok(codes.has('brightdata'));
     assert.ok(events.some((e) => e.status === 'running'));
     assert.ok(events.some((e) => e.status === 'ok' || e.count > 0));
   });
@@ -183,7 +183,7 @@ describe('new search engine', () => {
         providers: {
           apify: { code: 'apify', search: async () => ({ status: 'ok', results: [{ name: 'Z', sourceProvider: 'apify', externalId: 'z' }] }) },
           tomtom: { code: 'tomtom', search: async () => ({ status: 'ok', results: [] }) },
-          foursquare: { code: 'foursquare', search: async () => ({ status: 'ok', results: [] }) },
+          brightdata: { code: 'brightdata', search: async () => ({ status: 'ok', results: [] }) },
         },
       },
       { signal: controller.signal }
@@ -207,7 +207,7 @@ describe('new search engine', () => {
       providers: {
         apify: { code: 'apify', search: async () => ({ status: 'ok', results: many }) },
         tomtom: { code: 'tomtom', search: async () => ({ status: 'empty', results: [] }) },
-        foursquare: { code: 'foursquare', search: async () => ({ status: 'empty', results: [] }) },
+        brightdata: { code: 'brightdata', search: async () => ({ status: 'empty', results: [] }) },
       },
     });
     assert.ok(result.results.length <= 100);
@@ -224,14 +224,14 @@ describe('new search engine', () => {
         code: 'tomtom',
         search: async (c) => { seen.tomtom = c.limit; return { status: 'empty', results: [] }; },
       },
-      foursquare: {
-        code: 'foursquare',
-        search: async (c) => { seen.foursquare = c.limit; return { status: 'empty', results: [] }; },
+      brightdata: {
+        code: 'brightdata',
+        search: async (c) => { seen.brightdata = c.limit; return { status: 'empty', results: [] }; },
       },
     };
     await executeSearch({ query: 'q', location: 'l', limit: 500, providers });
     assert.equal(seen.apify, 200);
     assert.equal(seen.tomtom, 200);
-    assert.equal(seen.foursquare, 50);
+    assert.equal(seen.brightdata, 200);
   });
 });

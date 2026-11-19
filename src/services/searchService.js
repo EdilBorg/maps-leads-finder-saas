@@ -192,7 +192,7 @@ async function startSearch(opts) {
           JSON.stringify([
             { code: 'apify', status: 'pending', count: 0 },
             { code: 'tomtom', status: 'pending', count: 0 },
-            { code: 'foursquare', status: 'pending', count: 0 },
+            { code: 'brightdata', status: 'pending', count: 0 },
           ]),
           String(RETENTION_DAYS),
         ]

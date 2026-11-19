@@ -1,14 +1,14 @@
 /**
  * Search engine: parallel providers, normalize, dedupe, filters, limits.
- * Providers: apify, tomtom, foursquare only.
+ * Providers: apify, tomtom, brightdata only.
  */
 const apify = require('./providers/apifyProvider');
 const tomtom = require('./providers/tomtomProvider');
-const foursquare = require('./providers/foursquareProvider');
+const brightdata = require('./providers/brightDataProvider');
 
-const PROVIDER_CODES = Object.freeze(['apify', 'tomtom', 'foursquare']);
+const PROVIDER_CODES = Object.freeze(['apify', 'tomtom', 'brightdata']);
 const ALLOWED_LIMITS = Object.freeze([100, 200, 300, 400, 500]);
-const PROVIDER_MAX = Object.freeze({ apify: 200, tomtom: 200, foursquare: 50 });
+const PROVIDER_MAX = Object.freeze({ apify: 200, tomtom: 200, brightdata: 200 });
 
 function normalizeLimit(value) {
   const n = parseInt(value, 10);
@@ -390,7 +390,7 @@ function classifySearchOutcome(statuses, hasResults) {
 const DEFAULT_PROVIDERS = {
   apify,
   tomtom,
-  foursquare,
+  brightdata,
 };
 
 async function executeSearch(input, opts = {}) {
@@ -483,7 +483,7 @@ async function executeSearch(input, opts = {}) {
   };
 }
 
-/** Google Place IDs typically start with ChIJ. Never treat TomTom/Foursquare IDs as place IDs. */
+/** Google Place IDs typically start with ChIJ. Never treat TomTom/non-Google external IDs as place IDs. */
 function isGooglePlaceId(id) {
   if (!id || typeof id !== 'string') return false;
   const s = id.trim();
@@ -494,7 +494,7 @@ function publicLead(lead, index) {
   const raw = lead.raw && typeof lead.raw === 'object' ? lead.raw : {};
   let googlePlaceId = null;
   const candidates = [lead.googlePlaceId, raw.placeId, raw.googlePlaceId];
-  if (lead.sourceProvider === 'apify' && isGooglePlaceId(lead.externalId)) {
+  if ((lead.sourceProvider === 'apify' || lead.sourceProvider === 'brightdata') && isGooglePlaceId(lead.externalId)) {
     candidates.unshift(lead.externalId);
   }
   for (const c of candidates) {

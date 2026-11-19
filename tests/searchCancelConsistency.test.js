@@ -10,7 +10,7 @@ describe('cancel provider consistency', () => {
     const out = markPendingProvidersCancelled([
       { code: 'apify', status: 'running', count: 0 },
       { code: 'tomtom', status: 'pending', count: 0 },
-      { code: 'foursquare', status: 'running', count: 3 },
+      { code: 'brightdata', status: 'running', count: 3 },
     ]);
     assert.deepEqual(
       out.map((p) => p.status),
@@ -23,7 +23,7 @@ describe('cancel provider consistency', () => {
     const out = markPendingProvidersCancelled([
       { code: 'apify', status: 'completed', count: 12 },
       { code: 'tomtom', status: 'running', count: 0 },
-      { code: 'foursquare', status: 'pending', count: 0 },
+      { code: 'brightdata', status: 'pending', count: 0 },
     ]);
     assert.equal(out[0].status, 'completed');
     assert.equal(out[0].count, 12);
@@ -35,7 +35,7 @@ describe('cancel provider consistency', () => {
     const out = markPendingProvidersCancelled([
       { code: 'apify', status: 'no_results', count: 0 },
       { code: 'tomtom', status: 'not_configured', count: 0 },
-      { code: 'foursquare', status: 'failed', count: 0, errorCode: 'HTTP_ERROR' },
+      { code: 'brightdata', status: 'failed', count: 0, errorCode: 'HTTP_ERROR' },
     ]);
     assert.equal(out[0].status, 'no_results');
     assert.equal(out[1].status, 'not_configured');

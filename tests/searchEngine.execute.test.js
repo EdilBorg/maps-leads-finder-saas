@@ -114,9 +114,9 @@ describe('runProviderSafe isolation', () => {
 });
 
 describe('executeSearch full pipeline with mocked providers', () => {
-  it('modality contract selects apify+tomtom+foursquare', () => {
+  it('modality contract selects apify+tomtom+brightdata', () => {
     assert.deepEqual(providersForModality('standard'), PROVIDER_CODES);
-    assert.deepEqual(PROVIDER_CODES, ['apify', 'tomtom', 'foursquare']);
+    assert.deepEqual(PROVIDER_CODES, ['apify', 'tomtom', 'brightdata']);
   });
 
   it('respects global limit after merge and dedupe', async () => {
@@ -124,9 +124,9 @@ describe('executeSearch full pipeline with mocked providers', () => {
     for (let i = 0; i < 80; i++) {
       a.push(lead(`A${i}`, `a${i}`, 'apify', { lat: i, lng: i }));
       t.push(lead(`T${i}`, `t${i}`, 'tomtom', { lat: i + 100, lng: i }));
-      f.push(lead(`F${i}`, `f${i}`, 'foursquare', { lat: i + 200, lng: i }));
+      f.push(lead(`F${i}`, `f${i}`, 'brightdata', { lat: i + 200, lng: i }));
     }
-    const r = await executeSearch(baseInput({ apify: mockProvider('apify', 'ok', a), tomtom: mockProvider('tomtom', 'ok', t), foursquare: mockProvider('foursquare', 'ok', f) }));
+    const r = await executeSearch(baseInput({ apify: mockProvider('apify', 'ok', a), tomtom: mockProvider('tomtom', 'ok', t), brightdata: mockProvider('brightdata', 'ok', f) }));
     assert.ok(r.totals.returned <= 100);
     assert.equal(r.results.length, r.totals.returned);
     assert.ok(r.totals.raw >= r.totals.afterDedup);
@@ -136,7 +136,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'ok', [lead('A', '1', 'apify', { lat: 1, lng: 1 })]),
       tomtom: mockProvider('tomtom', 'ok', [lead('B', '2', 'tomtom', { lat: 2, lng: 2 })]),
-      foursquare: mockProvider('foursquare', 'ok', [lead('C', '3', 'foursquare', { lat: 3, lng: 3 })]),
+      brightdata: mockProvider('brightdata', 'ok', [lead('C', '3', 'brightdata', { lat: 3, lng: 3 })]),
     }));
     assert.equal(r.outcome, 'results');
     assert.ok(r.results.length >= 3);
@@ -147,7 +147,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'ok', [lead('A', '1', 'apify', { lat: 1, lng: 1 })]),
       tomtom: mockProvider('tomtom', 'empty', []),
-      foursquare: mockProvider('foursquare', 'empty', []),
+      brightdata: mockProvider('brightdata', 'empty', []),
     }));
     assert.equal(r.outcome, 'results');
     assert.ok(r.results.length >= 1);
@@ -157,7 +157,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'empty', []),
       tomtom: mockProvider('tomtom', 'ok', [lead('B', '2', 'tomtom', { lat: 2, lng: 2 })]),
-      foursquare: mockProvider('foursquare', 'empty', []),
+      brightdata: mockProvider('brightdata', 'empty', []),
     }));
     assert.equal(r.outcome, 'results');
   });
@@ -166,7 +166,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'ok', [lead('A', '1', 'apify', { lat: 1, lng: 1 })]),
       tomtom: mockProvider('tomtom', 'error', []),
-      foursquare: mockProvider('foursquare', 'empty', []),
+      brightdata: mockProvider('brightdata', 'empty', []),
     }));
     assert.equal(r.searchStatus, 'partial');
     assert.equal(r.outcome, 'results');
@@ -176,7 +176,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'error', []),
       tomtom: mockProvider('tomtom', 'ok', [lead('B', '2', 'tomtom', { lat: 2, lng: 2 })]),
-      foursquare: mockProvider('foursquare', 'ok', [lead('C', '3', 'foursquare', { lat: 3, lng: 3 })]),
+      brightdata: mockProvider('brightdata', 'ok', [lead('C', '3', 'brightdata', { lat: 3, lng: 3 })]),
     }));
     assert.equal(r.outcome, 'results');
     assert.ok(r.results.length >= 2);
@@ -186,7 +186,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'empty', []),
       tomtom: mockProvider('tomtom', 'empty', []),
-      foursquare: mockProvider('foursquare', 'empty', []),
+      brightdata: mockProvider('brightdata', 'empty', []),
     }));
     assert.equal(r.outcome, 'no_results');
     assert.equal(r.searchStatus, 'completed');
@@ -196,7 +196,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'error', []),
       tomtom: mockProvider('tomtom', 'error', []),
-      foursquare: mockProvider('foursquare', 'error', []),
+      brightdata: mockProvider('brightdata', 'error', []),
     }));
     assert.equal(r.outcome, 'error');
     assert.equal(r.searchStatus, 'failed');
@@ -206,7 +206,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'empty', []),
       tomtom: mockProvider('tomtom', 'error', []),
-      foursquare: mockProvider('foursquare', 'empty', []),
+      brightdata: mockProvider('brightdata', 'empty', []),
     }));
     assert.equal(r.outcome, 'inconclusive');
   });
@@ -215,7 +215,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'ok', [], { throwError: true }),
       tomtom: mockProvider('tomtom', 'ok', [lead('B', '2', 'tomtom', { lat: 2, lng: 2 })]),
-      foursquare: mockProvider('foursquare', 'ok', [lead('C', '3', 'foursquare', { lat: 3, lng: 3 })]),
+      brightdata: mockProvider('brightdata', 'ok', [lead('C', '3', 'brightdata', { lat: 3, lng: 3 })]),
     }));
     assert.equal(r._providers.find((p) => p.code === 'apify').status, 'error');
     assert.equal(r._providers.find((p) => p.code === 'tomtom').status, 'ok');
@@ -226,7 +226,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'ok', [], { throwError: true }),
       tomtom: mockProvider('tomtom', 'ok', [], { throwError: true }),
-      foursquare: mockProvider('foursquare', 'ok', [], { throwError: true }),
+      brightdata: mockProvider('brightdata', 'ok', [], { throwError: true }),
     }));
     assert.equal(r.searchStatus, 'failed');
   });
@@ -235,7 +235,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'ok', [lead('A', '1', 'apify', { lat: 1, lng: 1 })]),
       tomtom: { code: 'tomtom' },
-      foursquare: mockProvider('foursquare', 'empty', []),
+      brightdata: mockProvider('brightdata', 'empty', []),
     }));
     assert.equal(r._providers.find((p) => p.code === 'tomtom').status, 'error');
     assert.ok(r.results.length >= 1);
@@ -245,7 +245,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'ok', [], { raw: null }),
       tomtom: mockProvider('tomtom', 'ok', [lead('B', '2', 'tomtom', { lat: 2, lng: 2 })]),
-      foursquare: mockProvider('foursquare', 'empty', []),
+      brightdata: mockProvider('brightdata', 'empty', []),
     }));
     assert.ok(r.results.length >= 1);
   });
@@ -254,7 +254,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'ok', [], { raw: { status: 'ok', results: 'not-array' } }),
       tomtom: mockProvider('tomtom', 'empty', []),
-      foursquare: mockProvider('foursquare', 'empty', []),
+      brightdata: mockProvider('brightdata', 'empty', []),
     }));
     assert.equal(r._providers.length, 3);
   });
@@ -263,7 +263,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'not_configured', []),
       tomtom: mockProvider('tomtom', 'not_configured', []),
-      foursquare: mockProvider('foursquare', 'not_configured', []),
+      brightdata: mockProvider('brightdata', 'not_configured', []),
     }));
     assert.ok(r._providers.every((p) => p.status === 'not_configured'));
     assert.equal(r.searchStatus, 'failed');
@@ -273,7 +273,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'ok', [lead('Same', '1', 'apify', { phone: '+351900000001', lat: 10, lng: 10 })]),
       tomtom: mockProvider('tomtom', 'ok', [lead('Same', '2', 'tomtom', { phone: '+351900000001', lat: 10.00001, lng: 10 })]),
-      foursquare: mockProvider('foursquare', 'ok', [lead('Other', '3', 'foursquare', { lat: 20, lng: 20 })]),
+      brightdata: mockProvider('brightdata', 'ok', [lead('Other', '3', 'brightdata', { lat: 20, lng: 20 })]),
     }));
     const t = r.totals;
     assert.ok(t.raw >= t.normalized);
@@ -287,7 +287,7 @@ describe('executeSearch full pipeline with mocked providers', () => {
     const r = await executeSearch(baseInput({
       apify: mockProvider('apify', 'ok', [lead('A', '1', 'apify', { lat: 1, lng: 1 })]),
       tomtom: mockProvider('tomtom', 'empty', []),
-      foursquare: mockProvider('foursquare', 'empty', []),
+      brightdata: mockProvider('brightdata', 'empty', []),
     }));
     for (const row of r.results) {
       assert.equal(Object.prototype.hasOwnProperty.call(row, 'errorCode'), false);
@@ -302,9 +302,9 @@ describe('executeSearch full pipeline with mocked providers', () => {
       osm: mockProvider('osm', 'ok', [lead('O', 'o1', 'osm')]),
       apify: mockProvider('apify', 'ok', [lead('A', 'a1', 'apify', { lat: 5, lng: 5 })]),
       tomtom: mockProvider('tomtom', 'empty', []),
-      foursquare: mockProvider('foursquare', 'empty', []),
+      brightdata: mockProvider('brightdata', 'empty', []),
     }));
-    assert.ok(r._providers.every((p) => ['apify', 'tomtom', 'foursquare'].includes(p.code)));
+    assert.ok(r._providers.every((p) => ['apify', 'tomtom', 'brightdata'].includes(p.code)));
     assert.ok(r.results.some((x) => x.name === 'A'));
     assert.ok(!r.results.some((x) => x.name === 'G' || x.name === 'O'));
   });

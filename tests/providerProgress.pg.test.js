@@ -93,7 +93,7 @@ describe('provider progress persistence (pg)', { skip: !RUN }, () => {
     const searchId = await insertRunningSearch([
       { code: 'apify', status: 'pending', count: 0 },
       { code: 'tomtom', status: 'pending', count: 0 },
-      { code: 'foursquare', status: 'pending', count: 0 },
+      { code: 'brightdata', status: 'pending', count: 0 },
     ]);
     await updateProviderProgress(pool, searchId, ownedUserId, {
       code: 'apify', status: 'ok', count: 7,
@@ -115,12 +115,12 @@ describe('provider progress persistence (pg)', { skip: !RUN }, () => {
     const searchId = await insertRunningSearch([
       { code: 'apify', status: 'pending', count: 0 },
       { code: 'tomtom', status: 'pending', count: 0 },
-      { code: 'foursquare', status: 'pending', count: 0 },
+      { code: 'brightdata', status: 'pending', count: 0 },
     ]);
     await Promise.all([
       updateProviderProgress(pool, searchId, ownedUserId, { code: 'apify', status: 'ok', count: 10 }),
       updateProviderProgress(pool, searchId, ownedUserId, { code: 'tomtom', status: 'empty', count: 0 }),
-      updateProviderProgress(pool, searchId, ownedUserId, { code: 'foursquare', status: 'ok', count: 5 }),
+      updateProviderProgress(pool, searchId, ownedUserId, { code: 'brightdata', status: 'ok', count: 5 }),
     ]);
     const { rows } = await pool.query(
       `SELECT providers_used FROM searches WHERE id=$1`, [searchId]
@@ -129,8 +129,8 @@ describe('provider progress persistence (pg)', { skip: !RUN }, () => {
     assert.equal(by.apify.status, 'completed');
     assert.equal(by.apify.count, 10);
     assert.equal(by.tomtom.status, 'no_results');
-    assert.equal(by.foursquare.status, 'completed');
-    assert.equal(by.foursquare.count, 5);
+    assert.equal(by.brightdata.status, 'completed');
+    assert.equal(by.brightdata.count, 5);
   });
 
   it('refuses updates when search is cancelled', async () => {
@@ -138,7 +138,7 @@ describe('provider progress persistence (pg)', { skip: !RUN }, () => {
     const searchId = await insertRunningSearch([
       { code: 'apify', status: 'running', count: 0 },
       { code: 'tomtom', status: 'pending', count: 0 },
-      { code: 'foursquare', status: 'pending', count: 0 },
+      { code: 'brightdata', status: 'pending', count: 0 },
     ]);
     await pool.query(
       `UPDATE searches SET status='cancelled', completed_at=NOW() WHERE id=$1`,
@@ -160,7 +160,7 @@ describe('provider progress persistence (pg)', { skip: !RUN }, () => {
     const searchId = await insertRunningSearch([
       { code: 'apify', status: 'completed', count: 3 },
       { code: 'tomtom', status: 'completed', count: 2 },
-      { code: 'foursquare', status: 'no_results', count: 0 },
+      { code: 'brightdata', status: 'no_results', count: 0 },
     ]);
     await pool.query(
       `UPDATE searches SET status='completed', completed_at=NOW() WHERE id=$1`,
@@ -182,7 +182,7 @@ describe('provider progress persistence (pg)', { skip: !RUN }, () => {
     const searchId = await insertRunningSearch([
       { code: 'apify', status: 'failed', count: 0 },
       { code: 'tomtom', status: 'pending', count: 0 },
-      { code: 'foursquare', status: 'pending', count: 0 },
+      { code: 'brightdata', status: 'pending', count: 0 },
     ]);
     await pool.query(
       `UPDATE searches SET status='failed', completed_at=NOW() WHERE id=$1`,
