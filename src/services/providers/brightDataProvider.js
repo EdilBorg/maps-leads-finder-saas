@@ -84,6 +84,17 @@ function sleep(ms, signal) {
   });
 }
 
+function isValidLatLng(lat, lng) {
+  return (
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lng >= -180 &&
+    lng <= 180
+  );
+}
+
 /**
  * Resolve lat/lng/country for discovery input.
  * Prefer explicit criteria fields; otherwise geocode criteria.location via TomTom.
@@ -100,14 +111,19 @@ async function resolveGeo(criteria, signal) {
         : NaN;
   let country = toIso2Country(criteria.country);
 
-  if (Number.isFinite(lat) && Number.isFinite(lng) && country) {
+  if (isValidLatLng(lat, lng) && country) {
     return { lat, lng, country };
   }
 
   // Explicit coordinates without country: only accept operator-configured default (not invented).
-  if (Number.isFinite(lat) && Number.isFinite(lng) && !country) {
+  if (isValidLatLng(lat, lng) && !country) {
     const fallback = toIso2Country(process.env.BRIGHTDATA_DEFAULT_COUNTRY);
     if (fallback) return { lat, lng, country: fallback };
+  }
+
+  // Explicit but invalid coordinates: reject (do not geocode over bad coords).
+  if ((criteria.lat != null || criteria.lng != null || criteria.long != null) && !isValidLatLng(lat, lng)) {
+    return null;
   }
 
   const location = String(criteria.location || '').trim();
@@ -136,7 +152,7 @@ async function resolveGeo(criteria, signal) {
   if (!first || !first.position) return null;
   const gLat = Number(first.position.lat);
   const gLng = Number(first.position.lon != null ? first.position.lon : first.position.lng);
-  if (!Number.isFinite(gLat) || !Number.isFinite(gLng)) return null;
+  if (!isValidLatLng(gLat, gLng)) return null;
 
   const addr = first.address || {};
   // Prefer ISO2 countryCode; convert ISO3 properly — never .slice(0, 2).
@@ -446,6 +462,7 @@ module.exports = {
   resolveGeo,
   resolveSignal,
   toIso2Country,
+  isValidLatLng,
   sleep,
   MAX_RAW,
   DEFAULT_DATASET_ID,
