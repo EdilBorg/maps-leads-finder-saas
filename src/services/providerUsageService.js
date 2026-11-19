@@ -1,6 +1,7 @@
 /**
  * Atomic provider usage ledger: reserve → commit/release.
  * Never holds a transaction open across external HTTP calls.
+ * Pricing snapshot: reserve stores unit/fixed costs; commit uses exactly those values.
  */
 const crypto = require('crypto');
 
@@ -69,7 +70,21 @@ async function reserve({
     );
     if (existing.rows[0]) {
       if (ownClient) await client.query('COMMIT');
-      return { ok: true, replayed: true, event: existing.rows[0] };
+      const meta = existing.rows[0].metadata || {};
+      return {
+        ok: true,
+        replayed: true,
+        event: existing.rows[0],
+        reservedResults: existing.rows[0].results_delta,
+        reservedCostMicroUsd: String(existing.rows[0].cost_micro_usd_delta),
+        reservedApiCalls: existing.rows[0].api_calls_delta,
+        pricingVersion: existing.rows[0].pricing_version,
+        unitCostMicroUsd: meta.unitCostMicroUsd != null ? String(meta.unitCostMicroUsd) : '0',
+        fixedExecutionCostMicroUsd: meta.fixedExecutionCostMicroUsd != null ? String(meta.fixedExecutionCostMicroUsd) : '0',
+        includeFixedCost: !!meta.includeFixedCost,
+        idempotencyKey: key,
+        eventId: existing.rows[0].id,
+      };
     }
 
     await ensureUsageRow(client, userId, providerCode, periodStart, periodEnd);
@@ -114,6 +129,14 @@ async function reserve({
       [userId, providerCode, periodStart, results, cost.toString(), apiCalls]
     );
 
+    const pricingSnapshot = {
+      periodStart,
+      periodEnd,
+      unitCostMicroUsd: pricing.unitCostMicroUsd.toString(),
+      fixedExecutionCostMicroUsd: pricing.fixedExecutionCostMicroUsd.toString(),
+      includeFixedCost: !!includeFixedCost,
+    };
+
     const { rows: ev } = await client.query(
       `INSERT INTO provider_usage_events (
          user_id, search_id, provider_code, event_type,
@@ -121,7 +144,7 @@ async function reserve({
          idempotency_key, pricing_version, metadata
        ) VALUES ($1,$2,$3,'reserve',$4,$5,$6,$7,$8,$9::jsonb) RETURNING *`,
       [userId, searchId, providerCode, results, apiCalls, cost.toString(), key, pricing.pricingVersion,
-        JSON.stringify({ periodStart, periodEnd })]
+        JSON.stringify(pricingSnapshot)]
     );
 
     if (ownClient) await client.query('COMMIT');
@@ -131,6 +154,9 @@ async function reserve({
       reservedCostMicroUsd: cost.toString(),
       reservedApiCalls: apiCalls,
       pricingVersion: pricing.pricingVersion,
+      unitCostMicroUsd: pricing.unitCostMicroUsd.toString(),
+      fixedExecutionCostMicroUsd: pricing.fixedExecutionCostMicroUsd.toString(),
+      includeFixedCost: !!includeFixedCost,
       idempotencyKey: key,
       eventId: ev[0].id,
     };
@@ -148,6 +174,9 @@ async function commit({
   actualResults, actualApiCalls = 0, includeFixedCost = false,
   searchId = null, idempotencyKey = null, client: externalClient,
   pendingRemote = false,
+  // Immutable pricing snapshot from the reserve event — must be used when present
+  unitCostMicroUsd = null,
+  fixedExecutionCostMicroUsd = null,
 }) {
   const ownClient = !externalClient;
   const client = externalClient || (await getPool().connect());
@@ -166,9 +195,23 @@ async function commit({
       [userId, providerCode, periodStart]
     );
 
-    const pricing = await getActivePricing(providerCode, client);
-    const actualCost = BigInt(actualResults) * pricing.unitCostMicroUsd
-      + (includeFixedCost ? pricing.fixedExecutionCostMicroUsd : 0n);
+    // Prefer immutable snapshot from reserve; fall back to current pricing only if snapshot missing (legacy)
+    let unitCost;
+    let fixedCost;
+    let pricingVersion;
+    if (unitCostMicroUsd != null) {
+      unitCost = toBigIntSafe(unitCostMicroUsd);
+      fixedCost = toBigIntSafe(fixedExecutionCostMicroUsd || 0);
+      pricingVersion = null; // will be filled from event if needed
+    } else {
+      const pricing = await getActivePricing(providerCode, client);
+      unitCost = pricing.unitCostMicroUsd;
+      fixedCost = pricing.fixedExecutionCostMicroUsd;
+      pricingVersion = pricing.pricingVersion;
+    }
+
+    const actualCost = BigInt(actualResults) * unitCost
+      + (includeFixedCost ? fixedCost : 0n);
     const reservedCost = toBigIntSafe(reservedCostMicroUsd);
 
     const excessResults = Math.max(0, actualResults - reservedResults);
@@ -204,8 +247,15 @@ async function commit({
         userId, searchId, providerCode, eventType,
         actualResults, actualApiCalls, actualCost.toString(),
         excessResults, excessCost.toString(),
-        key, pricing.pricingVersion,
-        JSON.stringify({ reservedResults, reservedCostMicroUsd: reservedCost.toString(), pendingRemote: !!pendingRemote }),
+        key, pricingVersion,
+        JSON.stringify({
+          reservedResults,
+          reservedCostMicroUsd: reservedCost.toString(),
+          pendingRemote: !!pendingRemote,
+          unitCostMicroUsd: unitCost.toString(),
+          fixedExecutionCostMicroUsd: fixedCost.toString(),
+          includeFixedCost: !!includeFixedCost,
+        }),
       ]
     );
 
@@ -217,7 +267,7 @@ async function commit({
       usedApiCalls: actualApiCalls,
       excessResults,
       excessCostMicroUsd: excessCost.toString(),
-      pricingVersion: pricing.pricingVersion,
+      pricingVersion,
     };
   } catch (err) {
     if (ownClient) { try { await client.query('ROLLBACK'); } catch (_) {} }
@@ -274,18 +324,41 @@ async function release({
   }
 }
 
+/**
+ * Fail-closed: any DB / parse failure means the quota is treated as exhausted
+ * (maxCallsPerPeriod = 0) rather than unlimited. Only an explicit null in
+ * system_settings means unlimited.
+ */
 async function getTomTomGlobalConfig() {
   try {
     const { rows } = await getPool().query(`SELECT value FROM system_settings WHERE key = 'tomtom_global_quota'`);
-    const v = rows[0] && rows[0].value ? rows[0].value : {};
-    const max = v.max_calls_per_period != null ? Number(v.max_calls_per_period) : null;
-    const periodDays = v.period_days != null ? Number(v.period_days) : 30;
+    if (!rows[0] || rows[0].value == null) {
+      // No row → treat as unlimited only when explicitly configured that way elsewhere;
+      // default seed has null, which is intentional unlimited until admin sets a value.
+      return { maxCallsPerPeriod: null, periodDays: 30 };
+    }
+    const v = rows[0].value;
+    const maxRaw = v.max_calls_per_period;
+    let max = null;
+    if (maxRaw != null && maxRaw !== '') {
+      const n = Number(maxRaw);
+      if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
+        // Invalid value → fail closed (zero allowance)
+        return { maxCallsPerPeriod: 0, periodDays: 30, invalidConfig: true };
+      }
+      max = n > 0 ? n : null; // 0 or negative treated as unlimited? No: 0 = zero allowance
+      if (n === 0) max = 0;
+    }
+    const periodDaysRaw = v.period_days != null ? Number(v.period_days) : 30;
+    const periodDays = Number.isFinite(periodDaysRaw) && periodDaysRaw > 0 && periodDaysRaw <= 366
+      ? Math.floor(periodDaysRaw) : 30;
     return {
-      maxCallsPerPeriod: Number.isFinite(max) && max > 0 ? max : null,
-      periodDays: Number.isFinite(periodDays) && periodDays > 0 ? periodDays : 30,
+      maxCallsPerPeriod: max,
+      periodDays,
     };
-  } catch (_) {
-    return { maxCallsPerPeriod: null, periodDays: 30 };
+  } catch (err) {
+    // DB unavailable / query error → fail closed (deny further calls)
+    return { maxCallsPerPeriod: 0, periodDays: 30, configError: true, errorMessage: err.message };
   }
 }
 
@@ -299,9 +372,17 @@ function globalPeriodWindow(periodDays, now = new Date()) {
 }
 
 async function reserveGlobalTomTomCalls(calls, { searchId = null, userId = null, idempotencyKey = null } = {}) {
+  if (!Number.isFinite(calls) || calls < 0 || !Number.isInteger(calls)) {
+    const err = new Error('calls must be a non-negative integer');
+    err.code = 'VALIDATION';
+    throw err;
+  }
   const cfg = await getTomTomGlobalConfig();
   if (cfg.maxCallsPerPeriod == null) {
     return { ok: true, unlimited: true, reservedCalls: calls };
+  }
+  if (cfg.maxCallsPerPeriod === 0) {
+    return { ok: false, reason: 'GLOBAL_TOMTOM_LIMIT', remaining: 0, configError: !!cfg.configError || !!cfg.invalidConfig };
   }
   if (!idempotencyKey) {
     const err = new Error('idempotencyKey required for TomTom global reserve');
