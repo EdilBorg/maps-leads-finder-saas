@@ -57,13 +57,20 @@ function mapItem(r, idx, criteria) {
   };
 }
 
+function resolveSignal(second) {
+  if (!second) return undefined;
+  if (typeof second.aborted === 'boolean') return second;
+  if (second.signal && typeof second.signal.aborted === 'boolean') return second.signal;
+  return undefined;
+}
+
 /**
  * @param {object} criteria
- * @param {{ signal?: AbortSignal }} [opts]
+ * @param {AbortSignal|{signal?: AbortSignal}} [signalOrOpts]
  */
-async function search(criteria, opts = {}) {
+async function search(criteria, signalOrOpts) {
   if (!isConfigured()) return notConfigured(CODE);
-  const signal = opts.signal;
+  const signal = resolveSignal(signalOrOpts);
   const key = apiKey();
   const query = String(criteria.query || '').trim();
   const location = String(criteria.location || '').trim();
