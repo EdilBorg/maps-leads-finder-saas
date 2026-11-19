@@ -20,7 +20,20 @@ describe('brightDataProvider — toIso2Country', () => {
 
   it('returns null for unknown ISO3 (never invents with slice)', () => {
     assert.equal(provider.toIso2Country('ZZZ'), null);
-    assert.equal(provider.toIso2Country('XX'), 'XX');
+    assert.equal(provider.toIso2Country('XX'), null);
+    assert.equal(provider.toIso2Country('ZZ'), null);
+  });
+
+  it('accepts known ISO2 codes MZ and PT', () => {
+    assert.equal(provider.toIso2Country('MZ'), 'MZ');
+    assert.equal(provider.toIso2Country('mz'), 'MZ');
+    assert.equal(provider.toIso2Country('PT'), 'PT');
+  });
+
+  it('converts MOZ and rejects arbitrary XX/ZZ', () => {
+    assert.equal(provider.toIso2Country('MOZ'), 'MZ');
+    assert.equal(provider.toIso2Country('XX'), null);
+    assert.equal(provider.toIso2Country('ZZ'), null);
   });
 
   it('returns null for invalid or empty values', () => {
@@ -171,5 +184,66 @@ describe('brightDataProvider — resolveGeo', () => {
     });
     const geo = await provider.resolveGeo({ location: 'X' });
     assert.equal(geo, null);
+  });
+});
+
+describe('brightDataProvider — coordinate validation', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('accepts valid coordinates with ISO2 country', async () => {
+    global.fetch = async () => { throw new Error('fetch should not be called'); };
+    const geo = await provider.resolveGeo({ lat: -25.9, lng: 32.5, country: 'MZ' });
+    assert.deepEqual(geo, { lat: -25.9, lng: 32.5, country: 'MZ' });
+  });
+
+  it('accepts valid coordinates with ISO3 country', async () => {
+    global.fetch = async () => { throw new Error('fetch should not be called'); };
+    const geo = await provider.resolveGeo({ lat: 38.7, long: -9.1, country: 'PRT' });
+    assert.equal(geo.country, 'PT');
+    assert.equal(geo.lat, 38.7);
+    assert.equal(geo.lng, -9.1);
+  });
+
+  it('rejects latitude above 90', async () => {
+    global.fetch = async () => { throw new Error('fetch should not be called'); };
+    const geo = await provider.resolveGeo({ lat: 91, lng: 0, country: 'MZ' });
+    assert.equal(geo, null);
+  });
+
+  it('rejects latitude below -90', async () => {
+    global.fetch = async () => { throw new Error('fetch should not be called'); };
+    const geo = await provider.resolveGeo({ lat: -90.1, lng: 10, country: 'MZ' });
+    assert.equal(geo, null);
+  });
+
+  it('rejects longitude above 180', async () => {
+    global.fetch = async () => { throw new Error('fetch should not be called'); };
+    const geo = await provider.resolveGeo({ lat: 0, lng: 181, country: 'MZ' });
+    assert.equal(geo, null);
+  });
+
+  it('rejects longitude below -180', async () => {
+    global.fetch = async () => { throw new Error('fetch should not be called'); };
+    const geo = await provider.resolveGeo({ lat: 0, long: -181, country: 'MZ' });
+    assert.equal(geo, null);
+  });
+
+  it('rejects non-numeric coordinates', async () => {
+    global.fetch = async () => { throw new Error('fetch should not be called'); };
+    const geo = await provider.resolveGeo({ lat: 'abc', lng: 10, country: 'MZ' });
+    assert.equal(geo, null);
+  });
+
+  it('isValidLatLng mirrors range rules', () => {
+    assert.equal(provider.isValidLatLng(0, 0), true);
+    assert.equal(provider.isValidLatLng(90, 180), true);
+    assert.equal(provider.isValidLatLng(-90, -180), true);
+    assert.equal(provider.isValidLatLng(91, 0), false);
+    assert.equal(provider.isValidLatLng(0, 181), false);
+    assert.equal(provider.isValidLatLng(NaN, 0), false);
   });
 });
