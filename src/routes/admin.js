@@ -76,8 +76,7 @@ router.post('/subscriptions/:userId/activate', requireCsrf, async (req, res, nex
       userId: req.params.userId, planId, source: 'manual',
     });
     await getPool().query(
-      `INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, metadata)
-       VALUES ($1,'subscription.activate','subscription',$2,$3::jsonb)`,
+      `INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, metadata)\n       VALUES ($1,'subscription.activate','subscription',$2,$3::jsonb)`,
       [req.session.userId, sub.id, JSON.stringify({ userId: req.params.userId, planId })]
     );
     res.json({ ok: true, subscription: sub });
@@ -96,8 +95,7 @@ router.get('/usage/:userId', async (req, res, next) => {
   try {
     const sub = await subscriptionService.getActiveSubscription(req.params.userId);
     if (!sub) return res.json({ ok: true, subscription: null, usage: [] });
-    const periodDays = await subscriptionService.getPeriodDays();
-    const period = subscriptionService.resolvePeriodWindow(sub, new Date(), periodDays);
+    const period = subscriptionService.resolvePeriodWindow(sub, new Date());
     if (!period) return res.json({ ok: true, subscription: sub, usage: [] });
     const usage = await providerUsageService.getUserUsageSummary(req.params.userId, period.periodStart);
     res.json({ ok: true, subscription: sub, period, usage });
@@ -120,8 +118,7 @@ router.put('/settings/tomtom-quota', requireCsrf, async (req, res, next) => {
       note: 'Configured by admin',
     };
     await getPool().query(
-      `INSERT INTO system_settings (key, value, updated_at) VALUES ('tomtom_global_quota', $1::jsonb, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      `INSERT INTO system_settings (key, value, updated_at) VALUES ('tomtom_global_quota', $1::jsonb, NOW())\n       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
       [JSON.stringify(value)]
     );
     res.json({ ok: true, config: value });
@@ -140,6 +137,24 @@ router.get('/pricing', async (req, res, next) => {
 router.post('/pricing', requireCsrf, async (req, res, next) => {
   try {
     const b = req.body || {};
+    const allowed = ['apify', 'brightdata', 'tomtom'];
+    if (!b.providerCode || !allowed.includes(String(b.providerCode))) {
+      return res.status(400).json({ ok: false, error: 'providerCode inválido' });
+    }
+    if (!b.pricingVersion || typeof b.pricingVersion !== 'string' || !b.pricingVersion.trim()) {
+      return res.status(400).json({ ok: false, error: 'pricingVersion obrigatório' });
+    }
+    const unit = b.unitCostMicroUsd;
+    const fixed = b.fixedExecutionCostMicroUsd != null ? b.fixedExecutionCostMicroUsd : 0;
+    if (unit == null || !Number.isInteger(Number(unit)) || Number(unit) < 0) {
+      return res.status(400).json({ ok: false, error: 'unitCostMicroUsd deve ser inteiro >= 0 (micro-USD)' });
+    }
+    if (!Number.isInteger(Number(fixed)) || Number(fixed) < 0) {
+      return res.status(400).json({ ok: false, error: 'fixedExecutionCostMicroUsd deve ser inteiro >= 0' });
+    }
+    if (String(unit).includes('.') || String(fixed).includes('.')) {
+      return res.status(400).json({ ok: false, error: 'Custos devem ser inteiros micro-USD, sem decimais' });
+    }
     const { rows } = await getPool().query(
       `INSERT INTO provider_pricing (
          provider_code, pricing_version, unit_cost_micro_usd,
@@ -150,7 +165,7 @@ router.post('/pricing', requireCsrf, async (req, res, next) => {
          fixed_execution_cost_micro_usd = EXCLUDED.fixed_execution_cost_micro_usd,
          notes = EXCLUDED.notes, active = TRUE
        RETURNING *`,
-      [b.providerCode, b.pricingVersion, b.unitCostMicroUsd || 0, b.fixedExecutionCostMicroUsd || 0, b.notes || null]
+      [b.providerCode, String(b.pricingVersion).trim(), Number(unit), Number(fixed), b.notes || null]
     );
     res.status(201).json({ ok: true, pricing: rows[0] });
   } catch (err) { next(err); }
