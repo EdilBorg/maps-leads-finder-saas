@@ -2,7 +2,8 @@
  * Maps Leads Finder SaaS — Server entry point
  */
 
-const { createApp, config } = require('./app');
+const { createApp } = require('./app');
+const { config } = require('./config/env');
 const { closePool } = require('./db/pool');
 const {
   startAbandonedSearchRecovery,
