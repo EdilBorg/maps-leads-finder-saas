@@ -102,7 +102,7 @@ describe('provider progress persistence (pg)', { skip: !RUN }, () => {
       `SELECT providers_used FROM searches WHERE id=$1`, [searchId]
     );
     const by = Object.fromEntries(rows[0].providers_used.map((p) => [p.code, p]));
-    assert.equal(by.apify.status, 'ok');
+    assert.equal(by.apify.status, 'completed');
     assert.equal(by.apify.count, 7);
     assert.equal(by.tomtom.status, 'pending');
     assert.equal(by.tomtom.count, 0);
@@ -125,10 +125,10 @@ describe('provider progress persistence (pg)', { skip: !RUN }, () => {
       `SELECT providers_used FROM searches WHERE id=$1`, [searchId]
     );
     const by = Object.fromEntries(rows[0].providers_used.map((p) => [p.code, p]));
-    assert.equal(by.apify.status, 'ok');
+    assert.equal(by.apify.status, 'completed');
     assert.equal(by.apify.count, 10);
     assert.equal(by.tomtom.status, 'no_results');
-    assert.equal(by.brightdata.status, 'ok');
+    assert.equal(by.brightdata.status, 'completed');
     assert.equal(by.brightdata.count, 5);
   });
 

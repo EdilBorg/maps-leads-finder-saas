@@ -1028,4 +1028,5 @@ module.exports = {
   markPendingProvidersCancelled,
   mapProviderUiStatus,
   startHoldRenewal,
+  updateProviderProgress,
 };
