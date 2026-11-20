@@ -9,6 +9,11 @@ const {
   stopAbandonedSearchRecovery,
   waitForIdle,
 } = require('./services/abandonedSearchRecovery');
+const {
+  startPendingRemoteReconciler,
+  stopPendingRemoteReconciler,
+  waitForIdle: waitForReconcilerIdle,
+} = require('./services/pendingRemoteReconciler');
 const { performShutdown } = require('./services/shutdownManager');
 
 const app = createApp();
@@ -45,8 +50,15 @@ async function shutdown(signal, deps = {}) {
     const result = await performShutdown({
       state: shutdownState,
       signal,
-      stopAbandonedSearchRecovery: deps.stopAbandonedSearchRecovery || stopAbandonedSearchRecovery,
-      waitForIdle: deps.waitForIdle || waitForIdle,
+      stopAbandonedSearchRecovery: deps.stopAbandonedSearchRecovery || (() => {
+        stopAbandonedSearchRecovery();
+        stopPendingRemoteReconciler();
+      }),
+      waitForIdle: deps.waitForIdle || (async (ms) => {
+        const a = await waitForIdle(ms);
+        const b = await waitForReconcilerIdle(ms);
+        return a && b;
+      }),
       closePool: deps.closePool || closePool,
       idleTimeoutMs: deps.idleTimeoutMs != null ? deps.idleTimeoutMs : 7000,
       log: deps.log || console.log,
@@ -89,6 +101,7 @@ function _resetShutdownStateForTests() {
 if (require.main === module) {
   start();
   startAbandonedSearchRecovery();
+  startPendingRemoteReconciler();
   process.on('SIGTERM', () => { shutdown('SIGTERM'); });
   process.on('SIGINT', () => { shutdown('SIGINT'); });
 }
