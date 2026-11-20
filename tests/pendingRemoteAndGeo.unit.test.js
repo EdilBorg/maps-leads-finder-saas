@@ -61,6 +61,7 @@ describe('geoBlocked and onRemoteStarted wiring', () => {
 describe('markPendingRemote fails closed', () => {
   const src = fs.readFileSync(path.join(__dirname, '../src/services/quotaService.js'), 'utf8');
   it('does not swallow DB errors with false success', () => {
+    // Implementation must throw rather than catch-and-return ok
     const fnStart = src.indexOf('async function markPendingRemote');
     const fnEnd = src.indexOf('async function commitTrialGlobalTomTom', fnStart);
     const body = src.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 2000);

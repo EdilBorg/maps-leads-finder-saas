@@ -339,7 +339,7 @@ function normalizeProviderResult(raw) {
     return { status: 'error', results: [], errorCode: 'INVALID_RESPONSE', errorMessage: 'results not array', errorStage: raw.errorStage || null, httpStatus: raw.httpStatus != null ? raw.httpStatus : null };
   }
   if (!Array.isArray(results)) results = [];
-  return {
+  const out = {
     status,
     results,
     errorCode: raw.errorCode || null,
@@ -347,15 +347,26 @@ function normalizeProviderResult(raw) {
     errorStage: raw.errorStage || null,
     httpStatus: raw.httpStatus != null ? raw.httpStatus : null,
   };
+  // Operational metadata for reconciliation / quotas (never sent to public client as-is)
+  if (raw.metrics && typeof raw.metrics === 'object') out.metrics = raw.metrics;
+  if (raw.externalRunId) out.externalRunId = String(raw.externalRunId);
+  if (raw.runId) out.runId = String(raw.runId);
+  if (raw.snapshotId) out.snapshotId = String(raw.snapshotId);
+  if (raw.pendingRemote != null) out.pendingRemote = Boolean(raw.pendingRemote);
+  return out;
 }
 
-async function runProviderSafe(provider, criteria, signal) {
+async function runProviderSafe(provider, criteria, signal, opts = {}) {
   const code = provider && provider.code ? provider.code : 'unknown';
   if (!provider || typeof provider.search !== 'function') {
     return { code, result: { status: 'error', results: [], errorCode: 'PROVIDER_MISSING', errorMessage: 'missing search', errorStage: null, httpStatus: null } };
   }
   try {
-    const raw = await provider.search(criteria, signal);
+    // Providers accept (criteria, signal) or (criteria, { signal, onRemoteStarted })
+    const second = opts && (opts.onRemoteStarted || opts.geoBlockedProviders)
+      ? { signal, onRemoteStarted: opts.onRemoteStarted || null }
+      : signal;
+    const raw = await provider.search(criteria, second);
     return { code, result: normalizeProviderResult(raw) };
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || (signal && signal.aborted))) {
@@ -432,7 +443,13 @@ async function executeSearch(input, opts = {}) {
         try { onProviderProgress({ code: p.code, status: 'running', count: 0 }); } catch (_) {}
       }
       const criteria = { ...baseCriteria, limit: providerLimit(p.code, globalLimit) };
-      const out = await runProviderSafe(p, criteria, signal);
+      const providerCriteria = { ...criteria };
+      if (Array.isArray(input.geoBlockedProviders) && input.geoBlockedProviders.includes(p.code)) {
+        providerCriteria.geoBlocked = true;
+      }
+      const out = await runProviderSafe(p, providerCriteria, signal, {
+        onRemoteStarted: opts.onRemoteStarted || null,
+      });
       if (onProviderProgress) {
         try {
           onProviderProgress({
@@ -466,11 +483,15 @@ async function executeSearch(input, opts = {}) {
       apiCalls: 0,
       geocodeCalls: 0,
     };
+    if (r.externalRunId && !metrics.externalRunId) metrics.externalRunId = r.externalRunId;
+    if (r.runId && !metrics.runId) metrics.runId = r.runId;
+    if (r.snapshotId && !metrics.snapshotId) metrics.snapshotId = r.snapshotId;
     internalProviders.push({
       code: pr.code,
       status: r.status,
       count: Array.isArray(r.results) ? r.results.length : 0,
       metrics,
+      externalRunId: r.externalRunId || r.runId || r.snapshotId || null,
       errorCode: r.errorCode,
       errorMessage: r.errorMessage,
       errorStage: r.errorStage,

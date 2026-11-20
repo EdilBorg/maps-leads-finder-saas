@@ -168,7 +168,14 @@ async function sleep(ms, signal) {
   });
 }
 
-async function search(criteria, signal) {
+async function search(criteria, signalOrOpts) {
+  let signal = signalOrOpts;
+  let onRemoteStarted = null;
+  if (signalOrOpts && typeof signalOrOpts === 'object' && !('aborted' in signalOrOpts)) {
+    signal = signalOrOpts.signal || null;
+    onRemoteStarted = typeof signalOrOpts.onRemoteStarted === 'function' ? signalOrOpts.onRemoteStarted : null;
+  }
+
   if (!isConfigured()) return notConfigured(CODE);
   const token = process.env.APIFY_TOKEN;
   const actorId = process.env.APIFY_ACTOR_ID;
@@ -204,6 +211,14 @@ async function search(criteria, signal) {
     if (!runId) {
       return errorResult(CODE, 'INVALID_RESPONSE', 'Apify run id missing', {
         errorStage: 'start',
+      });
+    }
+    if (typeof onRemoteStarted === 'function') {
+      await onRemoteStarted({
+        providerCode: CODE,
+        externalRunId: String(runId),
+        runId: String(runId),
+        metadata: { stage: 'triggered' },
       });
     }
     const deadline = Date.now() + MAX_WAIT_MS;
@@ -280,6 +295,8 @@ async function search(criteria, signal) {
       rawCount: Array.isArray(items) ? items.length : results.length,
       apiCalls: 1,
       geocodeCalls: 0,
+      externalRunId: runId ? String(runId) : null,
+      runId: runId ? String(runId) : null,
     });
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {

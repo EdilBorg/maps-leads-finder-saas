@@ -326,49 +326,60 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
  * Does not call commit/release on provider_usage.
  */
 async function markPendingRemote(userId, searchId, providerCode, reservation, metrics = {}) {
-  if (!reservation || !reservation.periodStart) return null;
+  if (!reservation || !reservation.periodStart) {
+    const err = new Error('markPendingRemote requires reservation.periodStart');
+    err.code = 'PENDING_REMOTE_INVALID';
+    throw err;
+  }
   if (providerCode !== 'apify' && providerCode !== 'brightdata') return null;
 
   const externalRunId = metrics.externalRunId || metrics.runId || metrics.snapshotId || null;
-  const pool = getPool();
-  try {
-    await pool.query(
-      `INSERT INTO pending_remote_executions (
-         user_id, search_id, provider_code, status, external_run_id,
-         period_start, reserved_results, reserved_cost_micro_usd, reserved_api_calls,
-         unit_cost_micro_usd, fixed_execution_cost_micro_usd, include_fixed_cost,
-         pricing_version, metadata
-       ) VALUES ($1,$2,$3,'pending',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
-       ON CONFLICT (search_id, provider_code)
-         WHERE search_id IS NOT NULL AND status IN ('pending', 'reconciling')
-       DO UPDATE SET
-         external_run_id = COALESCE(EXCLUDED.external_run_id, pending_remote_executions.external_run_id),
-         updated_at = NOW()
-       RETURNING id`,
-      [
-        userId,
-        searchId,
-        providerCode,
-        externalRunId,
-        reservation.periodStart,
-        reservation.reservedResults || 0,
-        String(reservation.reservedCostMicroUsd || 0),
-        reservation.reservedApiCalls || 0,
-        reservation.unitCostMicroUsd != null ? String(reservation.unitCostMicroUsd) : null,
-        reservation.fixedExecutionCostMicroUsd != null ? String(reservation.fixedExecutionCostMicroUsd) : null,
-        !!reservation.includeFixedCost,
-        reservation.pricingVersion || null,
-        JSON.stringify({
-          source: 'markPendingRemote',
-          global: reservation.global || null,
-        }),
-      ]
-    );
-  } catch (err) {
-    // Table may not exist yet in some envs; log and keep reservation by doing nothing.
-    console.error('[markPendingRemote]', searchId, providerCode, err && err.message);
+  if (!externalRunId) {
+    const err = new Error('markPendingRemote requires externalRunId/runId/snapshotId');
+    err.code = 'PENDING_REMOTE_MISSING_ID';
+    throw err;
   }
-  return { ok: true, pendingRemote: true };
+
+  const pool = getPool();
+  // Fail explicitly — callers must not treat persistence failure as success
+  const { rows } = await pool.query(
+    `INSERT INTO pending_remote_executions (
+       user_id, search_id, provider_code, status, external_run_id,
+       period_start, reserved_results, reserved_cost_micro_usd, reserved_api_calls,
+       unit_cost_micro_usd, fixed_execution_cost_micro_usd, include_fixed_cost,
+       pricing_version, metadata
+     ) VALUES ($1,$2,$3,'pending',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
+     ON CONFLICT (search_id, provider_code)
+       WHERE search_id IS NOT NULL AND status IN ('pending', 'reconciling')
+     DO UPDATE SET
+       external_run_id = COALESCE(EXCLUDED.external_run_id, pending_remote_executions.external_run_id),
+       updated_at = NOW()
+     RETURNING id`,
+    [
+      userId,
+      searchId,
+      providerCode,
+      String(externalRunId),
+      reservation.periodStart,
+      reservation.reservedResults || 0,
+      String(reservation.reservedCostMicroUsd || 0),
+      reservation.reservedApiCalls || 0,
+      reservation.unitCostMicroUsd != null ? String(reservation.unitCostMicroUsd) : null,
+      reservation.fixedExecutionCostMicroUsd != null ? String(reservation.fixedExecutionCostMicroUsd) : null,
+      !!reservation.includeFixedCost,
+      reservation.pricingVersion || null,
+      JSON.stringify({
+        source: 'markPendingRemote',
+        global: reservation.global || null,
+        metrics: {
+          rawCount: metrics.rawCount,
+          apiCalls: metrics.apiCalls,
+          geocodeCalls: metrics.geocodeCalls,
+        },
+      }),
+    ]
+  );
+  return { ok: true, pendingRemote: true, id: rows[0] && rows[0].id, externalRunId: String(externalRunId) };
 }
 
 async function commitTrialGlobalTomTom(userId, searchId, globalReserve, metricsByProvider) {

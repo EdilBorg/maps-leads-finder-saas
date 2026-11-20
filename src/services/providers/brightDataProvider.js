@@ -102,6 +102,10 @@ function isValidLatLng(lat, lng) {
  * @returns {Promise<{ lat: number, lng: number, country: string }|null>}
  */
 async function resolveGeo(criteria, signal) {
+  if (criteria && criteria.geoBlocked === true) {
+    return null;
+  }
+
   const lat = criteria.lat != null ? Number(criteria.lat) : NaN;
   const lng =
     criteria.lng != null
@@ -352,6 +356,14 @@ async function search(criteria, signalOrOpts) {
     if (!snapshotId || typeof snapshotId !== 'string') {
       return errorResult('INVALID_RESPONSE', 'Bright Data snapshot_id missing');
     }
+    if (typeof onRemoteStarted === 'function') {
+      await onRemoteStarted({
+        providerCode: 'brightdata',
+        externalRunId: String(snapshotId),
+        snapshotId: String(snapshotId),
+        metadata: { stage: 'triggered' },
+      });
+    }
 
     const deadline = Date.now() + MAX_WAIT_MS;
     let status = 'starting';
@@ -448,6 +460,8 @@ async function search(criteria, signalOrOpts) {
       rawCount: Array.isArray(items) ? items.length : results.length,
       apiCalls: 1,
       geocodeCalls,
+      externalRunId: snapshotId ? String(snapshotId) : null,
+      snapshotId: snapshotId ? String(snapshotId) : null,
     });
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
