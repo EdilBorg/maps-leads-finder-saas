@@ -216,6 +216,9 @@
       historyPage = 1;
       loadHistory();
     }
+    if (view === 'plans') {
+      try { loadPlansQuotaView(); } catch (_) {}
+    }
     if (view === 'leads') loadLeads();
     if (view === 'settings') loadSettings();
   }
@@ -3044,6 +3047,83 @@
           if (err) { err.hidden = false; err.textContent = 'Erro de rede.'; }
         }
       });
+    }
+  }
+
+
+  function escapeHtmlPlans(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function fmtQuotaRow(row) {
+    if (!row) return '—';
+    if (row.max == null) return 'Sem limite por cliente' + (row.used ? ' (uso: ' + row.used + ')' : '');
+    return (row.used || 0) + ' / ' + row.max + ' (restam ' + (row.remaining != null ? row.remaining : '—') + ')';
+  }
+  async function loadPlansQuotaView() {
+    const panel = document.getElementById('plans-quota-panel');
+    const list = document.getElementById('plans-list-panel');
+    const pays = document.getElementById('plans-payments-panel');
+    if (!panel) return;
+    try {
+      const qRes = await api('/api/billing/quota');
+      const pRes = await api('/api/billing/plans');
+      const payRes = await api('/api/billing/payments');
+      const q = (qRes && qRes.data) || {};
+      const trial = q.trial || {};
+      const sub = q.subscription;
+      const prov = q.providers || {};
+      panel.innerHTML =
+        '<h2 style="margin:0 0 .75rem;font-size:1rem">A sua conta</h2>' +
+        '<p><strong>Trial:</strong> ' +
+        (trial.available ? 'Disponível (máx. ' + (trial.maxLeads || 200) + ' leads)' :
+          trial.inProgress ? 'Em curso' : 'Já utilizado') + '</p>' +
+        '<p><strong>Subscrição:</strong> ' +
+        (sub ? escapeHtmlPlans(sub.planName || 'Plano') + ' · ' + escapeHtmlPlans(sub.status) +
+          (sub.endsAt ? ' · até ' + escapeHtmlPlans(String(sub.endsAt).slice(0, 10)) : '')
+          : 'Nenhuma activa') + '</p>' +
+        '<p><strong>Apify:</strong> ' + fmtQuotaRow(prov.apify) + '</p>' +
+        '<p><strong>Bright Data:</strong> ' + fmtQuotaRow(prov.brightdata) + '</p>' +
+        '<p><strong>TomTom:</strong> ' + fmtQuotaRow(prov.tomtom) + '</p>';
+      const plans = ((pRes && pRes.data && pRes.data.plans) || []);
+      if (list) {
+        list.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Planos</h2>' +
+          (plans.length ? plans.map(function (p) {
+            return '<div style="border-top:1px solid #e5e7eb;padding:.75rem 0">' +
+              '<strong>' + escapeHtmlPlans(p.name) + '</strong>' +
+              '<div class="muted">' + escapeHtmlPlans(p.description || '') + '</div>' +
+              '<button type="button" class="btn btn-secondary btn-sm" data-request-plan="' +
+              escapeHtmlPlans(p.id) + '">Solicitar pagamento</button></div>';
+          }).join('') : '<p class="muted">Nenhum plano publicado.</p>');
+        list.querySelectorAll('[data-request-plan]').forEach(function (btn) {
+          btn.addEventListener('click', async function () {
+            try {
+              const token = await ensureCsrf();
+              await api('/api/billing/payments', {
+                method: 'POST',
+                headers: { 'X-CSRF-Token': token },
+                body: { planId: btn.getAttribute('data-request-plan') },
+              });
+              alert('Pedido registado. Aguarde aprovação.');
+              loadPlansQuotaView();
+            } catch (e) {
+              alert((e && e.message) || 'Falha');
+            }
+          });
+        });
+      }
+      const payments = ((payRes && payRes.data && payRes.data.payments) || []);
+      if (pays) {
+        pays.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Pagamentos</h2>' +
+          (payments.length ? payments.map(function (p) {
+            return '<div style="border-top:1px solid #e5e7eb;padding:.5rem 0">' +
+              escapeHtmlPlans(p.planName || p.planId) + ' · ' + escapeHtmlPlans(p.status) +
+              (p.createdAt ? ' · ' + escapeHtmlPlans(String(p.createdAt).slice(0, 10)) : '') +
+              '</div>';
+          }).join('') : '<p class="muted">Sem pagamentos.</p>');
+      }
+    } catch (e) {
+      panel.innerHTML = '<p class="muted">Não foi possível carregar quotas.</p>';
     }
   }
 

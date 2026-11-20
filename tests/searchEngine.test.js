@@ -21,13 +21,13 @@ const {
 } = require('../src/services/searchEngine');
 
 describe('provider registry contract', () => {
-  it('PROVIDER_CODES are apify, tomtom, foursquare only', () => {
-    assert.deepEqual(PROVIDER_CODES, ['apify', 'tomtom', 'foursquare']);
+  it('PROVIDER_CODES are apify, tomtom, brightdata only', () => {
+    assert.deepEqual(PROVIDER_CODES, ['apify', 'tomtom', 'brightdata']);
   });
 
   it('providersForModality returns the three current providers', () => {
-    assert.deepEqual(providersForModality('standard'), ['apify', 'tomtom', 'foursquare']);
-    assert.deepEqual(providersForModality('anything'), ['apify', 'tomtom', 'foursquare']);
+    assert.deepEqual(providersForModality('standard'), ['apify', 'tomtom', 'brightdata']);
+    assert.deepEqual(providersForModality('anything'), ['apify', 'tomtom', 'brightdata']);
   });
 
   it('resolveModality returns standard with three providers', () => {
@@ -41,10 +41,10 @@ describe('provider registry contract', () => {
     assert.deepEqual(MODALITIES.standard.providerCodes, PROVIDER_CODES);
   });
 
-  it('per-provider max limits are 200/200/50', () => {
+  it('per-provider max limits are 200/200/200', () => {
     assert.equal(PROVIDER_MAX.apify, 200);
     assert.equal(PROVIDER_MAX.tomtom, 200);
-    assert.equal(PROVIDER_MAX.foursquare, 50);
+    assert.equal(PROVIDER_MAX.brightdata, 200);
   });
 
   it('normalizeLimit only allows exact 100-500 steps', () => {
@@ -58,7 +58,7 @@ describe('provider registry contract', () => {
 
   it('providerLimit respects global and per-provider caps', () => {
     assert.equal(providerLimit('apify', 500), 200);
-    assert.equal(providerLimit('foursquare', 500), 50);
+    assert.equal(providerLimit('brightdata', 500), 200);
     assert.equal(providerLimit('tomtom', 100), 100);
   });
 });

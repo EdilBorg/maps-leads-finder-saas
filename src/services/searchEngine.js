@@ -1,14 +1,14 @@
 /**
  * Search engine: parallel providers, normalize, dedupe, filters, limits.
- * Providers: apify, tomtom, foursquare only.
+ * Providers: apify, tomtom, brightdata only.
  */
 const apify = require('./providers/apifyProvider');
 const tomtom = require('./providers/tomtomProvider');
-const foursquare = require('./providers/foursquareProvider');
+const brightdata = require('./providers/brightDataProvider');
 
-const PROVIDER_CODES = Object.freeze(['apify', 'tomtom', 'foursquare']);
+const PROVIDER_CODES = Object.freeze(['apify', 'tomtom', 'brightdata']);
 const ALLOWED_LIMITS = Object.freeze([100, 200, 300, 400, 500]);
-const PROVIDER_MAX = Object.freeze({ apify: 200, tomtom: 200, foursquare: 50 });
+const PROVIDER_MAX = Object.freeze({ apify: 200, tomtom: 200, brightdata: 200 });
 
 function normalizeLimit(value) {
   const n = parseInt(value, 10);
@@ -339,7 +339,7 @@ function normalizeProviderResult(raw) {
     return { status: 'error', results: [], errorCode: 'INVALID_RESPONSE', errorMessage: 'results not array', errorStage: raw.errorStage || null, httpStatus: raw.httpStatus != null ? raw.httpStatus : null };
   }
   if (!Array.isArray(results)) results = [];
-  return {
+  const out = {
     status,
     results,
     errorCode: raw.errorCode || null,
@@ -347,15 +347,26 @@ function normalizeProviderResult(raw) {
     errorStage: raw.errorStage || null,
     httpStatus: raw.httpStatus != null ? raw.httpStatus : null,
   };
+  // Operational metadata for reconciliation / quotas (never sent to public client as-is)
+  if (raw.metrics && typeof raw.metrics === 'object') out.metrics = raw.metrics;
+  if (raw.externalRunId) out.externalRunId = String(raw.externalRunId);
+  if (raw.runId) out.runId = String(raw.runId);
+  if (raw.snapshotId) out.snapshotId = String(raw.snapshotId);
+  if (raw.pendingRemote != null) out.pendingRemote = Boolean(raw.pendingRemote);
+  return out;
 }
 
-async function runProviderSafe(provider, criteria, signal) {
+async function runProviderSafe(provider, criteria, signal, opts = {}) {
   const code = provider && provider.code ? provider.code : 'unknown';
   if (!provider || typeof provider.search !== 'function') {
     return { code, result: { status: 'error', results: [], errorCode: 'PROVIDER_MISSING', errorMessage: 'missing search', errorStage: null, httpStatus: null } };
   }
   try {
-    const raw = await provider.search(criteria, signal);
+    // Providers accept (criteria, signal) or (criteria, { signal, onRemoteStarted })
+    const second = opts && (opts.onRemoteStarted || opts.geoBlockedProviders)
+      ? { signal, onRemoteStarted: opts.onRemoteStarted || null }
+      : signal;
+    const raw = await provider.search(criteria, second);
     return { code, result: normalizeProviderResult(raw) };
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || (signal && signal.aborted))) {
@@ -390,7 +401,7 @@ function classifySearchOutcome(statuses, hasResults) {
 const DEFAULT_PROVIDERS = {
   apify,
   tomtom,
-  foursquare,
+  brightdata,
 };
 
 async function executeSearch(input, opts = {}) {
@@ -409,12 +420,21 @@ async function executeSearch(input, opts = {}) {
       totals: { raw: 0, normalized: 0, afterDedup: 0, afterFilters: 0, returned: 0, limit: globalLimit }, results: [], cancelled: true };
   }
   const registry = { ...DEFAULT_PROVIDERS, ...(input.providers || {}) };
-  const selected = PROVIDER_CODES.map((code) => {
+  const allowList = Array.isArray(input.allowedProviders) && input.allowedProviders.length
+    ? input.allowedProviders.map(String)
+    : PROVIDER_CODES.slice();
+  const selected = PROVIDER_CODES.filter((code) => allowList.includes(code)).map((code) => {
     const p = registry[code];
     return (!p || typeof p.search !== 'function')
       ? { code, search: null }
       : { code, search: p.search.bind(p) };
   });
+  const skippedQuota = PROVIDER_CODES.filter((code) => !allowList.includes(code)).map((code) => ({
+    code,
+    status: 'skipped_quota',
+    count: 0,
+    metrics: { rawCount: 0, apiCalls: 0, geocodeCalls: 0 },
+  }));
   const started = Date.now();
 
   const providerResults = await Promise.all(
@@ -423,7 +443,13 @@ async function executeSearch(input, opts = {}) {
         try { onProviderProgress({ code: p.code, status: 'running', count: 0 }); } catch (_) {}
       }
       const criteria = { ...baseCriteria, limit: providerLimit(p.code, globalLimit) };
-      const out = await runProviderSafe(p, criteria, signal);
+      const providerCriteria = { ...criteria };
+      if (Array.isArray(input.geoBlockedProviders) && input.geoBlockedProviders.includes(p.code)) {
+        providerCriteria.geoBlocked = true;
+      }
+      const out = await runProviderSafe(p, providerCriteria, signal, {
+        onRemoteStarted: opts.onRemoteStarted || null,
+      });
       if (onProviderProgress) {
         try {
           onProviderProgress({
@@ -449,19 +475,29 @@ async function executeSearch(input, opts = {}) {
   }
 
   const allRaw = [];
-  const internalProviders = [];
+  const internalProviders = skippedQuota.slice();
   for (const pr of providerResults) {
     const r = pr.result;
+    const metrics = r.metrics || {
+      rawCount: Array.isArray(r.results) ? r.results.length : 0,
+      apiCalls: 0,
+      geocodeCalls: 0,
+    };
+    if (r.externalRunId && !metrics.externalRunId) metrics.externalRunId = r.externalRunId;
+    if (r.runId && !metrics.runId) metrics.runId = r.runId;
+    if (r.snapshotId && !metrics.snapshotId) metrics.snapshotId = r.snapshotId;
     internalProviders.push({
       code: pr.code,
       status: r.status,
-      count: r.results.length,
+      count: Array.isArray(r.results) ? r.results.length : 0,
+      metrics,
+      externalRunId: r.externalRunId || r.runId || r.snapshotId || null,
       errorCode: r.errorCode,
       errorMessage: r.errorMessage,
       errorStage: r.errorStage,
       httpStatus: r.httpStatus,
     });
-    for (const item of r.results) allRaw.push(item);
+    for (const item of (r.results || [])) allRaw.push(item);
   }
 
   const normalized = [];
@@ -483,7 +519,7 @@ async function executeSearch(input, opts = {}) {
   };
 }
 
-/** Google Place IDs typically start with ChIJ. Never treat TomTom/Foursquare IDs as place IDs. */
+/** Google Place IDs typically start with ChIJ. Never treat TomTom/non-Google external IDs as place IDs. */
 function isGooglePlaceId(id) {
   if (!id || typeof id !== 'string') return false;
   const s = id.trim();
@@ -494,7 +530,7 @@ function publicLead(lead, index) {
   const raw = lead.raw && typeof lead.raw === 'object' ? lead.raw : {};
   let googlePlaceId = null;
   const candidates = [lead.googlePlaceId, raw.placeId, raw.googlePlaceId];
-  if (lead.sourceProvider === 'apify' && isGooglePlaceId(lead.externalId)) {
+  if ((lead.sourceProvider === 'apify' || lead.sourceProvider === 'brightdata') && isGooglePlaceId(lead.externalId)) {
     candidates.unshift(lead.externalId);
   }
   for (const c of candidates) {

@@ -61,9 +61,20 @@ function mapItem(r, idx, criteria) {
  * @param {object} criteria
  * @param {{ signal?: AbortSignal }} [opts]
  */
-async function search(criteria, opts = {}) {
+function resolveSignal(second) {
+  if (!second) return undefined;
+  if (typeof second.aborted === 'boolean') return second;
+  if (second.signal && typeof second.signal.aborted === 'boolean') return second.signal;
+  return undefined;
+}
+
+/**
+ * @param {object} criteria
+ * @param {AbortSignal|{signal?: AbortSignal}} [signalOrOpts]
+ */
+async function search(criteria, signalOrOpts) {
   if (!isConfigured()) return notConfigured(CODE);
-  const signal = opts.signal;
+  const signal = resolveSignal(signalOrOpts);
   const key = apiKey();
   const query = String(criteria.query || '').trim();
   const location = String(criteria.location || '').trim();
@@ -73,6 +84,8 @@ async function search(criteria, opts = {}) {
   try {
     const all = [];
     let ofs = 0;
+    let apiCalls = 0;
+    let rawCount = 0;
     while (all.length < want) {
       if (signal && signal.aborted) {
         const err = new Error('cancelled');
@@ -84,6 +97,7 @@ async function search(criteria, opts = {}) {
         `https://api.tomtom.com/search/2/poiSearch/${q}.json` +
         `?key=${encodeURIComponent(key)}&limit=${pageSize}&ofs=${ofs}&language=pt-PT`;
 
+      apiCalls += 1;
       const data = await withTimeout(
         fetch(url, {
           method: 'GET',
@@ -106,6 +120,7 @@ async function search(criteria, opts = {}) {
       const results = Array.isArray(data.results) ? data.results : [];
       if (!results.length) break;
       for (const r of results) {
+        rawCount += 1;
         const item = mapItem(r, all.length, criteria);
         if (item) all.push(item);
         if (all.length >= want) break;
@@ -114,7 +129,11 @@ async function search(criteria, opts = {}) {
       ofs += results.length;
       if (ofs >= 2000) break;
     }
-    return okResult(all.slice(0, want));
+    return okResult(all.slice(0, want), {
+      rawCount,
+      apiCalls,
+      geocodeCalls: 0,
+    });
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
       return errorResult('CANCELLED', 'TomTom search cancelled');

@@ -28,6 +28,7 @@ const {
   FREE_SEARCH_HOLD_MINUTES,
   FREE_SEARCH_RENEW_INTERVAL_MS,
 } = require('./freeSearchHold');
+const quotaService = require('./quotaService');
 
 const RETENTION_DAYS = 30;
 
@@ -162,25 +163,15 @@ async function startSearch(opts) {
   const pool = getPool();
   let searchId = null;
   let holdToken = null;
+  let auth = null;
 
   {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const hold = await acquireFreeSearchHold(client, opts.userId, null);
-      if (!hold.allowed) {
-        await client.query('ROLLBACK');
-        const err = new Error(
-          hold.reason === 'FREE_SEARCH_IN_PROGRESS'
-            ? 'Já existe uma pesquisa gratuita em curso. Aguarde ou tente mais tarde.'
-            : 'Quota gratuita indisponível.'
-        );
-        err.code = 'QUOTA';
-        err.reason = hold.reason;
-        throw err;
-      }
-      holdToken = hold.holdToken;
       const limit = normalizeLimit(opts.limit);
+
+      // 1) Create search row first so every reservation is keyed by a real searchId
       const ins = await client.query(
         `INSERT INTO searches (
            user_id, query, location, filters, status, providers_used, started_at, expires_at
@@ -188,29 +179,86 @@ async function startSearch(opts) {
          RETURNING id`,
         [
           opts.userId, opts.query, opts.location,
-          JSON.stringify({ ...(opts.filters || {}), limit, holdToken }),
+          JSON.stringify({ ...(opts.filters || {}), limit, quotaMode: 'pending' }),
           JSON.stringify([
             { code: 'apify', status: 'pending', count: 0 },
             { code: 'tomtom', status: 'pending', count: 0 },
-            { code: 'foursquare', status: 'pending', count: 0 },
+            { code: 'brightdata', status: 'pending', count: 0 },
           ]),
           String(RETENTION_DAYS),
         ]
       );
       searchId = ins.rows[0].id;
-      const bound = await bindHoldToSearch(client, opts.userId, holdToken, searchId);
-      if (!bound) {
-        await client.query('ROLLBACK');
-        try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
-        const err = new Error('Não foi possível associar a reserva à pesquisa. Tenta novamente.');
-        err.code = 'HOLD_BIND_FAILED';
+
+      // 2) Authorize + reserve with the definitive searchId (unique idempotency keys)
+      auth = await quotaService.authorizeAndReserve(client, {
+        userId: opts.userId,
+        searchId,
+        requestedLimit: limit,
+      });
+
+      if (auth.mode === 'denied') {
+        await client.query(
+          `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2
+           WHERE id=$1 AND user_id=$3`,
+          [searchId, auth.reason || 'quota_denied', opts.userId]
+        );
+        await client.query('COMMIT');
+        const err = new Error(auth.message || 'Quota indisponível.');
+        err.code = 'QUOTA';
+        err.reason = auth.reason;
         throw err;
       }
+
+      holdToken = auth.holdToken || null;
+      const effectiveLimit = auth.limit != null ? normalizeLimit(Math.min(auth.limit, limit)) : limit;
+      const finalLimit = auth.mode === 'trial' ? Math.min(effectiveLimit, 200) : effectiveLimit;
+      const allowedCodes = (auth.providers || []).filter((p) => p.allowed).map((p) => p.code);
+      const providersInit = ['apify', 'tomtom', 'brightdata'].map((code) => {
+        const p = (auth.providers || []).find((x) => x.code === code);
+        if (p && !p.allowed) return { code, status: 'skipped_quota', count: 0, reason: p.reason || null };
+        return { code, status: 'pending', count: 0 };
+      });
+
+      await client.query(
+        `UPDATE searches SET filters=$2::jsonb, providers_used=$3::jsonb
+         WHERE id=$1 AND user_id=$4`,
+        [
+          searchId,
+          JSON.stringify({
+            ...(opts.filters || {}),
+            limit: finalLimit,
+            holdToken,
+            quotaMode: auth.mode,
+            allowedProviders: allowedCodes,
+            reservations: (auth.providers || []).filter((p) => p.allowed && p.reserve).map((p) => ({
+              code: p.code, reserve: p.reserve,
+            })),
+          }),
+          JSON.stringify(providersInit),
+          opts.userId,
+        ]
+      );
+
+      if (auth.mode === 'trial' && holdToken) {
+        const bound = await bindHoldToSearch(client, opts.userId, holdToken, searchId);
+        if (!bound) {
+          await client.query('ROLLBACK');
+          try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
+          const err = new Error('Não foi possível associar a reserva à pesquisa. Tenta novamente.');
+          err.code = 'HOLD_BIND_FAILED';
+          throw err;
+        }
+      }
+
       await client.query('COMMIT');
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       if (holdToken && err.code !== 'QUOTA' && err.code !== 'HOLD_BIND_FAILED') {
         try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
+      }
+      if (auth && auth.mode === 'paid' && auth.providers && searchId) {
+        try { await quotaService.releaseAllReservations(opts.userId, searchId, auth.providers); } catch (_) {}
       }
       client.release();
       throw err;
@@ -219,7 +267,15 @@ async function startSearch(opts) {
   }
 
   const controller = new AbortController();
-  activeRuns.set(String(searchId), { controller, userId: opts.userId, holdToken });
+  activeRuns.set(String(searchId), {
+    controller, userId: opts.userId, holdToken,
+    quotaMode: auth.mode, providers: auth.providers || [],
+  });
+
+  const allowedProviders = (auth.providers || []).filter((p) => p.allowed).map((p) => p.code);
+  const effectiveLimit = auth.mode === 'trial'
+    ? Math.min(normalizeLimit(opts.limit), 200)
+    : (auth.limit != null ? normalizeLimit(auth.limit) : normalizeLimit(opts.limit));
 
   setImmediate(() => {
     runSearchJob({
@@ -228,17 +284,21 @@ async function startSearch(opts) {
       query: opts.query,
       location: opts.location,
       filters: opts.filters,
-      limit: opts.limit,
+      limit: effectiveLimit,
       holdToken,
       controller,
       executeSearchFn: opts.executeSearchFn,
+      quotaMode: auth.mode,
+      quotaProviders: auth.providers || [],
+      allowedProviders,
     }).catch((err) => {
       console.error('[search-job]', searchId, err && err.message ? err.message : err);
     });
   });
 
-  return { searchId, status: 'running' };
+  return { searchId, status: 'running', quotaMode: auth.mode };
 }
+
 
 async function runSearchJob(ctx) {
   const pool = getPool();
@@ -246,12 +306,88 @@ async function runSearchJob(ctx) {
   let engineResult;
   try {
     const runEngine = ctx.executeSearchFn || executeSearch;
+    const geoBlockedProviders = [];
+    if (Array.isArray(ctx.quotaProviders)) {
+      for (const p of ctx.quotaProviders) {
+        if (p && p.geoBlocked) geoBlockedProviders.push(p.code);
+      }
+    }
+    // Bright Data needs TomTom geocoding unless explicit coords; block when tomtom not allowed
+    if (Array.isArray(ctx.allowedProviders) && !ctx.allowedProviders.includes('tomtom')) {
+      if (!geoBlockedProviders.includes('brightdata')) geoBlockedProviders.push('brightdata');
+    }
+
     engineResult = await runEngine(
-      { query: ctx.query, location: ctx.location, filters: ctx.filters, limit: ctx.limit },
+      {
+        query: ctx.query,
+        location: ctx.location,
+        filters: ctx.filters,
+        limit: ctx.limit,
+        allowedProviders: ctx.allowedProviders,
+        geoBlockedProviders,
+      },
       {
         signal: ctx.controller.signal,
         onProviderProgress: (progress) => {
           updateProviderProgress(pool, ctx.searchId, ctx.userId, progress).catch(() => {});
+        },
+        onRemoteStarted: async (info) => {
+          const code = info && info.providerCode;
+          const reservation = (ctx.quotaProviders || []).find((p) => p.code === code && p.allowed && p.reserve);
+          if (!reservation || !reservation.reserve) {
+            // Trial path: still track remote id for operational recovery without paid reservation
+            if (ctx.quotaMode === 'trial' && (code === 'apify' || code === 'brightdata')) {
+              try {
+                await quotaService.markPendingRemote(
+                  ctx.userId,
+                  ctx.searchId,
+                  code,
+                  {
+                    periodStart: new Date().toISOString(),
+                    reservedResults: 0,
+                    reservedCostMicroUsd: 0,
+                    reservedApiCalls: 0,
+                  },
+                  {
+                    externalRunId: info.externalRunId || info.runId || info.snapshotId,
+                    runId: info.runId,
+                    snapshotId: info.snapshotId,
+                  }
+                );
+              } catch (e) {
+                if (code === 'apify') {
+                  const err = new Error('Failed to persist Apify run id: ' + (e && e.message));
+                  err.code = 'REMOTE_PERSIST_FAILED';
+                  throw err;
+                }
+                throw e;
+              }
+            }
+            return;
+          }
+          try {
+            await quotaService.markPendingRemote(
+              ctx.userId,
+              ctx.searchId,
+              code,
+              reservation.reserve,
+              {
+                externalRunId: info.externalRunId || info.runId || info.snapshotId,
+                runId: info.runId,
+                snapshotId: info.snapshotId,
+              }
+            );
+          } catch (e) {
+            if (code === 'apify') {
+              const err = new Error('Failed to persist Apify run id: ' + (e && e.message));
+              err.code = 'REMOTE_PERSIST_FAILED';
+              throw err;
+            }
+            // Bright Data: no remote abort — keep reservation protected by pending row failure signal
+            const err = new Error('Failed to persist Bright Data snapshot id: ' + (e && e.message));
+            err.code = 'REMOTE_PERSIST_FAILED';
+            throw err;
+          }
         },
       }
     );
@@ -275,12 +411,17 @@ async function runSearchJob(ctx) {
         `UPDATE searches SET status='failed', completed_at=NOW(), error_summary=$2 WHERE id=$1 AND user_id=$3 AND status='running'`,
         [ctx.searchId, err.message || 'engine error', ctx.userId]
       );
-      await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
+      if (ctx.holdToken) await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
       await client.query('COMMIT');
     } catch (e2) {
       try { await client.query('ROLLBACK'); } catch (_) {}
     } finally {
       client.release();
+    }
+    if (ctx.quotaMode === 'paid') {
+      try {
+        await quotaService.releaseAllReservations(ctx.userId, ctx.searchId, ctx.quotaProviders || []);
+      } catch (_) {}
     }
     return;
   } finally {
@@ -366,19 +507,42 @@ async function runSearchJob(ctx) {
       inserted.length > 0 &&
       (engineResult.outcome === 'results' || engineResult.searchStatus === 'partial');
 
-    if (needConsume) {
-      const consumed = await consumeFreeSearchHold(client, ctx.userId, ctx.holdToken);
-      if (!consumed) {
-        await client.query('ROLLBACK');
-        await markSearchFailed(pool, ctx.searchId, ctx.userId, 'hold_lost');
-        activeRuns.delete(String(ctx.searchId));
-        return;
+    if (ctx.quotaMode === 'trial' && ctx.holdToken) {
+      if (needConsume) {
+        const consumed = await consumeFreeSearchHold(client, ctx.userId, ctx.holdToken);
+        if (!consumed) {
+          await client.query('ROLLBACK');
+          await markSearchFailed(pool, ctx.searchId, ctx.userId, 'hold_lost');
+          activeRuns.delete(String(ctx.searchId));
+          return;
+        }
+      } else {
+        await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
       }
-    } else {
-      await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
     }
 
     await client.query('COMMIT');
+
+    if (ctx.quotaMode === 'paid' && Array.isArray(ctx.quotaProviders)) {
+      const byCode = {};
+      for (const p of engineResult._providers || []) {
+        byCode[p.code] = p.metrics || { rawCount: p.count || 0, apiCalls: 0, geocodeCalls: 0 };
+      }
+      for (const p of ctx.quotaProviders) {
+        if (!p.allowed || !p.reserve) continue;
+        try {
+          if (byCode[p.code]) {
+            await quotaService.commitProviderMetrics(
+              ctx.userId, ctx.searchId, p.code, p.reserve, byCode[p.code]
+            );
+          } else {
+            await quotaService.releaseAllReservations(ctx.userId, ctx.searchId, [p]);
+          }
+        } catch (qe) {
+          console.error('[quota-commit]', ctx.searchId, p.code, qe && qe.message);
+        }
+      }
+    }
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
     try {
@@ -441,6 +605,25 @@ async function cancelSearch(userId, searchId) {
     }
     await client.query('COMMIT');
     activeRuns.delete(String(searchId));
+
+    // Paid path: release or protect reservations after DB commit (no open TX during this)
+    const quotaMode = filters.quotaMode || (run && run.quotaMode) || null;
+    if (quotaMode === 'paid') {
+      const reservations = Array.isArray(filters.reservations) ? filters.reservations : [];
+      const providers = reservations.map((r) => ({
+        code: r.code,
+        allowed: true,
+        reserve: r.reserve,
+      }));
+      // Prefer in-memory providers if present (more complete reserve objects)
+      const fromRun = run && Array.isArray(run.providers) ? run.providers : providers;
+      try {
+        await quotaService.releaseAllReservations(userId, searchId, fromRun);
+      } catch (e) {
+        console.error('[cancel-quota-release]', searchId, e && e.message);
+      }
+    }
+
     return { ok: true, status: 'cancelled' };
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
@@ -845,4 +1028,5 @@ module.exports = {
   markPendingProvidersCancelled,
   mapProviderUiStatus,
   startHoldRenewal,
+  updateProviderProgress,
 };
