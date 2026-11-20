@@ -79,7 +79,7 @@ describe('provider progress persistence (pg)', { skip: !RUN }, () => {
     if (!ownedUserId) throw new Error('suite user not initialized');
     const ins = await pool.query(
       `INSERT INTO searches (user_id, query, location, filters, status, providers_used, started_at, expires_at)
-       VALUES ($1, 'q', 'loc', '{}'::jsonb, 'running', $2::jsonb, NOW())
+       VALUES ($1, 'q', 'loc', '{}'::jsonb, 'running', $2::jsonb, NOW(), NULL)
        RETURNING id`,
       [ownedUserId, JSON.stringify(providers)]
     );
