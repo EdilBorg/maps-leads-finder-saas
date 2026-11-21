@@ -2346,9 +2346,13 @@
   function reparentLeadForms() {
     ['leads-activity-form', 'leads-appointment-form'].forEach(function (id) {
       const el = document.getElementById(id);
-      if (el && el.parentElement !== document.body) {
+      if (!el) return;
+      if (el.parentElement !== document.body) {
         document.body.appendChild(el);
       }
+      // Stay closed until user opens them from the CRM detail actions.
+      el.hidden = true;
+      el.setAttribute('hidden', '');
     });
     setFormBackdrop(false);
   }

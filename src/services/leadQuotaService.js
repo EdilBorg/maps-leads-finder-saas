@@ -14,6 +14,8 @@ const { lockUserForUpdate } = require('./freeSearchHold');
  * Sum delivered leads in period (total_after_filters on completed/partial).
  */
 async function sumDeliveredInPeriod(client, userId, periodStart, periodEnd) {
+  // Commercial Pro quota counts only paid searches (filters.quotaMode = 'paid').
+  // Trial/free searches must never consume the 2.500-lead plan budget.
   const { rows } = await client.query(
     `SELECT COALESCE(SUM(total_after_filters), 0)::int AS delivered
      FROM searches
@@ -21,7 +23,8 @@ async function sumDeliveredInPeriod(client, userId, periodStart, periodEnd) {
        AND status IN ('completed', 'partial')
        AND completed_at IS NOT NULL
        AND completed_at >= $2
-       AND completed_at < $3`,
+       AND completed_at < $3
+       AND COALESCE(filters->>'quotaMode', '') = 'paid'`,
     [userId, periodStart, periodEnd]
   );
   return rows[0] ? Number(rows[0].delivered) || 0 : 0;
@@ -203,10 +206,67 @@ async function getReservedForUser(userId, periodStart) {
   return rows[0] ? Number(rows[0].reserved) || 0 : 0;
 }
 
+
+/**
+ * Release lead quota outside a caller transaction.
+ * Logs failures with context; never claims success when release did not complete.
+ * @returns {{ ok: boolean, released?: number, skipped?: boolean, error?: Error }}
+ */
+async function releaseLeadQuotaSafe({ userId, searchId, reason = 'unspecified' }) {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await releaseLeadQuota(client, { userId, searchId });
+    await client.query('COMMIT');
+    return { ok: true, ...result };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('[lead-quota-release-failed]', {
+      userId, searchId, reason,
+      message: err && err.message,
+      code: err && err.code,
+    });
+    return { ok: false, error: err };
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Release held commercial quotas for searches that are no longer running.
+ * Safe to call repeatedly (idempotent per hold row).
+ */
+async function recoverOrphanedLeadHolds({ limit = 100 } = {}) {
+  const pool = getPool();
+  const { rows } = await pool.query(
+    `SELECT h.id, h.user_id, h.search_id, h.status AS hold_status, s.status AS search_status
+     FROM lead_quota_holds h
+     JOIN searches s ON s.id = h.search_id
+     WHERE h.status = 'held'
+       AND s.status NOT IN ('running', 'pending')
+     ORDER BY h.created_at ASC
+     LIMIT $1`,
+    [limit]
+  );
+  const results = [];
+  for (const row of rows) {
+    const r = await releaseLeadQuotaSafe({
+      userId: row.user_id,
+      searchId: row.search_id,
+      reason: 'orphan_recovery:' + (row.search_status || 'unknown'),
+    });
+    results.push({ searchId: row.search_id, ...r });
+  }
+  return results;
+}
+
 module.exports = {
   reserveLeadQuota,
   commitLeadQuota,
   releaseLeadQuota,
+  releaseLeadQuotaSafe,
+  recoverOrphanedLeadHolds,
   sumDeliveredInPeriod,
   sumActiveReserved,
   getReservedForUser,

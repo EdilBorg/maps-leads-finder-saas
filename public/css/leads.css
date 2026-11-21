@@ -251,6 +251,12 @@
   flex-direction: column;
   gap: var(--spacing-8);
 }
+/* display:flex above would otherwise override [hidden] after forms are
+   reparented to document.body (outside the inactive .view). */
+.leads-crm-inline-form[hidden],
+.leads-crm-form-modal[hidden] {
+  display: none !important;
+}
 
 /* Timeline — no artificial max-height; compact */
 .leads-crm-timeline {

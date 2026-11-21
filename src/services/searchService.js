@@ -267,8 +267,16 @@ async function startSearch(opts) {
       if (holdToken && err.code !== 'QUOTA' && err.code !== 'HOLD_BIND_FAILED') {
         try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
       }
-      if (auth && auth.mode === 'paid' && auth.providers && searchId) {
-        try { await quotaService.releaseAllReservations(opts.userId, searchId, auth.providers); } catch (_) {}
+      if (auth && auth.mode === 'paid' && searchId) {
+        try { await quotaService.releaseAllReservations(opts.userId, searchId, auth.providers || []); } catch (e) {
+          console.error('[start-provider-quota-release]', searchId, e && e.message);
+        }
+        const lr = await leadQuotaService.releaseLeadQuotaSafe({
+          userId: opts.userId, searchId, reason: 'start_search_abort',
+        });
+        if (!lr.ok) {
+          console.error('[lead-quota-still-held]', searchId, 'start_search_abort');
+        }
       }
       client.release();
       throw err;
@@ -439,19 +447,17 @@ async function runSearchJob(ctx) {
     if (ctx.quotaMode === 'paid') {
       try {
         await quotaService.releaseAllReservations(ctx.userId, ctx.searchId, ctx.quotaProviders || []);
-      } catch (_) {}
-      try {
-        const c2 = await getPool().connect();
-        try {
-          await c2.query('BEGIN');
-          await leadQuotaService.releaseLeadQuota(c2, { userId: ctx.userId, searchId: ctx.searchId });
-          await c2.query('COMMIT');
-        } catch (e) {
-          try { await c2.query('ROLLBACK'); } catch (_) {}
-        } finally {
-          c2.release();
-        }
-      } catch (_) {}
+      } catch (e) {
+        console.error('[provider-quota-release]', ctx.searchId, e && e.message);
+      }
+      const lr = await leadQuotaService.releaseLeadQuotaSafe({
+        userId: ctx.userId,
+        searchId: ctx.searchId,
+        reason: 'engine_error',
+      });
+      if (!lr.ok) {
+        console.error('[lead-quota-still-held]', ctx.searchId, 'engine_error');
+      }
     }
     return;
   } finally {
@@ -469,6 +475,9 @@ async function runSearchJob(ctx) {
     );
     if (!st.rows[0] || st.rows[0].status === 'cancelled') {
       await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
+      if (ctx.quotaMode === 'paid') {
+        await leadQuotaService.releaseLeadQuota(client, { userId: ctx.userId, searchId: ctx.searchId });
+      }
       await client.query('COMMIT');
       activeRuns.delete(String(ctx.searchId));
       return;
@@ -495,6 +504,9 @@ async function runSearchJob(ctx) {
         [ctx.searchId, 'cancelled_by_user', ctx.userId]
       );
       await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
+      if (ctx.quotaMode === 'paid') {
+        await leadQuotaService.releaseLeadQuota(client, { userId: ctx.userId, searchId: ctx.searchId });
+      }
       await client.query('COMMIT');
       activeRuns.delete(String(ctx.searchId));
       return;
@@ -637,7 +649,19 @@ async function runSearchJob(ctx) {
     try {
       await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
       await markSearchFailed(pool, ctx.searchId, ctx.userId, 'persist_failure');
-    } catch (_) {}
+    } catch (e2) {
+      console.error('[persist-failure-cleanup]', ctx.searchId, e2 && e2.message);
+    }
+    if (ctx.quotaMode === 'paid') {
+      const lr = await leadQuotaService.releaseLeadQuotaSafe({
+        userId: ctx.userId,
+        searchId: ctx.searchId,
+        reason: 'persist_failure',
+      });
+      if (!lr.ok) {
+        console.error('[lead-quota-still-held]', ctx.searchId, 'persist_failure');
+      }
+    }
   } finally {
     client.release();
     activeRuns.delete(String(ctx.searchId));
@@ -711,20 +735,11 @@ async function cancelSearch(userId, searchId) {
       } catch (e) {
         console.error('[cancel-quota-release]', searchId, e && e.message);
       }
-      try {
-        const c2 = await getPool().connect();
-        try {
-          await c2.query('BEGIN');
-          await leadQuotaService.releaseLeadQuota(c2, { userId, searchId });
-          await c2.query('COMMIT');
-        } catch (e2) {
-          try { await c2.query('ROLLBACK'); } catch (_) {}
-          console.error('[cancel-lead-quota]', searchId, e2 && e2.message);
-        } finally {
-          c2.release();
-        }
-      } catch (e3) {
-        console.error('[cancel-lead-quota]', searchId, e3 && e3.message);
+      const lr = await leadQuotaService.releaseLeadQuotaSafe({
+        userId, searchId, reason: 'cancel_search',
+      });
+      if (!lr.ok) {
+        console.error('[lead-quota-still-held]', searchId, 'cancel_search');
       }
     }
 
