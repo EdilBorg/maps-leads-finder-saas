@@ -2319,10 +2319,46 @@
       'T' + pad(x.getHours()) + ':' + pad(x.getMinutes());
   }
 
+  /**
+   * Overlay backdrop for CRM activity/appointment forms (fixed position).
+   * Created once and reused; click closes both forms.
+   */
+  function setFormBackdrop(show) {
+    let bd = document.getElementById('leads-crm-form-backdrop');
+    if (!bd) {
+      bd = document.createElement('div');
+      bd.id = 'leads-crm-form-backdrop';
+      bd.className = 'leads-crm-form-backdrop';
+      bd.hidden = true;
+      bd.addEventListener('click', function () {
+        showActivityForm(false);
+        showAppointmentForm(false);
+      });
+      document.body.appendChild(bd);
+    }
+    bd.hidden = !show;
+  }
+
+  /**
+   * Move CRM modal forms under document.body so position:fixed is not clipped
+   * by overflow:hidden ancestors in the lead detail layout. Idempotent.
+   */
+  function reparentLeadForms() {
+    ['leads-activity-form', 'leads-appointment-form'].forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el && el.parentElement !== document.body) {
+        document.body.appendChild(el);
+      }
+    });
+    setFormBackdrop(false);
+  }
+
   function showActivityForm(show) {
     const form = $('#leads-activity-form');
     if (!form) return;
     form.hidden = !show;
+    const apptOpen = $('#leads-appointment-form') && !$('#leads-appointment-form').hidden;
+    setFormBackdrop(!!show || !!apptOpen);
     if (show) {
       const when = $('#leads-activity-when');
       if (when && !when.value) when.value = toDatetimeLocalValue(new Date());
@@ -2856,6 +2892,14 @@
     }
 
     const requestSeq = dashboardSeq;
+    if (!dashboardCache) {
+      box.innerHTML = '';
+      const loading = document.createElement('p');
+      loading.className = 'empty-hint';
+      loading.id = 'dashboard-recent-loading';
+      loading.textContent = 'A carregar dashboard…';
+      box.appendChild(loading);
+    }
     const promise = (async () => {
       try {
         const res = await api('/api/searches/dashboard');

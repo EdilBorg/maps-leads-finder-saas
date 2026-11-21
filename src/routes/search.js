@@ -279,7 +279,14 @@ router.delete('/leads/saved/:id', requireAuth, requireVerifiedEmail, requireCsrf
 
 router.post('/leads/saved/delete', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
   try {
-    const ids = (req.body && req.body.ids) || [];
+    if (req.body && req.body.all === true) {
+      const result = await searchService.deleteAllSavedLeads(req.session.userId);
+      return res.json(result);
+    }
+    const ids = (req.body && Array.isArray(req.body.ids)) ? req.body.ids : [];
+    if (!ids.length) {
+      return res.status(400).json({ error: 'Indica os leads a eliminar ou usa all: true.' });
+    }
     const result = await searchService.deleteSavedLeads(req.session.userId, ids);
     return res.json(result);
   } catch (err) {
@@ -306,7 +313,14 @@ router.delete('/:id', requireAuth, requireVerifiedEmail, requireCsrf, async (req
 
 router.post('/delete', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
   try {
-    const ids = (req.body && req.body.ids) || [];
+    if (req.body && req.body.all === true) {
+      const result = await searchService.deleteAllSearches(req.session.userId);
+      return res.json(result);
+    }
+    const ids = (req.body && Array.isArray(req.body.ids)) ? req.body.ids : [];
+    if (!ids.length) {
+      return res.status(400).json({ error: 'Indica as pesquisas a eliminar ou usa all: true.' });
+    }
     const result = await searchService.deleteSearches(req.session.userId, ids);
     return res.json(result);
   } catch (err) {

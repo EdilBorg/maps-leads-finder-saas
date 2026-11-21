@@ -902,6 +902,29 @@ async function saveLeadsFromResults(userId, resultIds) {
  * Delete saved leads by id (owner-scoped). Activities/appointments cascade via FK.
  * @returns {{ deletedCount: number, deletedIds: string[] }}
  */
+async function deleteSavedLead(userId, leadId) {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockUserForUpdate(client, userId);
+    const { rows } = await client.query(
+      `DELETE FROM saved_leads
+       WHERE user_id = $1 AND id = $2
+       RETURNING id`,
+      [userId, leadId]
+    );
+    await client.query('COMMIT');
+    if (!rows[0]) return { deleted: false };
+    return { deleted: true, id: rows[0].id };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function deleteSavedLeads(userId, leadIds) {
   const pool = getPool();
   const client = await pool.connect();
@@ -1047,6 +1070,7 @@ module.exports = {
   CRM_NOTES_MAX,
   isValidCrmStatus,
   saveLeadsFromResults,
+  deleteSavedLead,
   deleteSavedLeads,
   deleteAllSavedLeads,
   deleteSearches,
