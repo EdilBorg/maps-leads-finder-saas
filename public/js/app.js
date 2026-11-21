@@ -7,7 +7,7 @@
     history: 'Histórico',
     leads: 'Leads guardados',
     settings: 'Configurações',
-    plans: 'Planos',
+    plans: 'Assinar / Renovar',
   };
 
   const PAGE_SIZE = 24;
@@ -3234,7 +3234,7 @@
     return plansInFlight;
   }
 
-  async function loadPlansQuotaViewBody() {
+    async function loadPlansQuotaViewBody() {
     const currentPanel = document.getElementById('plans-current-panel');
     const usagePanel = document.getElementById('plans-usage-panel');
     const list = document.getElementById('plans-list-panel');
@@ -3256,14 +3256,15 @@
     }
     function paymentStatusPt(st) {
       const s = String(st || '').toLowerCase();
-      if (s === 'paid' || s === 'approved' || s === 'completed' || s === 'success') return 'Pago / activo';
-      if (s === 'pending' || s === 'awaiting' || s === 'processing') return 'Pendente';
+      if (s === 'paid' || s === 'approved' || s === 'completed' || s === 'succeeded' || s === 'success') return 'Confirmado';
+      if (s === 'pending' || s === 'processing' || s === 'awaiting') return 'Pendente';
       if (s === 'rejected' || s === 'failed' || s === 'declined') return 'Recusado';
-      if (s === 'cancelled' || s === 'canceled') return 'Cancelado';
+      if (s === 'cancelled' || s === 'canceled' || s === 'expired') return 'Cancelado / expirado';
+      if (s === 'refunded') return 'Reembolsado';
+      if (s === 'chargeback') return 'Chargeback';
       return st || '—';
     }
 
-    // Independent fetches — one failure must not blank the whole page
     const [qRes, pRes, payRes, methRes] = await Promise.all([
       api('/api/billing/quota').catch(function () { return { ok: false, data: null }; }),
       api('/api/billing/plans').catch(function () { return { ok: false, data: null }; }),
@@ -3275,37 +3276,29 @@
     const current = data.currentPlan || null;
     const usage = data.usage || {};
     const sub = data.subscription || null;
-    const period = data.period || null;
-    const trial = data.trial || {};
 
     if (currentPanel) {
       try {
         const planName = (current && current.name) || (sub && sub.planName) || 'Trial';
         const planStatus = (current && current.status) || data.planStatus || 'Disponível';
-        const priceCents = current && current.priceCents != null ? current.priceCents
-          : (sub && sub.priceCents != null ? sub.priceCents : null);
-        const currency = (current && current.currency) || (sub && sub.currency) || 'USD';
         const startsAt = (current && current.startsAt) || (sub && sub.startsAt) || null;
         const endsAt = (current && current.endsAt) || (sub && (sub.endsAt || sub.nextRenewalAt)) || null;
-        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Plano actual</h2>';
+        const active = !!(sub && (sub.status === 'active' || planStatus === 'Activo' || planStatus === 'Ativo'));
+        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">A sua subscrição</h2>';
         html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">';
         html += '<div><span class="form-label">Plano</span><div style="font-weight:600">' + esc(planName) + '</div></div>';
         html += '<div><span class="form-label">Estado</span><div>' + esc(planStatus) + '</div></div>';
-        if (priceCents != null) {
-          html += '<div><span class="form-label">Preço de referência</span><div>' + esc(fmtUsd(priceCents, currency)) + ' / 30 dias</div></div>';
-        }
         if (startsAt) html += '<div><span class="form-label">Início</span><div>' + esc(fmtDate(startsAt)) + '</div></div>';
         if (endsAt) html += '<div><span class="form-label">Expira</span><div>' + esc(fmtDate(endsAt)) + '</div></div>';
         html += '</div>';
-        if (!sub && (planStatus === 'Concluído' || (trial && trial.used))) {
-          html += '<p class="card-muted" style="margin:.75rem 0 0">O limite gratuito foi atingido. Escolha o plano Pro para continuar.</p>';
-        }
-        if (!(qRes && qRes.ok)) {
-          html += '<p class="muted" style="margin-top:.5rem">Não foi possível carregar todos os dados da subscrição.</p>';
-        }
+        html += '<div style="margin-top:1rem">';
+        html += '<button type="button" class="btn btn-primary" id="btn-open-subscribe-modal">' + (active ? 'Renovar' : 'Assinar / Renovar') + '</button>';
+        html += '</div>';
         currentPanel.innerHTML = html;
+        const openBtn = document.getElementById('btn-open-subscribe-modal');
+        if (openBtn) openBtn.addEventListener('click', function () { openSubscribeModal(); });
       } catch (_) {
-        currentPanel.innerHTML = '<p class="muted">Não foi possível carregar o plano actual.</p>';
+        currentPanel.innerHTML = '<p class="muted">Não foi possível carregar a subscrição.</p>';
       }
     }
 
@@ -3315,154 +3308,31 @@
         const reserved = typeof usage.reservedLeads === 'number' ? usage.reservedLeads : 0;
         const limit = usage.planLimit != null && Number(usage.planLimit) > 0 ? Number(usage.planLimit) : null;
         const remaining = limit != null
-          ? (usage.availableLeads != null ? Number(usage.availableLeads)
-            : (usage.remaining != null ? Number(usage.remaining) : Math.max(0, limit - delivered - reserved)))
+          ? (usage.availableLeads != null ? Number(usage.availableLeads) : Math.max(0, limit - delivered - reserved))
           : null;
         let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Utilização de leads</h2>';
         if (limit != null) {
           const pct = limit > 0 ? Math.min(100, Math.round((delivered / limit) * 100)) : 0;
-          html += '<div style="font-size:1.15rem;font-weight:600;margin-bottom:.35rem">'
-            + esc(delivered) + ' / ' + esc(limit) + '</div>';
-          html += '<div class="muted" style="margin-bottom:.25rem">Reservados (em curso): ' + esc(reserved) + '</div>';
-          html += '<div class="muted" style="margin-bottom:.5rem">Disponíveis: ' + esc(remaining) + '</div>';
-          html += '<div style="height:8px;background:rgba(148,163,184,.25);border-radius:4px;overflow:hidden">'
-            + '<div style="height:100%;width:' + pct + '%;background:var(--color-accent,#3b82f6);border-radius:4px"></div></div>';
+          html += '<div style="font-size:1.15rem;font-weight:600;margin-bottom:.35rem">' + esc(delivered) + ' / ' + esc(limit) + '</div>';
+          html += '<div class="muted" style="margin-bottom:.25rem">Reservados: ' + esc(reserved) + ' · Disponíveis: ' + esc(remaining) + '</div>';
+          html += '<div style="height:8px;background:rgba(148,163,184,.25);border-radius:4px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:var(--color-accent,#3b82f6);border-radius:4px"></div></div>';
         } else {
           html += '<div style="font-size:1.15rem;font-weight:600">' + esc(delivered) + '</div>';
-          html += '<p class="muted" style="margin:.35rem 0 0">Leads finais entregues (trial ou ciclo actual).</p>';
+          html += '<p class="muted" style="margin:.35rem 0 0">Leads finais no ciclo actual / trial.</p>';
         }
         usagePanel.innerHTML = html;
       } catch (_) {
-        usagePanel.innerHTML = '<p class="muted">Utilização indisponível de momento.</p>';
+        usagePanel.innerHTML = '<p class="muted">Utilização indisponível.</p>';
       }
     }
 
     if (list) {
-      try {
-        const plans = ((pRes && pRes.data && pRes.data.plans) || []);
-        const gatewayOk = !!(methRes && methRes.data && methRes.data.gatewayConfigured);
-        const methods = (methRes && methRes.data && methRes.data.methods) || [];
-        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Planos disponíveis</h2>';
-        if (!plans.length) {
-          html += '<p class="muted">Nenhum plano activo. Execute a migration 018 (plano Pro) se ainda não foi aplicada.</p>';
-        } else {
-          plans.forEach(function (p) {
-            const price = fmtUsd(p.priceCents, p.currency || 'USD');
-            html += '<div class="plan-card" data-plan-id="' + esc(p.id) + '" style="border-top:1px solid rgba(148,163,184,.25);padding:.85rem 0">';
-            html += '<div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:flex-start">';
-            html += '<div><strong style="font-size:1.05rem">' + esc(p.name) + '</strong>';
-            if (p.description) html += '<div class="muted" style="margin-top:.25rem">' + esc(p.description) + '</div>';
-            html += '<div style="margin-top:.35rem"><strong>' + esc(price) + '</strong> <span class="muted">/ 30 dias</span></div>';
-            html += '<ul class="muted" style="margin:.4rem 0 0;padding-left:1.1rem;font-size:.9rem">';
-            if (p.maxResultsPerMonth) html += '<li>' + esc(p.maxResultsPerMonth) + ' leads entregues por ciclo</li>';
-            html += '<li>Pesquisas ilimitadas em quantidade</li>';
-            if (p.maxResultsPerSearch) html += '<li>Até ' + esc(p.maxResultsPerSearch) + ' resultados por pesquisa</li>';
-            html += '</ul></div></div>';
-            html += '<div style="margin-top:.75rem;display:flex;flex-wrap:wrap;gap:.5rem">';
-            html += '<button type="button" class="btn btn-primary btn-sm btn-subscribe-manual" data-plan-id="' + esc(p.id) + '">Pedido manual</button>';
-            if (gatewayOk) {
-              html += '<button type="button" class="btn btn-secondary btn-sm btn-subscribe-gateway" data-plan-id="' + esc(p.id) + '">Pagar com PayZeno</button>';
-            }
-            html += '</div>';
-            html += '<div class="plan-checkout-panel" data-plan-id="' + esc(p.id) + '" hidden style="margin-top:.75rem;padding:.75rem;border:1px solid rgba(148,163,184,.3);border-radius:6px"></div>';
-            html += '</div>';
-          });
-        }
-        list.innerHTML = html;
-
-        list.querySelectorAll('.btn-subscribe-manual').forEach(function (btn) {
-          btn.addEventListener('click', function () {
-            const planId = btn.getAttribute('data-plan-id');
-            const panel = list.querySelector('.plan-checkout-panel[data-plan-id="' + planId + '"]');
-            if (!panel) return;
-            panel.hidden = false;
-            panel.innerHTML =
-              '<p class="muted" style="margin:0 0 .5rem">Pagamento manual: transfira <strong>USD 19,99</strong> e indique a referência. A equipa activa a subscrição após confirmação.</p>' +
-              '<label class="form-label">Referência / comprovativo (opcional)</label>' +
-              '<input class="input" type="text" id="manual-ref-' + esc(planId) + '" placeholder="Ex.: M-Pesa 123456 ou link do comprovativo">' +
-              '<div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap">' +
-              '<button type="button" class="btn btn-primary btn-sm btn-confirm-manual" data-plan-id="' + esc(planId) + '">Registar pedido</button>' +
-              '<button type="button" class="btn btn-ghost btn-sm btn-cancel-checkout" data-plan-id="' + esc(planId) + '">Cancelar</button>' +
-              '</div><p class="muted plan-checkout-msg" style="margin:.5rem 0 0"></p>';
-            panel.querySelector('.btn-cancel-checkout').addEventListener('click', function () {
-              panel.hidden = true; panel.innerHTML = '';
-            });
-            panel.querySelector('.btn-confirm-manual').addEventListener('click', async function () {
-              const msg = panel.querySelector('.plan-checkout-msg');
-              try {
-                const token = await ensureCsrf();
-                const refEl = document.getElementById('manual-ref-' + planId);
-                const ref = refEl ? refEl.value.trim() : '';
-                const res = await api('/api/billing/payments', {
-                  method: 'POST',
-                  headers: { 'X-CSRF-Token': token },
-                  body: { planId: planId, reference: ref || null, proofUrl: ref || null },
-                });
-                if (res.ok) {
-                  if (msg) msg.textContent = 'Pedido registado. Estado: pendente de aprovação administrativa.';
-                  loadPlansQuotaView();
-                } else if (msg) {
-                  msg.textContent = (res.data && res.data.error) || 'Falha ao registar pedido.';
-                }
-              } catch (e) {
-                if (msg) msg.textContent = (e && e.message) || 'Erro de rede.';
-              }
-            });
-          });
-        });
-
-        list.querySelectorAll('.btn-subscribe-gateway').forEach(function (btn) {
-          btn.addEventListener('click', function () {
-            const planId = btn.getAttribute('data-plan-id');
-            const panel = list.querySelector('.plan-checkout-panel[data-plan-id="' + planId + '"]');
-            if (!panel) return;
-            panel.hidden = false;
-            var methodOpts = methods.map(function (m) {
-              return '<option value="' + esc(m.code) + '">' + esc(m.code) + ' (' + esc(m.currency) + ')</option>';
-            }).join('');
-            panel.innerHTML =
-              '<p class="muted" style="margin:0 0 .5rem">Checkout PayZeno. O preço de referência continua USD 19,99; o valor local usa a taxa Frankfurter (arredondada para cima).</p>' +
-              '<label class="form-label">Método</label><select class="select" id="gw-method-' + esc(planId) + '">' + methodOpts + '</select>' +
-              '<label class="form-label" style="margin-top:.4rem">Nome</label><input class="input" type="text" id="gw-name-' + esc(planId) + '" required>' +
-              '<label class="form-label" style="margin-top:.4rem">Telefone (E.164)</label><input class="input" type="tel" id="gw-phone-' + esc(planId) + '" placeholder="+25884..." required>' +
-              '<div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap">' +
-              '<button type="button" class="btn btn-primary btn-sm btn-confirm-gateway" data-plan-id="' + esc(planId) + '">Continuar para pagamento</button>' +
-              '<button type="button" class="btn btn-ghost btn-sm btn-cancel-checkout" data-plan-id="' + esc(planId) + '">Cancelar</button>' +
-              '</div><p class="muted plan-checkout-msg" style="margin:.5rem 0 0"></p>';
-            panel.querySelector('.btn-cancel-checkout').addEventListener('click', function () {
-              panel.hidden = true; panel.innerHTML = '';
-            });
-            panel.querySelector('.btn-confirm-gateway').addEventListener('click', async function () {
-              const msg = panel.querySelector('.plan-checkout-msg');
-              try {
-                const token = await ensureCsrf();
-                const method = document.getElementById('gw-method-' + planId).value;
-                const name = document.getElementById('gw-name-' + planId).value.trim();
-                const phone = document.getElementById('gw-phone-' + planId).value.trim();
-                if (!name || !phone) {
-                  if (msg) msg.textContent = 'Nome e telefone são obrigatórios.';
-                  return;
-                }
-                const res = await api('/api/billing/checkout/session', {
-                  method: 'POST',
-                  headers: { 'X-CSRF-Token': token },
-                  body: { planId: planId, method: method, customer: { name: name, phone: phone } },
-                });
-                if (res.ok && res.data && res.data.checkoutUrl) {
-                  window.location.href = res.data.checkoutUrl;
-                } else if (msg) {
-                  msg.textContent = (res.data && res.data.error) || 'Não foi possível iniciar o checkout.';
-                }
-              } catch (e) {
-                if (msg) msg.textContent = (e && e.message) || 'Erro de rede.';
-              }
-            });
-          });
-        });
-      } catch (_) {
-        list.innerHTML = '<p class="muted">Não foi possível carregar os planos disponíveis.</p>';
-      }
+      list.innerHTML = '<p class="muted" style="margin:0">Utilize <strong>Assinar / Renovar</strong> para ver o plano Pro e concluir o pagamento seguro via PayZeno.</p>';
     }
+
+    window.__billingPlansCache = ((pRes && pRes.data && pRes.data.plans) || []);
+    window.__billingMethodsCache = ((methRes && methRes.data && methRes.data.methods) || []);
+    window.__billingGatewayOk = !!(methRes && methRes.data && methRes.data.gatewayConfigured);
 
     if (pays) {
       try {
@@ -3471,16 +3341,194 @@
           (payments.length ? payments.map(function (p) {
             const amount = fmtUsd(p.amountCents, p.currency || 'USD');
             return '<div style="border-top:1px solid rgba(148,163,184,.25);padding:.5rem 0">' +
-              '<strong>' + esc(p.planName || p.planId || 'Plano') + '</strong> · ' +
-              esc(amount) + ' · ' + esc(paymentStatusPt(p.status)) +
+              '<strong>' + esc(p.planName || 'Pro') + '</strong> · ' + esc(amount) + ' · ' + esc(paymentStatusPt(p.status)) +
               (p.method ? ' · ' + esc(p.method) : '') +
               (p.createdAt ? ' · ' + esc(String(p.createdAt).slice(0, 10)) : '') +
               '</div>';
           }).join('') : '<p class="muted">Ainda não existem pagamentos.</p>');
       } catch (_) {
-        pays.innerHTML = '<p class="muted">Histórico de pagamentos indisponível.</p>';
+        pays.innerHTML = '<p class="muted">Histórico indisponível.</p>';
       }
     }
+
+    try { handleBillingReturn(); } catch (_) {}
+  }
+
+  function openSubscribeModal() {
+    let modal = document.getElementById('subscribe-modal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'subscribe-modal';
+      modal.className = 'modal';
+      modal.hidden = true;
+      modal.innerHTML =
+        '<div class="modal-backdrop" data-close-subscribe></div>' +
+        '<div class="modal-dialog card" role="dialog" aria-modal="true" aria-labelledby="subscribe-modal-title" style="max-width:480px;padding:1.25rem">' +
+        '<h2 id="subscribe-modal-title" style="margin:0 0 1rem;font-size:1.1rem">Assinar / Renovar — Plano Pro</h2>' +
+        '<div id="subscribe-modal-body"></div>' +
+        '<div style="margin-top:1rem;display:flex;gap:.5rem;justify-content:flex-end;flex-wrap:wrap">' +
+        '<button type="button" class="btn btn-ghost" data-close-subscribe>Fechar</button>' +
+        '</div></div>';
+      document.body.appendChild(modal);
+      modal.querySelectorAll('[data-close-subscribe]').forEach(function (el) {
+        el.addEventListener('click', function () { modal.hidden = true; });
+      });
+    }
+    const body = document.getElementById('subscribe-modal-body');
+    const plans = window.__billingPlansCache || [];
+    const methods = window.__billingMethodsCache || [];
+    const gatewayOk = !!window.__billingGatewayOk;
+    const pro = plans.find(function (p) { return String(p.name).toLowerCase() === 'pro'; }) || plans[0];
+
+    function esc(s) {
+      return escapeHtmlPlans(s == null ? '' : String(s));
+    }
+
+    if (!pro) {
+      body.innerHTML = '<p class="muted">Plano Pro indisponível. Confirme que a migration 018 foi aplicada.</p>';
+      modal.hidden = false;
+      return;
+    }
+    if (!gatewayOk) {
+      body.innerHTML = '<p class="muted">Checkout PayZeno ainda não está configurado no servidor.</p>';
+      modal.hidden = false;
+      return;
+    }
+
+    const methodOpts = methods.map(function (m) {
+      return '<option value="' + esc(m.code) + '">' + esc(String(m.code).toUpperCase()) + ' · ' + esc(m.currency) + '</option>';
+    }).join('');
+
+    body.innerHTML =
+      '<div style="margin-bottom:1rem">' +
+      '<div style="font-size:1.5rem;font-weight:700">$19.99 <span class="muted" style="font-size:.95rem;font-weight:500">USD / 30 dias</span></div>' +
+      '<ul class="muted" style="margin:.75rem 0 0;padding-left:1.1rem;font-size:.9rem;line-height:1.5">' +
+      '<li>2.500 leads entregues por ciclo</li>' +
+      '<li>Pesquisas ilimitadas em quantidade</li>' +
+      '<li>Até 500 resultados por pesquisa</li>' +
+      '</ul></div>' +
+      '<label class="form-label">Método de pagamento</label>' +
+      '<select class="select" id="subscribe-method">' + methodOpts + '</select>' +
+      '<p id="subscribe-quote" class="muted" style="margin:.5rem 0 0;font-size:.9rem">Seleccione o método para ver o valor final.</p>' +
+      '<label class="form-label" style="margin-top:.75rem">Nome</label>' +
+      '<input class="input" type="text" id="subscribe-name" autocomplete="name">' +
+      '<label class="form-label" style="margin-top:.5rem">Telefone (E.164)</label>' +
+      '<input class="input" type="tel" id="subscribe-phone" placeholder="+25884…" autocomplete="tel">' +
+      '<p id="subscribe-msg" class="muted" style="margin:.75rem 0 0"></p>' +
+      '<button type="button" class="btn btn-primary" id="subscribe-pay-btn" style="margin-top:1rem;width:100%">Continuar para pagamento</button>';
+
+    const methodEl = document.getElementById('subscribe-method');
+    async function refreshQuote() {
+      const qEl = document.getElementById('subscribe-quote');
+      if (!methodEl || !qEl) return;
+      try {
+        const token = await ensureCsrf();
+        const res = await api('/api/billing/checkout/quote', {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': token },
+          body: { planId: pro.id, method: methodEl.value },
+        });
+        if (res.ok && res.data) {
+          qEl.textContent = 'Total a pagar: ' + res.data.amountMajor + ' ' + res.data.currency + ' (referência comercial $19.99 USD).';
+        } else {
+          qEl.textContent = (res.data && res.data.error) || 'Cotação indisponível.';
+        }
+      } catch (e) {
+        qEl.textContent = 'Não foi possível obter a cotação.';
+      }
+    }
+    if (methodEl) {
+      methodEl.addEventListener('change', refreshQuote);
+      refreshQuote();
+    }
+
+    document.getElementById('subscribe-pay-btn').addEventListener('click', async function () {
+      const msg = document.getElementById('subscribe-msg');
+      const name = document.getElementById('subscribe-name').value.trim();
+      const phone = document.getElementById('subscribe-phone').value.trim();
+      if (!name || !phone) {
+        if (msg) msg.textContent = 'Nome e telefone são obrigatórios.';
+        return;
+      }
+      try {
+        const token = await ensureCsrf();
+        if (msg) msg.textContent = 'A criar sessão de pagamento…';
+        const res = await api('/api/billing/checkout/session', {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': token },
+          body: {
+            planId: pro.id,
+            method: methodEl.value,
+            customer: { name: name, phone: phone },
+            idempotencyKey: 'payzeno:' + pro.id + ':' + methodEl.value,
+          },
+        });
+        if (res.ok && res.data && res.data.checkoutUrl) {
+          try { sessionStorage.setItem('billingPaymentId', res.data.payment && res.data.payment.id); } catch (_) {}
+          window.location.href = res.data.checkoutUrl;
+        } else if (msg) {
+          msg.textContent = (res.data && res.data.error) || 'Não foi possível iniciar o checkout.';
+        }
+      } catch (e) {
+        if (msg) msg.textContent = (e && e.message) || 'Erro de rede.';
+      }
+    });
+
+    modal.hidden = false;
+  }
+
+  async function handleBillingReturn() {
+    const params = new URLSearchParams(window.location.search || '');
+    const billing = params.get('billing');
+    if (!billing) return;
+    let paymentId = params.get('payment_id') || params.get('reference');
+    try { if (!paymentId) paymentId = sessionStorage.getItem('billingPaymentId'); } catch (_) {}
+
+    let banner = document.getElementById('billing-return-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'billing-return-banner';
+      banner.className = 'card';
+      banner.style.cssText = 'padding:1rem;margin-bottom:1rem';
+      const host = document.getElementById('plans-current-panel');
+      if (host && host.parentElement) host.parentElement.insertBefore(banner, host);
+    }
+
+    if (billing === 'cancel') {
+      banner.innerHTML = '<strong>Checkout cancelado.</strong> Nenhuma cobrança foi confirmada.';
+      return;
+    }
+
+    banner.innerHTML = '<strong>A processar pagamento…</strong> A aguardar confirmação segura do PayZeno.';
+
+    if (!paymentId) {
+      banner.innerHTML = '<strong>Pagamento em processamento.</strong> A activação ocorre apenas após confirmação do PayZeno.';
+      return;
+    }
+
+    let attempts = 0;
+    const poll = async function () {
+      attempts += 1;
+      try {
+        const res = await api('/api/billing/payments/' + encodeURIComponent(paymentId) + '/status');
+        if (res.ok && res.data && res.data.payment) {
+          const st = String(res.data.payment.status || '').toLowerCase();
+          if (st === 'completed' || st === 'approved') {
+            banner.innerHTML = '<strong>Pagamento confirmado.</strong> A sua subscrição Pro está activa.';
+            try { sessionStorage.removeItem('billingPaymentId'); } catch (_) {}
+            loadPlansQuotaView();
+            return;
+          }
+          if (['failed', 'cancelled', 'expired', 'refunded', 'chargeback'].includes(st)) {
+            banner.innerHTML = '<strong>Pagamento não concluído</strong> (' + st + ').';
+            return;
+          }
+        }
+      } catch (_) {}
+      if (attempts < 15) setTimeout(poll, 2000);
+      else banner.innerHTML = '<strong>Confirmação ainda pendente.</strong> O acesso será activado quando o PayZeno confirmar.';
+    };
+    poll();
   }
 
 

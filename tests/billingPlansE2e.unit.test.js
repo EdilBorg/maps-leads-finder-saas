@@ -26,7 +26,7 @@ describe('migration 018 Pro plan', () => {
 describe('billing routes', () => {
   it('exposes plans, manual payment, checkout, webhook', () => {
     assert.match(billing, /router\.get\('\/plans'/);
-    assert.match(billing, /router\.post\('\/payments'/);
+    assert.match(billing, /checkout\/session/);
     assert.match(billing, /router\.post\('\/checkout\/session'/);
     assert.match(billing, /router\.post\('\/webhooks\/payzeno'/);
   });
@@ -59,8 +59,8 @@ describe('FX and PayZeno unit', () => {
 describe('frontend plans page', () => {
   it('loads sections independently and has subscribe actions', () => {
     assert.match(front, /loadPlansQuotaViewBody/);
-    assert.match(front, /btn-subscribe-manual/);
-    assert.match(front, /btn-subscribe-gateway/);
+    assert.match(front, /openSubscribeModal/);
+    assert.match(front, /Assinar \/ Renovar|subscribe-pay-btn/);
     assert.match(front, /Promise\.all/);
     assert.match(front, /\/api\/billing\/checkout\/session/);
   });

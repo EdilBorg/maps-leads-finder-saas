@@ -3,7 +3,6 @@ const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { requireCsrf } = require('../middleware/csrf');
 const planService = require('../services/planService');
 const subscriptionService = require('../services/subscriptionService');
-const paymentService = require('../services/paymentService');
 const providerUsageService = require('../services/providerUsageService');
 const { getPool } = require('../db/pool');
 
@@ -41,30 +40,6 @@ router.put('/plans/:id/limits/:provider', requireCsrf, async (req, res, next) =>
       maxApiCallsPerPeriod: req.body.maxApiCallsPerPeriod,
     });
     res.json({ ok: true, limit });
-  } catch (err) { next(err); }
-});
-
-router.get('/payments/pending', async (req, res, next) => {
-  try {
-    res.json({ ok: true, payments: await paymentService.listPendingPayments() });
-  } catch (err) { next(err); }
-});
-
-router.post('/payments/:id/approve', requireCsrf, async (req, res, next) => {
-  try {
-    const result = await paymentService.approvePayment(req.params.id, req.session.userId);
-    if (!result.ok) return res.status(400).json(result);
-    res.json(result);
-  } catch (err) { next(err); }
-});
-
-router.post('/payments/:id/reject', requireCsrf, async (req, res, next) => {
-  try {
-    const result = await paymentService.rejectPayment(
-      req.params.id, req.session.userId, (req.body && req.body.reason) || null
-    );
-    if (!result.ok) return res.status(400).json(result);
-    res.json(result);
   } catch (err) { next(err); }
 });
 

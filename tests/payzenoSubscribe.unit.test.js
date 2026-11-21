@@ -34,6 +34,7 @@ describe('subscribe UX', () => {
 
 describe('PayZeno official webhook events', () => {
   it('handleWebhookPayload recognizes payment.succeeded', async () => {
+    // Without DB, only signature unit tests run here
     assert.equal(typeof payzeno.handleWebhookPayload, 'function');
     assert.equal(typeof payzeno.verifyWebhookSignature, 'function');
   });
