@@ -122,14 +122,24 @@ router.post('/checkout/session', requireAuth, requireVerifiedEmail, requireCsrf,
       });
     }
 
-    const appUrl = process.env.APP_URL || '';
+    // Return URLs are server-owned only (never trust client-supplied URLs — open redirect risk).
+    const appUrl = String(process.env.APP_URL || '').replace(/\/$/, '');
+    if (!appUrl || !/^https?:\/\//i.test(appUrl)) {
+      return res.status(503).json({
+        ok: false,
+        error: 'APP_URL do servidor não está configurado correctamente.',
+        code: 'APP_URL_MISSING',
+      });
+    }
+    const successUrl = `${appUrl}/?billing=return`;
+    const cancelUrl = `${appUrl}/?billing=cancel`;
     const result = await payzenoService.createCheckoutSession({
       userId: req.session.userId,
       planId,
       method,
       customer: { name, phone, email: email || undefined },
-      successUrl: (req.body && req.body.successUrl) || `${appUrl}/?billing=return`,
-      cancelUrl: (req.body && req.body.cancelUrl) || `${appUrl}/?billing=cancel`,
+      successUrl,
+      cancelUrl,
       idempotencyKey: (req.body && req.body.idempotencyKey) || null,
     });
     res.status(201).json({

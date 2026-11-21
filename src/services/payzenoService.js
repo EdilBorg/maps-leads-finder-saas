@@ -155,7 +155,7 @@ async function createCheckoutSession({
        RETURNING *`,
       [
         userId, planId, quote.amountMinor, quote.currency, quote.method,
-        key, String(userId), // reference reserved for internal payment id after insert if needed
+        key, null, // reference set to payment.id immediately after insert
         JSON.stringify(quote.fxSnapshot),
       ]
     );
@@ -175,9 +175,11 @@ async function createCheckoutSession({
       }
     }
     if (payment && payment.id) {
+      // Stable internal reference = payment UUID (never userId)
       await client.query(
-        `UPDATE payments SET reference = $2 WHERE id = $1 AND (reference IS NULL OR reference = $3)`,
-        [payment.id, String(payment.id), key]
+        `UPDATE payments SET reference = $2
+         WHERE id = $1 AND (reference IS NULL OR reference = $2 OR reference = $3)`,
+        [payment.id, String(payment.id), String(userId)]
       );
       payment.reference = String(payment.id);
     }

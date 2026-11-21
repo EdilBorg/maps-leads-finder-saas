@@ -3401,15 +3401,14 @@
       modal.innerHTML =
         '<div class="modal-backdrop" data-close-subscribe></div>' +
         '<div class="card billing-modal-shell" role="dialog" aria-modal="true" aria-labelledby="subscribe-modal-title">' +
-        '<h2 id="subscribe-modal-title" style="margin:0 0 .25rem;font-size:1.15rem">Activar Plano Pro</h2>' +
-        '<p class="muted" style="margin:0 0 1rem;font-size:.9rem">Confirma o método e os dados para continuar para o pagamento.</p>' +
         '<div id="subscribe-modal-body"></div>' +
-        '<button type="button" class="btn btn-ghost btn-sm" data-close-subscribe style="margin-top:.75rem">Fechar</button></div>';
+        '<button type="button" class="btn btn-ghost btn-sm checkout-close" data-close-subscribe>Fechar</button></div>';
       document.body.appendChild(modal);
       modal.querySelectorAll('[data-close-subscribe]').forEach(function (el) {
         el.addEventListener('click', function () { modal.hidden = true; });
       });
     }
+
     const body = document.getElementById('subscribe-modal-body');
     const plans = window.__billingPlansCache || [];
     const methods = window.__billingMethodsCache || [];
@@ -3422,95 +3421,232 @@
       return;
     }
 
-    const methodOpts = methods.map(function (m) {
-      return '<option value="' + esc(m.code) + '">' + esc(String(m.code).toUpperCase()) + ' (' + esc(m.currency) + ')</option>';
+    // Display names and logo paths for known gateway methods
+    var METHOD_META = {
+      mpesa: { label: 'M-Pesa', logo: '/img/payments/mpesa.jpeg' },
+      emola: { label: 'e-Mola', logo: '/img/payments/emola.jpeg' },
+      card: { label: 'Cartão', logo: '/img/payments/card.jpeg' },
+      payfast: { label: 'PayFast', logo: '/img/payments/payfast.jpeg' },
+      multicaixa: { label: 'Multicaixa', logo: '/img/payments/multicaixa.jpeg' },
+    };
+
+    // Mobile-money methods that benefit from a phone field before hosted checkout
+    var PHONE_METHODS = { mpesa: true, emola: true, multicaixa: true };
+
+    var available = (methods || []).filter(function (m) {
+      return m && m.code && METHOD_META[String(m.code).toLowerCase()];
+    });
+    if (!available.length) {
+      // Fall back to whatever the server returned (still no invented methods)
+      available = (methods || []).filter(function (m) { return m && m.code; });
+    }
+
+    var cardsHtml = available.map(function (m) {
+      var code = String(m.code).toLowerCase();
+      var meta = METHOD_META[code] || { label: String(m.code).toUpperCase(), logo: null };
+      var logo = meta.logo
+        ? '<span class="checkout-method-logo-wrap"><img src="' + esc(meta.logo) + '" alt="" width="52" height="28" loading="lazy" decoding="async"></span>'
+        : '';
+      return (
+        '<button type="button" class="checkout-method-card" role="radio" aria-checked="false" data-method="' + esc(code) + '" data-currency="' + esc(m.currency || '') + '">' +
+        logo +
+        '<span class="checkout-method-name">' + esc(meta.label) + '</span>' +
+        '</button>'
+      );
     }).join('');
 
     body.innerHTML =
-      '<div class="billing-card" style="padding:.85rem;margin-bottom:.9rem">' +
-      '<div style="font-weight:600">Pro</div>' +
-      '<div class="muted" style="font-size:.9rem;margin-top:.2rem">USD 19.99 · 30 dias · 2.500 leads · pesquisas ilimitadas</div>' +
+      '<div class="checkout-pro-header">' +
+      '<p class="checkout-plan-name" id="subscribe-modal-title">PRO</p>' +
+      '<p class="checkout-price">$19.99</p>' +
       '</div>' +
-      '<label class="form-label">Método de pagamento</label>' +
-      '<select class="select" id="subscribe-method">' + methodOpts + '</select>' +
-      '<p id="subscribe-quote" class="muted" style="margin:.4rem 0 0;font-size:.9rem"></p>' +
-      '<label class="form-label" style="margin-top:.75rem">Nome</label>' +
+      '<p class="checkout-methods-label">Método de pagamento</p>' +
+      '<div class="checkout-methods-grid" role="radiogroup" aria-label="Método de pagamento">' +
+      (cardsHtml || '<p class="muted">Nenhum método disponível.</p>') +
+      '</div>' +
+      '<div class="checkout-summary" id="checkout-summary" hidden>' +
+      '<div class="checkout-summary-row"><span class="label">Original</span><span class="value">$19.99</span></div>' +
+      '<div class="checkout-summary-row"><span class="label">A pagar</span><span class="value value-strong" id="checkout-amount">—</span></div>' +
+      '<div class="fx-hint" id="checkout-fx-hint" hidden></div>' +
+      '</div>' +
+      '<div class="checkout-fields" id="checkout-fields" hidden>' +
+      '<label class="form-label" for="subscribe-name">Nome</label>' +
       '<input class="input" type="text" id="subscribe-name" autocomplete="name">' +
-      '<p id="subscribe-name-err" class="muted" style="margin:.25rem 0 0;color:#dc2626;font-size:.85rem" hidden></p>' +
-      '<label class="form-label" style="margin-top:.5rem">Telefone (E.164)</label>' +
+      '<label class="form-label" for="subscribe-phone" id="subscribe-phone-label">Telefone (E.164)</label>' +
       '<input class="input" type="tel" id="subscribe-phone" placeholder="+25884…" autocomplete="tel">' +
-      '<p id="subscribe-phone-err" class="muted" style="margin:.25rem 0 0;color:#dc2626;font-size:.85rem" hidden></p>' +
-      '<p id="subscribe-msg" class="muted" style="margin:.6rem 0 0"></p>' +
-      '<button type="button" class="btn btn-primary" id="subscribe-pay-btn" style="margin-top:.85rem;width:100%">Continuar para pagamento</button>';
+      '</div>' +
+      '<p class="checkout-msg" id="subscribe-msg" role="status"></p>' +
+      '<button type="button" class="btn btn-primary" id="subscribe-pay-btn" disabled>Continuar para pagamento</button>';
 
-    const methodEl = document.getElementById('subscribe-method');
-    async function refreshQuote() {
-      const qEl = document.getElementById('subscribe-quote');
-      if (!methodEl || !qEl) return;
+    var selectedMethod = null;
+    var selectedCurrency = null;
+    var lastQuote = null;
+    var payBtn = document.getElementById('subscribe-pay-btn');
+    var msgEl = document.getElementById('subscribe-msg');
+    var summaryEl = document.getElementById('checkout-summary');
+    var amountEl = document.getElementById('checkout-amount');
+    var fxHintEl = document.getElementById('checkout-fx-hint');
+    var fieldsEl = document.getElementById('checkout-fields');
+    var phoneLabel = document.getElementById('subscribe-phone-label');
+    var phoneInput = document.getElementById('subscribe-phone');
+
+    function setMsg(text, isError) {
+      if (!msgEl) return;
+      msgEl.textContent = text || '';
+      msgEl.classList.toggle('is-error', !!isError);
+    }
+
+    function formatMajor(amount, currency, digits) {
+      var n = Number(amount);
+      if (!Number.isFinite(n)) return '—';
+      var d = Number.isFinite(digits) ? digits : 2;
       try {
-        const token = await ensureCsrf();
-        const res = await api('/api/billing/checkout/quote', {
-          method: 'POST',
-          headers: { 'X-CSRF-Token': token },
-          body: { planId: pro.id, method: methodEl.value },
-        });
-        if (res.ok && res.data) {
-          qEl.textContent = 'Total a pagar: ' + res.data.amountMajor + ' ' + res.data.currency + ' (ref. $19.99 USD)';
-        } else {
-          qEl.textContent = (res.data && res.data.error) || 'Cotação indisponível.';
-        }
+        return n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }) + ' ' + currency;
       } catch (_) {
-        qEl.textContent = 'Não foi possível obter a cotação.';
+        return n.toFixed(d) + ' ' + currency;
       }
     }
-    if (methodEl) {
-      methodEl.addEventListener('change', refreshQuote);
-      refreshQuote();
+
+    // Stable idempotency token per logical attempt (plan + method)
+    function getOrCreateAttemptToken(planId, method) {
+      var storageKey = 'billingAttempt:' + String(planId) + ':' + String(method);
+      try {
+        var existing = sessionStorage.getItem(storageKey);
+        if (existing && existing.length >= 8) return existing;
+      } catch (_) {}
+      var token = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
+      try { sessionStorage.setItem(storageKey, token); } catch (_) {}
+      return token;
     }
 
-    const payBtn = document.getElementById('subscribe-pay-btn');
-    payBtn.addEventListener('click', async function () {
-      const msg = document.getElementById('subscribe-msg');
-      const nameErr = document.getElementById('subscribe-name-err');
-      const phoneErr = document.getElementById('subscribe-phone-err');
-      const name = document.getElementById('subscribe-name').value.trim();
-      const phone = document.getElementById('subscribe-phone').value.trim();
-      nameErr.hidden = true;
-      phoneErr.hidden = true;
-      if (!name) { nameErr.textContent = 'Nome obrigatório.'; nameErr.hidden = false; return; }
-      if (!phone) { phoneErr.textContent = 'Telefone obrigatório.'; phoneErr.hidden = false; return; }
+    function clearAttemptToken(planId, method) {
+      try { sessionStorage.removeItem('billingAttempt:' + String(planId) + ':' + String(method)); } catch (_) {}
+    }
+
+    async function refreshQuote(method) {
+      setMsg('');
+      if (!method) return;
       try {
+        var token = await ensureCsrf();
+        var res = await api('/api/billing/checkout/quote', {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': token },
+          body: { planId: pro.id, method: method },
+        });
+        if (res.ok && res.data) {
+          lastQuote = res.data;
+          var digits = (res.data.fx && res.data.fx.minorDigits != null)
+            ? Number(res.data.fx.minorDigits)
+            : 2;
+          amountEl.textContent = formatMajor(res.data.amountMajor, res.data.currency, digits);
+          summaryEl.hidden = false;
+          if (res.data.fx && res.data.currency !== 'USD' && res.data.fx.rate) {
+            fxHintEl.hidden = false;
+            fxHintEl.textContent = 'Taxa: 1 USD ≈ ' + Number(res.data.fx.rate).toFixed(4) + ' ' + res.data.currency;
+          } else {
+            fxHintEl.hidden = true;
+            fxHintEl.textContent = '';
+          }
+          payBtn.disabled = false;
+        } else {
+          lastQuote = null;
+          amountEl.textContent = '—';
+          summaryEl.hidden = false;
+          payBtn.disabled = true;
+          setMsg((res.data && res.data.error) || 'Cotação indisponível.', true);
+        }
+      } catch (e) {
+        lastQuote = null;
         payBtn.disabled = true;
-        const token = await ensureCsrf();
-        if (msg) msg.textContent = 'A criar sessão…';
-        const clientToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
-          ? crypto.randomUUID()
-          : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
-        const res = await api('/api/billing/checkout/session', {
+        setMsg((e && e.message) || 'Não foi possível obter a cotação.', true);
+      }
+    }
+
+    body.querySelectorAll('.checkout-method-card').forEach(function (card) {
+      card.addEventListener('click', function () {
+        body.querySelectorAll('.checkout-method-card').forEach(function (c) {
+          c.classList.remove('is-selected');
+          c.setAttribute('aria-checked', 'false');
+        });
+        card.classList.add('is-selected');
+        card.setAttribute('aria-checked', 'true');
+        selectedMethod = card.getAttribute('data-method');
+        selectedCurrency = card.getAttribute('data-currency');
+        fieldsEl.hidden = false;
+        // Phone more relevant for mobile money; still collect name always
+        if (PHONE_METHODS[selectedMethod]) {
+          phoneLabel.hidden = false;
+          phoneInput.hidden = false;
+        } else {
+          // Card / PayFast: name still required by backend; phone optional-ish but backend requires it today
+          phoneLabel.hidden = false;
+          phoneInput.hidden = false;
+        }
+        payBtn.disabled = true;
+        amountEl.textContent = '…';
+        summaryEl.hidden = false;
+        refreshQuote(selectedMethod);
+      });
+    });
+
+    payBtn.addEventListener('click', async function () {
+      setMsg('');
+      if (!selectedMethod) {
+        setMsg('Seleccione um método de pagamento.', true);
+        return;
+      }
+      var name = (document.getElementById('subscribe-name').value || '').trim();
+      var phone = (document.getElementById('subscribe-phone').value || '').trim();
+      if (!name) { setMsg('Nome obrigatório.', true); return; }
+      if (!phone) { setMsg('Telefone obrigatório (formato E.164).', true); return; }
+
+      payBtn.disabled = true;
+      var prevLabel = payBtn.textContent;
+      payBtn.textContent = 'A criar sessão…';
+      try {
+        var token = await ensureCsrf();
+        var clientToken = getOrCreateAttemptToken(pro.id, selectedMethod);
+        var res = await api('/api/billing/checkout/session', {
           method: 'POST',
           headers: { 'X-CSRF-Token': token },
           body: {
             planId: pro.id,
-            method: methodEl.value,
+            method: selectedMethod,
             customer: { name: name, phone: phone },
             idempotencyKey: clientToken,
           },
         });
         if (res.ok && res.data && res.data.checkoutUrl) {
-          try { sessionStorage.setItem('billingPaymentId', res.data.payment && res.data.payment.id); } catch (_) {}
-          window.location.href = res.data.checkoutUrl;
-        } else if (msg) {
-          var errCode = res.data && res.data.code;
-          if (errCode === 'PAYZENO_NOT_CONFIGURED') {
-            msg.textContent = 'Pagamentos automáticos não estão configurados no servidor. Contacte o suporte.';
-          } else {
-            msg.textContent = (res.data && res.data.error) || 'Não foi possível iniciar o checkout.';
+          try {
+            sessionStorage.setItem('billingPaymentId', res.data.payment && res.data.payment.id);
+          } catch (_) {}
+          // Successful hand-off: clear attempt token so a later intentional retry is new
+          if (!res.data.replayed) {
+            // keep token for uncertain retries; only clear after browser navigates away
           }
-          payBtn.disabled = false;
+          window.location.href = res.data.checkoutUrl;
+          return;
         }
-      } catch (e) {
-        if (msg) msg.textContent = (e && e.message) || 'Erro de rede.';
+        var errCode = res.data && res.data.code;
+        if (errCode === 'PAYZENO_NOT_CONFIGURED') {
+          setMsg('Pagamentos automáticos não estão configurados no servidor. Contacte o suporte.', true);
+        } else if (errCode === 'ALREADY_PAID') {
+          clearAttemptToken(pro.id, selectedMethod);
+          setMsg((res.data && res.data.error) || 'Pagamento já concluído para esta tentativa.', true);
+        } else if (errCode === 'PAYZENO_UNCERTAIN') {
+          // Keep same token so retry recovers the same attempt
+          setMsg((res.data && res.data.error) || 'Não foi possível confirmar a sessão. Tente novamente.', true);
+        } else {
+          setMsg((res.data && res.data.error) || 'Não foi possível iniciar o checkout.', true);
+        }
         payBtn.disabled = false;
+        payBtn.textContent = prevLabel;
+      } catch (e) {
+        setMsg((e && e.message) || 'Erro de rede.', true);
+        payBtn.disabled = false;
+        payBtn.textContent = prevLabel;
       }
     });
 

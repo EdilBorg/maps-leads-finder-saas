@@ -76,4 +76,11 @@ describe('FX minor-unit conversion', () => {
     assert.throws(() => fx.convertUsdCentsToLocal(-1, 1, { currency: 'USD' }), (e) => e.code === 'FX_INVALID');
     assert.throws(() => fx.convertUsdCentsToLocal(100, 0, { currency: 'USD' }), (e) => e.code === 'FX_INVALID');
   });
+
+  it('rejects unknown currencies (no silent 2-decimal fallback)', () => {
+    assert.throws(
+      () => fx.convertUsdCentsToLocal(1999, 1.5, { currency: 'XYZ' }),
+      (e) => e && e.code === 'CURRENCY_UNSUPPORTED'
+    );
+  });
 });

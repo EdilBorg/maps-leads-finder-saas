@@ -130,8 +130,9 @@ function minorDigitsFor(currency) {
   if (Object.prototype.hasOwnProperty.call(CURRENCY_MINOR_DIGITS, code)) {
     return CURRENCY_MINOR_DIGITS[code];
   }
-  // Safe default for unknown ISO currencies: 2 decimal places.
-  return 2;
+  const err = new Error(`Moeda não suportada para conversão: ${code || '(vazia)'}`);
+  err.code = 'CURRENCY_UNSUPPORTED';
+  throw err;
 }
 
 /**
@@ -182,8 +183,19 @@ function convertUsdCentsToLocal(usdCents, rate, { currency = null, minorFactor =
   const rateScaled = BigInt(Math.round(r * 1e8));
   const num = BigInt(Math.trunc(cents)) * rateScaled * BigInt(factor);
   const denom = 100n * RATE_SCALE;
-  const localMinor = Number((num + denom - 1n) / denom); // ceil
-
+  const localMinorBig = (num + denom - 1n) / denom; // ceil division
+  if (localMinorBig < 0n) {
+    const err = new Error('Conversão cambial inválida');
+    err.code = 'FX_INVALID';
+    throw err;
+  }
+  // Reject values that cannot be represented safely as a JS number (gateway + DB expect finite numbers).
+  if (localMinorBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+    const err = new Error('Valor convertido excede o limite seguro de precisão numérica.');
+    err.code = 'FX_OVERFLOW';
+    throw err;
+  }
+  const localMinor = Number(localMinorBig);
   if (!Number.isFinite(localMinor) || localMinor < 0) {
     const err = new Error('Conversão cambial inválida');
     err.code = 'FX_INVALID';

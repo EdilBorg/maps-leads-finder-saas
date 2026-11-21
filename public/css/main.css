@@ -677,10 +677,10 @@ button { cursor: pointer; border: none; background: none; }
   top: 50%;
   transform: translate(-50%, -50%);
   z-index: 81;
-  width: min(440px, calc(100vw - 1.5rem));
-  max-height: 90vh;
-  overflow: auto;
-  padding: 1.25rem;
+  width: min(420px, calc(100vw - 1.25rem));
+  max-height: none;
+  overflow: visible;
+  padding: 1.1rem 1.15rem 1rem;
   border-radius: 12px;
 }
 #subscribe-modal .modal-backdrop {
