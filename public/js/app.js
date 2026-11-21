@@ -2827,8 +2827,6 @@
     const emailEl = $('#settings-email');
     const verifiedEl = $('#settings-verified');
     const recoveryEmailEl = $('#reset-password-email');
-    const createdEl = $('#settings-created');
-    const lastLoginEl = $('#settings-last-login');
     const verifyActions = $('#settings-verify-actions');
     if (!currentUser) {
       try {
@@ -2844,16 +2842,6 @@
       }
       if (verifyActions) verifyActions.hidden = !!currentUser.emailVerified;
       if (recoveryEmailEl) recoveryEmailEl.textContent = currentUser.email ? maskEmail(currentUser.email) : '—';
-      if (createdEl) {
-        createdEl.textContent = currentUser.createdAt
-          ? String(currentUser.createdAt).slice(0, 10)
-          : '—';
-      }
-      if (lastLoginEl) {
-        lastLoginEl.textContent = currentUser.lastLoginAt
-          ? String(currentUser.lastLoginAt).slice(0, 19).replace('T', ' ')
-          : '—';
-      }
     } else {
       if (recoveryEmailEl) recoveryEmailEl.textContent = '—';
       if (verifyActions) verifyActions.hidden = true;
@@ -3066,49 +3054,6 @@
       });
     }
 
-    const formCp = $('#form-change-password');
-    if (formCp) {
-      formCp.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const ok = $('#cp-ok');
-        const err = $('#cp-error');
-        if (ok) { ok.hidden = true; ok.textContent = ''; }
-        if (err) { err.hidden = true; err.textContent = ''; }
-        const currentPassword = ($('#cp-current') && $('#cp-current').value) || '';
-        const newPassword = ($('#cp-new') && $('#cp-new').value) || '';
-        const newPasswordConfirm = ($('#cp-confirm') && $('#cp-confirm').value) || '';
-        if (newPassword.length < 8 || newPassword.length > 128) {
-          if (err) { err.hidden = false; err.textContent = 'A nova palavra-passe deve ter entre 8 e 128 caracteres.'; }
-          return;
-        }
-        if (newPassword !== newPasswordConfirm) {
-          if (err) { err.hidden = false; err.textContent = 'A confirmação da nova palavra-passe não coincide.'; }
-          return;
-        }
-        try {
-          const token = await ensureCsrf();
-          const res = await api('/api/auth/change-password', {
-            method: 'POST',
-            headers: { 'X-CSRF-Token': token },
-            body: { currentPassword, newPassword, newPasswordConfirm },
-          });
-          const data = res.data || {};
-          if (res.ok) {
-            if (ok) {
-              ok.hidden = false;
-              ok.textContent = data.message || 'Palavra-passe actualizada. Vai ser redireccionado para iniciar sessão.';
-            }
-            formCp.reset();
-            setTimeout(function () { window.location.href = '/pages/login.html'; }, 1500);
-          } else if (err) {
-            err.hidden = false;
-            err.textContent = data.error || 'Não foi possível alterar a palavra-passe.';
-          }
-        } catch (_) {
-          if (err) { err.hidden = false; err.textContent = 'Erro de rede.'; }
-        }
-      });
-    }
 
     const resendBtn = $('#btn-resend-verification');
     if (resendBtn) {
@@ -3156,9 +3101,8 @@
     return (row.used || 0) + ' / ' + row.max + ' (restam ' + (row.remaining != null ? row.remaining : '—') + ')';
   }
   async function loadPlansQuotaView() {
-    const subPanel = document.getElementById('plans-subscription-panel');
+    const currentPanel = document.getElementById('plans-current-panel');
     const usagePanel = document.getElementById('plans-usage-panel');
-    const trialPanel = document.getElementById('plans-trial-panel');
     const list = document.getElementById('plans-list-panel');
     const pays = document.getElementById('plans-payments-panel');
 
@@ -3169,89 +3113,108 @@
       if (!v) return '—';
       return String(v).slice(0, 10);
     }
+    function fmtUsd(cents, currency) {
+      const cur = (currency || 'USD').toUpperCase();
+      if (cents == null || !Number.isFinite(Number(cents))) return '—';
+      const n = Number(cents) / 100;
+      if (cur === 'USD') return '$' + n.toFixed(2);
+      return n.toFixed(2) + ' ' + cur;
+    }
+    function paymentStatusPt(st) {
+      const s = String(st || '').toLowerCase();
+      if (s === 'paid' || s === 'approved' || s === 'completed' || s === 'success') return 'Pago';
+      if (s === 'pending' || s === 'awaiting' || s === 'processing') return 'Pendente';
+      if (s === 'rejected' || s === 'failed' || s === 'declined') return 'Recusado';
+      if (s === 'cancelled' || s === 'canceled') return 'Cancelado';
+      return st || '—';
+    }
 
     try {
       const qRes = await api('/api/billing/quota');
       const pRes = await api('/api/billing/plans');
       const payRes = await api('/api/billing/payments');
       const data = (qRes && qRes.data) || {};
+      const current = data.currentPlan || null;
+      const usage = data.usage || {};
       const sub = data.subscription || null;
       const period = data.period || null;
-      const usage = data.usage || {};
       const trial = data.trial || {};
 
-      if (subPanel) {
-        if (sub) {
-          subPanel.innerHTML =
-            '<h2 style="margin:0 0 .75rem;font-size:1rem">Subscrição actual</h2>' +
-            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">' +
-            '<div><span class="form-label">Plano</span><div>' + esc(sub.planName || '—') + '</div></div>' +
-            '<div><span class="form-label">Estado</span><div>' + esc(sub.status || '—') + '</div></div>' +
-            '<div><span class="form-label">Início</span><div>' + esc(fmtDate(sub.startsAt)) + '</div></div>' +
-            '<div><span class="form-label">Fim / renovação</span><div>' + esc(fmtDate(sub.nextRenewalAt || sub.endsAt)) + '</div></div>' +
-            '<div><span class="form-label">Ciclo</span><div>' +
-              (period && period.periodDays ? esc(period.periodDays + ' dias') :
-                (sub.periodDays ? esc(sub.periodDays + ' dias') : '—')) +
-            '</div></div>' +
-            (period ? '<div><span class="form-label">Período actual</span><div>' +
-              esc(fmtDate(period.periodStart) + ' → ' + fmtDate(period.periodEnd)) + '</div></div>' : '') +
-            '</div>';
-        } else {
-          subPanel.innerHTML =
-            '<h2 style="margin:0 0 .75rem;font-size:1rem">Subscrição actual</h2>' +
-            '<p class="muted" style="margin:0">Não tem uma subscrição activa. Pode activar um plano abaixo ou utilizar a demonstração gratuita (se ainda disponível).</p>';
+      const planName = (current && current.name) || (sub && sub.planName) || 'Trial';
+      const planStatus = (current && current.status) || 'Disponível';
+      const priceCents = current && current.priceCents != null ? current.priceCents
+        : (sub && sub.priceCents != null ? sub.priceCents : null);
+      const currency = (current && current.currency) || (sub && sub.currency) || 'USD';
+      const startsAt = (current && current.startsAt) || (sub && sub.startsAt) || null;
+      const endsAt = (current && current.endsAt) || (sub && (sub.endsAt || sub.nextRenewalAt)) || null;
+      const periodDays = (current && current.periodDays) || (period && period.periodDays)
+        || (sub && sub.periodDays) || null;
+
+      if (currentPanel) {
+        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Plano actual</h2>';
+        html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">';
+        html += '<div><span class="form-label">Plano</span><div style="font-weight:600">' + esc(planName) + '</div></div>';
+        html += '<div><span class="form-label">Estado</span><div>' + esc(planStatus) + '</div></div>';
+        if (priceCents != null) {
+          html += '<div><span class="form-label">Preço</span><div>' + esc(fmtUsd(priceCents, currency)) + '</div></div>';
+        } else if (!sub) {
+          html += '<div><span class="form-label">Preço</span><div>Gratuito</div></div>';
         }
+        if (periodDays) {
+          html += '<div><span class="form-label">Duração do ciclo</span><div>' + esc(periodDays + ' dias') + '</div></div>';
+        }
+        if (startsAt) {
+          html += '<div><span class="form-label">Início</span><div>' + esc(fmtDate(startsAt)) + '</div></div>';
+        }
+        if (endsAt) {
+          html += '<div><span class="form-label">Expiração / renovação</span><div>' + esc(fmtDate(endsAt)) + '</div></div>';
+        }
+        html += '</div>';
+        if (!sub && planStatus === 'Concluído') {
+          html += '<p class="card-muted" style="margin:.75rem 0 0">O limite gratuito foi atingido. Escolha um plano para continuar a pesquisar leads.</p>';
+        }
+        currentPanel.innerHTML = html;
       }
 
       if (usagePanel) {
         const delivered = typeof usage.deliveredResults === 'number' ? usage.deliveredResults : 0;
-        const limit = usage.planLimit != null && usage.planLimit > 0 ? usage.planLimit : null;
-        const remaining = limit != null ? Math.max(0, limit - delivered) : null;
-        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Consumo do plano</h2>';
-        html += '<p class="card-muted" style="margin:0 0 .75rem">Resultados finais entregues neste ciclo (após deduplicação). Não inclui pesquisas falhadas, canceladas nem a demonstração gratuita.</p>';
-        html += '<div><span class="form-label">Resultados entregues</span><div style="font-size:1.25rem;font-weight:600">' + esc(delivered) + '</div></div>';
+        const limit = usage.planLimit != null && Number(usage.planLimit) > 0 ? Number(usage.planLimit) : null;
+        const remaining = limit != null
+          ? (usage.remaining != null ? Number(usage.remaining) : Math.max(0, limit - delivered))
+          : null;
+        const dupes = typeof usage.duplicatesRemoved === 'number' ? usage.duplicatesRemoved : 0;
+
+        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Consumo de resultados</h2>';
         if (limit != null) {
           const pct = limit > 0 ? Math.min(100, Math.round((delivered / limit) * 100)) : 0;
-          html += '<div style="margin-top:.75rem"><span class="form-label">Limite do plano</span><div>' + esc(limit) + '</div></div>';
-          html += '<div style="margin-top:.5rem"><span class="form-label">Restantes</span><div>' + esc(remaining) + '</div></div>';
-          html += '<div style="margin-top:.75rem;height:8px;background:#1f2937;border-radius:4px;overflow:hidden">' +
-            '<div style="height:100%;width:' + pct + '%;background:#3b82f6;border-radius:4px"></div></div>';
+          html += '<div style="font-size:1.15rem;font-weight:600;margin-bottom:.35rem">'
+            + esc(delivered) + ' / ' + esc(limit) + '</div>';
+          html += '<div class="muted" style="margin-bottom:.5rem">Restantes: ' + esc(remaining) + '</div>';
+          html += '<div style="height:8px;background:rgba(148,163,184,.25);border-radius:4px;overflow:hidden">'
+            + '<div style="height:100%;width:' + pct + '%;background:var(--color-accent,#3b82f6);border-radius:4px"></div></div>';
           html += '<p class="muted" style="margin:.35rem 0 0;font-size:.85rem">' + pct + '% utilizado</p>';
-        } else if (!sub) {
-          html += '<p class="muted" style="margin-top:.75rem">Sem limite de plano activo. O consumo acima reflecte apenas pesquisas pagas no período, se existirem.</p>';
         } else {
-          html += '<p class="muted" style="margin-top:.75rem">Este plano não define um limite global de resultados finais no ciclo.</p>';
+          html += '<div style="font-size:1.15rem;font-weight:600">' + esc(delivered) + '</div>';
+          html += '<p class="muted" style="margin:.35rem 0 0">Resultados finais entregues neste ciclo. Este plano não define um limite global de resultados.</p>';
+        }
+        if (dupes > 0) {
+          html += '<p class="muted" style="margin:.75rem 0 0;font-size:.85rem">Duplicados removidos: ' + esc(dupes) + '</p>';
         }
         usagePanel.innerHTML = html;
-      }
-
-      if (trialPanel) {
-        let statusLabel = 'Indisponível';
-        if (trial.inProgress) statusLabel = 'Em curso';
-        else if (trial.available) statusLabel = 'Disponível';
-        else if (trial.used) statusLabel = 'Já utilizada';
-        trialPanel.innerHTML =
-          '<h2 style="margin:0 0 .75rem;font-size:1rem">Demonstração gratuita</h2>' +
-          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">' +
-          '<div><span class="form-label">Estado</span><div>' + esc(statusLabel) + '</div></div>' +
-          '<div><span class="form-label">Máximo de leads</span><div>' + esc(trial.maxLeads != null ? trial.maxLeads : 200) + '</div></div>' +
-          '</div>' +
-          '<p class="card-muted" style="margin:.75rem 0 0">Uma única pesquisa gratuita por conta, até 200 leads finais. Não renova e é independente da subscrição paga.</p>';
       }
 
       const plans = ((pRes && pRes.data && pRes.data.plans) || []);
       if (list) {
         list.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Planos disponíveis</h2>' +
           (plans.length ? plans.map(function (p) {
-            const price = (p.priceCents != null ? (Number(p.priceCents) / 100).toFixed(2) : '—') +
-              ' ' + (p.currency || 'USD');
-            return '<div style="border-top:1px solid #e5e7eb;padding:.75rem 0;display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:center">' +
+            const price = fmtUsd(p.priceCents, p.currency || 'USD');
+            return '<div style="border-top:1px solid rgba(148,163,184,.25);padding:.75rem 0;display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:center">' +
               '<div><strong>' + esc(p.name) + '</strong>' +
               (p.description ? '<div class="muted">' + esc(p.description) + '</div>' : '') +
               '<div class="muted">' + esc(price) +
               (p.maxResultsPerSearch ? ' · até ' + esc(p.maxResultsPerSearch) + ' resultados/pesquisa' : '') +
               '</div></div>' +
-              '<button type="button" class="btn btn-secondary btn-request-plan" data-plan-id="' + esc(p.id) + '">Pedir activação</button>' +
+              '<button type="button" class="btn btn-secondary btn-request-plan" data-plan-id="' + esc(p.id) + '">Escolher plano</button>' +
               '</div>';
           }).join('') : '<p class="muted">Nenhum plano disponível de momento.</p>');
         list.querySelectorAll('.btn-request-plan').forEach(function (btn) {
@@ -3280,21 +3243,17 @@
       if (pays) {
         pays.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Histórico de pagamentos</h2>' +
           (payments.length ? payments.map(function (p) {
-            const amount = p.amountCents != null
-              ? (Number(p.amountCents) / 100).toFixed(2) + ' ' + (p.currency || 'USD')
-              : '—';
-            return '<div style="border-top:1px solid #e5e7eb;padding:.5rem 0">' +
+            const amount = fmtUsd(p.amountCents, p.currency || 'USD');
+            return '<div style="border-top:1px solid rgba(148,163,184,.25);padding:.5rem 0">' +
               '<strong>' + esc(p.planName || p.planId || 'Plano') + '</strong> · ' +
-              esc(amount) + ' · ' + esc(p.status || '—') +
-              (p.method ? ' · ' + esc(p.method) : '') +
+              esc(amount) + ' · ' + esc(paymentStatusPt(p.status)) +
               (p.createdAt ? ' · ' + esc(String(p.createdAt).slice(0, 10)) : '') +
               '</div>';
-          }).join('') : '<p class="muted">Sem pagamentos.</p>');
+          }).join('') : '<p class="muted">Ainda não existem pagamentos.</p>');
       }
     } catch (e) {
-      if (subPanel) subPanel.innerHTML = '<p class="muted">Não foi possível carregar a informação do plano.</p>';
+      if (currentPanel) currentPanel.innerHTML = '<p class="muted">Não foi possível carregar a informação do plano.</p>';
       if (usagePanel) usagePanel.innerHTML = '';
-      if (trialPanel) trialPanel.innerHTML = '';
     }
   }
 

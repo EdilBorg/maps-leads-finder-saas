@@ -486,13 +486,23 @@ async function getClientQuotaView(userId) {
     return { max, used, remaining: Math.max(0, max - used) };
   }
 
-  // Delivered final results in the current paid period (after dedup/filters).
-  // Exclude failed/cancelled; exclude trial searches (quotaMode=trial).
+  // Client-facing consumption: final delivered leads (total_after_filters).
+  // Paid: current subscription cycle. Trial: all completed/partial trial searches.
+  // Exclude failed/cancelled. Do not sum provider raw quotas.
   let deliveredResults = 0;
+  let duplicatesRemoved = 0;
   let planLimit = null;
+  const trialInProgress = Boolean(
+    u.free_search_hold_token && u.free_search_hold_until
+    && new Date(u.free_search_hold_until) > new Date() && !u.free_search_used
+  );
+  const trialUsed = Boolean(u.free_search_used);
+
   if (sub && period && period.periodStart && period.periodEnd) {
     const { rows: delRows } = await pool.query(
-      `SELECT COALESCE(SUM(total_after_filters), 0)::int AS delivered
+      `SELECT
+         COALESCE(SUM(total_after_filters), 0)::int AS delivered,
+         COALESCE(SUM(GREATEST(COALESCE(total_normalized, 0) - COALESCE(total_after_dedup, 0), 0)), 0)::int AS dupes
        FROM searches
        WHERE user_id = $1
          AND status IN ('completed', 'partial')
@@ -503,36 +513,86 @@ async function getClientQuotaView(userId) {
       [userId, period.periodStart, period.periodEnd]
     );
     deliveredResults = delRows[0] ? Number(delRows[0].delivered) || 0 : 0;
+    duplicatesRemoved = delRows[0] ? Number(delRows[0].dupes) || 0 : 0;
     if (sub.maxResultsPerMonth != null && Number(sub.maxResultsPerMonth) > 0) {
       planLimit = Number(sub.maxResultsPerMonth);
     }
+  } else {
+    const { rows: trialRows } = await pool.query(
+      `SELECT
+         COALESCE(SUM(total_after_filters), 0)::int AS delivered,
+         COALESCE(SUM(GREATEST(COALESCE(total_normalized, 0) - COALESCE(total_after_dedup, 0), 0)), 0)::int AS dupes
+       FROM searches
+       WHERE user_id = $1
+         AND status IN ('completed', 'partial')
+         AND completed_at IS NOT NULL
+         AND COALESCE(filters->>'quotaMode', '') = 'trial'`,
+      [userId]
+    );
+    deliveredResults = trialRows[0] ? Number(trialRows[0].delivered) || 0 : 0;
+    duplicatesRemoved = trialRows[0] ? Number(trialRows[0].dupes) || 0 : 0;
+    planLimit = TRIAL_MAX_LEADS;
+    if (trialUsed && deliveredResults === 0) {
+      // Trial consumed (flag set) but no countable rows — treat as fully used.
+      deliveredResults = TRIAL_MAX_LEADS;
+    }
+  }
+
+  const remaining = planLimit != null ? Math.max(0, planLimit - deliveredResults) : null;
+
+  let planStatus = 'Disponível';
+  if (sub) {
+    const st = String(sub.status || '').toLowerCase();
+    if (st === 'active') planStatus = 'Activo';
+    else if (st === 'cancelled' || st === 'canceled') planStatus = 'Cancelado';
+    else if (st === 'expired') planStatus = 'Expirado';
+    else if (st === 'pending') planStatus = 'Pendente';
+    else planStatus = sub.status || 'Activo';
+  } else if (trialInProgress) {
+    planStatus = 'Activo';
+  } else if (trialUsed || (planLimit != null && deliveredResults >= planLimit)) {
+    planStatus = 'Concluído';
+  } else if (trialAvailable) {
+    planStatus = 'Disponível';
   }
 
   return {
     trial: {
-      available: Boolean(trialAvailable),
-      used: Boolean(u.free_search_used),
+      available: trialAvailable && !trialUsed,
+      used: trialUsed,
       maxLeads: TRIAL_MAX_LEADS,
-      inProgress: Boolean(
-        u.free_search_hold_token && u.free_search_hold_until
-        && new Date(u.free_search_hold_until) > new Date() && !u.free_search_used
-      ),
+      inProgress: trialInProgress,
     },
     subscription: sub ? {
       id: sub.id, status: sub.status, planId: sub.planId, planName: sub.planName,
       startsAt: sub.startsAt, endsAt: sub.endsAt, nextRenewalAt: sub.endsAt,
       maxResultsPerMonth: sub.maxResultsPerMonth != null ? Number(sub.maxResultsPerMonth) : null,
       maxResultsPerSearch: sub.maxResultsPerSearch != null ? Number(sub.maxResultsPerSearch) : null,
-      periodDays: period && period.periodDays != null ? period.periodDays : null,
+      periodDays: period && period.periodDays != null ? period.periodDays : (sub.periodDays != null ? sub.periodDays : null),
+      priceCents: sub.priceCents != null ? Number(sub.priceCents) : null,
+      currency: sub.currency || 'USD',
     } : null,
     period,
+    // Unified client-facing plan + usage (trial and paid share this shape)
+    currentPlan: {
+      type: sub ? 'paid' : 'trial',
+      name: sub ? (sub.planName || 'Plano') : 'Trial',
+      status: planStatus,
+      priceCents: sub && sub.priceCents != null ? Number(sub.priceCents) : null,
+      currency: sub ? (sub.currency || 'USD') : null,
+      startsAt: sub ? sub.startsAt : null,
+      endsAt: sub ? (sub.endsAt || sub.nextRenewalAt) : null,
+      periodDays: sub
+        ? (period && period.periodDays != null ? period.periodDays : sub.periodDays)
+        : null,
+    },
     usage: {
-      // Client-facing consumption: final delivered leads in the current cycle
       deliveredResults,
       planLimit,
-      remaining: planLimit != null ? Math.max(0, planLimit - deliveredResults) : null,
+      remaining,
+      duplicatesRemoved,
     },
-    // Internal provider quotas kept for admin/debug callers; client UI must not render these.
+    // Internal provider quotas kept for admin/debug; client UI must not render these.
     providers: {
       apify: remainingFor('apify'),
       brightdata: remainingFor('brightdata'),
