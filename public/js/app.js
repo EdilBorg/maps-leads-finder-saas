@@ -3256,140 +3256,230 @@
     }
     function paymentStatusPt(st) {
       const s = String(st || '').toLowerCase();
-      if (s === 'paid' || s === 'approved' || s === 'completed' || s === 'success') return 'Pago';
+      if (s === 'paid' || s === 'approved' || s === 'completed' || s === 'success') return 'Pago / activo';
       if (s === 'pending' || s === 'awaiting' || s === 'processing') return 'Pendente';
       if (s === 'rejected' || s === 'failed' || s === 'declined') return 'Recusado';
       if (s === 'cancelled' || s === 'canceled') return 'Cancelado';
       return st || '—';
     }
 
-    try {
-      const [qRes, pRes, payRes] = await Promise.all([
-        api('/api/billing/quota'),
-        api('/api/billing/plans'),
-        api('/api/billing/payments'),
-      ]);
-      const data = (qRes && qRes.data) || {};
-      const current = data.currentPlan || null;
-      const usage = data.usage || {};
-      const sub = data.subscription || null;
-      const period = data.period || null;
-      const trial = data.trial || {};
+    // Independent fetches — one failure must not blank the whole page
+    const [qRes, pRes, payRes, methRes] = await Promise.all([
+      api('/api/billing/quota').catch(function () { return { ok: false, data: null }; }),
+      api('/api/billing/plans').catch(function () { return { ok: false, data: null }; }),
+      api('/api/billing/payments').catch(function () { return { ok: false, data: null }; }),
+      api('/api/billing/payment-methods').catch(function () { return { ok: false, data: null }; }),
+    ]);
 
-      const planName = (current && current.name) || (sub && sub.planName) || 'Trial';
-      const planStatus = (current && current.status) || 'Disponível';
-      const priceCents = current && current.priceCents != null ? current.priceCents
-        : (sub && sub.priceCents != null ? sub.priceCents : null);
-      const currency = (current && current.currency) || (sub && sub.currency) || 'USD';
-      const startsAt = (current && current.startsAt) || (sub && sub.startsAt) || null;
-      const endsAt = (current && current.endsAt) || (sub && (sub.endsAt || sub.nextRenewalAt)) || null;
-      const periodDays = (current && current.periodDays) || (period && period.periodDays)
-        || (sub && sub.periodDays) || null;
+    const data = (qRes && qRes.data) || {};
+    const current = data.currentPlan || null;
+    const usage = data.usage || {};
+    const sub = data.subscription || null;
+    const period = data.period || null;
+    const trial = data.trial || {};
 
-      if (currentPanel) {
+    if (currentPanel) {
+      try {
+        const planName = (current && current.name) || (sub && sub.planName) || 'Trial';
+        const planStatus = (current && current.status) || data.planStatus || 'Disponível';
+        const priceCents = current && current.priceCents != null ? current.priceCents
+          : (sub && sub.priceCents != null ? sub.priceCents : null);
+        const currency = (current && current.currency) || (sub && sub.currency) || 'USD';
+        const startsAt = (current && current.startsAt) || (sub && sub.startsAt) || null;
+        const endsAt = (current && current.endsAt) || (sub && (sub.endsAt || sub.nextRenewalAt)) || null;
         let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Plano actual</h2>';
         html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">';
         html += '<div><span class="form-label">Plano</span><div style="font-weight:600">' + esc(planName) + '</div></div>';
         html += '<div><span class="form-label">Estado</span><div>' + esc(planStatus) + '</div></div>';
         if (priceCents != null) {
-          html += '<div><span class="form-label">Preço</span><div>' + esc(fmtUsd(priceCents, currency)) + '</div></div>';
-        } else if (!sub) {
-          html += '<div><span class="form-label">Preço</span><div>Gratuito</div></div>';
+          html += '<div><span class="form-label">Preço de referência</span><div>' + esc(fmtUsd(priceCents, currency)) + ' / 30 dias</div></div>';
         }
-        if (periodDays) {
-          html += '<div><span class="form-label">Duração do ciclo</span><div>' + esc(periodDays + ' dias') + '</div></div>';
-        }
-        if (startsAt) {
-          html += '<div><span class="form-label">Início</span><div>' + esc(fmtDate(startsAt)) + '</div></div>';
-        }
-        if (endsAt) {
-          html += '<div><span class="form-label">Expiração / renovação</span><div>' + esc(fmtDate(endsAt)) + '</div></div>';
-        }
+        if (startsAt) html += '<div><span class="form-label">Início</span><div>' + esc(fmtDate(startsAt)) + '</div></div>';
+        if (endsAt) html += '<div><span class="form-label">Expira</span><div>' + esc(fmtDate(endsAt)) + '</div></div>';
         html += '</div>';
-        if (!sub && planStatus === 'Concluído') {
-          html += '<p class="card-muted" style="margin:.75rem 0 0">O limite gratuito foi atingido. Escolha um plano para continuar a pesquisar leads.</p>';
+        if (!sub && (planStatus === 'Concluído' || (trial && trial.used))) {
+          html += '<p class="card-muted" style="margin:.75rem 0 0">O limite gratuito foi atingido. Escolha o plano Pro para continuar.</p>';
+        }
+        if (!(qRes && qRes.ok)) {
+          html += '<p class="muted" style="margin-top:.5rem">Não foi possível carregar todos os dados da subscrição.</p>';
         }
         currentPanel.innerHTML = html;
+      } catch (_) {
+        currentPanel.innerHTML = '<p class="muted">Não foi possível carregar o plano actual.</p>';
       }
+    }
 
-      if (usagePanel) {
+    if (usagePanel) {
+      try {
         const delivered = typeof usage.deliveredResults === 'number' ? usage.deliveredResults : 0;
+        const reserved = typeof usage.reservedLeads === 'number' ? usage.reservedLeads : 0;
         const limit = usage.planLimit != null && Number(usage.planLimit) > 0 ? Number(usage.planLimit) : null;
         const remaining = limit != null
-          ? (usage.remaining != null ? Number(usage.remaining) : Math.max(0, limit - delivered))
+          ? (usage.availableLeads != null ? Number(usage.availableLeads)
+            : (usage.remaining != null ? Number(usage.remaining) : Math.max(0, limit - delivered - reserved)))
           : null;
-        const dupes = typeof usage.duplicatesRemoved === 'number' ? usage.duplicatesRemoved : 0;
-
-        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Consumo de resultados</h2>';
+        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Utilização de leads</h2>';
         if (limit != null) {
           const pct = limit > 0 ? Math.min(100, Math.round((delivered / limit) * 100)) : 0;
           html += '<div style="font-size:1.15rem;font-weight:600;margin-bottom:.35rem">'
             + esc(delivered) + ' / ' + esc(limit) + '</div>';
-          html += '<div class="muted" style="margin-bottom:.5rem">Restantes: ' + esc(remaining) + '</div>';
+          html += '<div class="muted" style="margin-bottom:.25rem">Reservados (em curso): ' + esc(reserved) + '</div>';
+          html += '<div class="muted" style="margin-bottom:.5rem">Disponíveis: ' + esc(remaining) + '</div>';
           html += '<div style="height:8px;background:rgba(148,163,184,.25);border-radius:4px;overflow:hidden">'
             + '<div style="height:100%;width:' + pct + '%;background:var(--color-accent,#3b82f6);border-radius:4px"></div></div>';
-          html += '<p class="muted" style="margin:.35rem 0 0;font-size:.85rem">' + pct + '% utilizado</p>';
         } else {
           html += '<div style="font-size:1.15rem;font-weight:600">' + esc(delivered) + '</div>';
-          html += '<p class="muted" style="margin:.35rem 0 0">Resultados finais entregues neste ciclo. Este plano não define um limite global de resultados.</p>';
-        }
-        if (dupes > 0) {
-          html += '<p class="muted" style="margin:.75rem 0 0;font-size:.85rem">Duplicados removidos: ' + esc(dupes) + '</p>';
+          html += '<p class="muted" style="margin:.35rem 0 0">Leads finais entregues (trial ou ciclo actual).</p>';
         }
         usagePanel.innerHTML = html;
+      } catch (_) {
+        usagePanel.innerHTML = '<p class="muted">Utilização indisponível de momento.</p>';
       }
+    }
 
-      const plans = ((pRes && pRes.data && pRes.data.plans) || []);
-      if (list) {
-        list.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Planos disponíveis</h2>' +
-          (plans.length ? plans.map(function (p) {
+    if (list) {
+      try {
+        const plans = ((pRes && pRes.data && pRes.data.plans) || []);
+        const gatewayOk = !!(methRes && methRes.data && methRes.data.gatewayConfigured);
+        const methods = (methRes && methRes.data && methRes.data.methods) || [];
+        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Planos disponíveis</h2>';
+        if (!plans.length) {
+          html += '<p class="muted">Nenhum plano activo. Execute a migration 018 (plano Pro) se ainda não foi aplicada.</p>';
+        } else {
+          plans.forEach(function (p) {
             const price = fmtUsd(p.priceCents, p.currency || 'USD');
-            return '<div style="border-top:1px solid rgba(148,163,184,.25);padding:.75rem 0;display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:center">' +
-              '<div><strong>' + esc(p.name) + '</strong>' +
-              (p.description ? '<div class="muted">' + esc(p.description) + '</div>' : '') +
-              '<div class="muted">' + esc(price) +
-              (p.maxResultsPerSearch ? ' · até ' + esc(p.maxResultsPerSearch) + ' resultados/pesquisa' : '') +
-              '</div></div>' +
-              '<button type="button" class="btn btn-secondary btn-request-plan" data-plan-id="' + esc(p.id) + '">Escolher plano</button>' +
-              '</div>';
-          }).join('') : '<p class="muted">Nenhum plano disponível de momento.</p>');
-        list.querySelectorAll('.btn-request-plan').forEach(function (btn) {
-          btn.addEventListener('click', async function () {
-            try {
-              const token = await ensureCsrf();
-              const res = await api('/api/billing/payments', {
-                method: 'POST',
-                headers: { 'X-CSRF-Token': token },
-                body: { planId: btn.getAttribute('data-plan-id') },
-              });
-              if (res.ok) {
-                alert('Pedido de pagamento registado. A equipa fará a activação manual.');
-                loadPlansQuotaView();
-              } else {
-                alert(((res.data && res.data.error) || 'Falha ao registar pedido'));
-              }
-            } catch (e) {
-              alert((e && e.message) || 'Falha');
+            html += '<div class="plan-card" data-plan-id="' + esc(p.id) + '" style="border-top:1px solid rgba(148,163,184,.25);padding:.85rem 0">';
+            html += '<div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:flex-start">';
+            html += '<div><strong style="font-size:1.05rem">' + esc(p.name) + '</strong>';
+            if (p.description) html += '<div class="muted" style="margin-top:.25rem">' + esc(p.description) + '</div>';
+            html += '<div style="margin-top:.35rem"><strong>' + esc(price) + '</strong> <span class="muted">/ 30 dias</span></div>';
+            html += '<ul class="muted" style="margin:.4rem 0 0;padding-left:1.1rem;font-size:.9rem">';
+            if (p.maxResultsPerMonth) html += '<li>' + esc(p.maxResultsPerMonth) + ' leads entregues por ciclo</li>';
+            html += '<li>Pesquisas ilimitadas em quantidade</li>';
+            if (p.maxResultsPerSearch) html += '<li>Até ' + esc(p.maxResultsPerSearch) + ' resultados por pesquisa</li>';
+            html += '</ul></div></div>';
+            html += '<div style="margin-top:.75rem;display:flex;flex-wrap:wrap;gap:.5rem">';
+            html += '<button type="button" class="btn btn-primary btn-sm btn-subscribe-manual" data-plan-id="' + esc(p.id) + '">Pedido manual</button>';
+            if (gatewayOk) {
+              html += '<button type="button" class="btn btn-secondary btn-sm btn-subscribe-gateway" data-plan-id="' + esc(p.id) + '">Pagar com PayZeno</button>';
             }
+            html += '</div>';
+            html += '<div class="plan-checkout-panel" data-plan-id="' + esc(p.id) + '" hidden style="margin-top:.75rem;padding:.75rem;border:1px solid rgba(148,163,184,.3);border-radius:6px"></div>';
+            html += '</div>';
+          });
+        }
+        list.innerHTML = html;
+
+        list.querySelectorAll('.btn-subscribe-manual').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            const planId = btn.getAttribute('data-plan-id');
+            const panel = list.querySelector('.plan-checkout-panel[data-plan-id="' + planId + '"]');
+            if (!panel) return;
+            panel.hidden = false;
+            panel.innerHTML =
+              '<p class="muted" style="margin:0 0 .5rem">Pagamento manual: transfira <strong>USD 19,99</strong> e indique a referência. A equipa activa a subscrição após confirmação.</p>' +
+              '<label class="form-label">Referência / comprovativo (opcional)</label>' +
+              '<input class="input" type="text" id="manual-ref-' + esc(planId) + '" placeholder="Ex.: M-Pesa 123456 ou link do comprovativo">' +
+              '<div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap">' +
+              '<button type="button" class="btn btn-primary btn-sm btn-confirm-manual" data-plan-id="' + esc(planId) + '">Registar pedido</button>' +
+              '<button type="button" class="btn btn-ghost btn-sm btn-cancel-checkout" data-plan-id="' + esc(planId) + '">Cancelar</button>' +
+              '</div><p class="muted plan-checkout-msg" style="margin:.5rem 0 0"></p>';
+            panel.querySelector('.btn-cancel-checkout').addEventListener('click', function () {
+              panel.hidden = true; panel.innerHTML = '';
+            });
+            panel.querySelector('.btn-confirm-manual').addEventListener('click', async function () {
+              const msg = panel.querySelector('.plan-checkout-msg');
+              try {
+                const token = await ensureCsrf();
+                const refEl = document.getElementById('manual-ref-' + planId);
+                const ref = refEl ? refEl.value.trim() : '';
+                const res = await api('/api/billing/payments', {
+                  method: 'POST',
+                  headers: { 'X-CSRF-Token': token },
+                  body: { planId: planId, reference: ref || null, proofUrl: ref || null },
+                });
+                if (res.ok) {
+                  if (msg) msg.textContent = 'Pedido registado. Estado: pendente de aprovação administrativa.';
+                  loadPlansQuotaView();
+                } else if (msg) {
+                  msg.textContent = (res.data && res.data.error) || 'Falha ao registar pedido.';
+                }
+              } catch (e) {
+                if (msg) msg.textContent = (e && e.message) || 'Erro de rede.';
+              }
+            });
           });
         });
-      }
 
-      const payments = ((payRes && payRes.data && payRes.data.payments) || []);
-      if (pays) {
+        list.querySelectorAll('.btn-subscribe-gateway').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            const planId = btn.getAttribute('data-plan-id');
+            const panel = list.querySelector('.plan-checkout-panel[data-plan-id="' + planId + '"]');
+            if (!panel) return;
+            panel.hidden = false;
+            var methodOpts = methods.map(function (m) {
+              return '<option value="' + esc(m.code) + '">' + esc(m.code) + ' (' + esc(m.currency) + ')</option>';
+            }).join('');
+            panel.innerHTML =
+              '<p class="muted" style="margin:0 0 .5rem">Checkout PayZeno. O preço de referência continua USD 19,99; o valor local usa a taxa Frankfurter (arredondada para cima).</p>' +
+              '<label class="form-label">Método</label><select class="select" id="gw-method-' + esc(planId) + '">' + methodOpts + '</select>' +
+              '<label class="form-label" style="margin-top:.4rem">Nome</label><input class="input" type="text" id="gw-name-' + esc(planId) + '" required>' +
+              '<label class="form-label" style="margin-top:.4rem">Telefone (E.164)</label><input class="input" type="tel" id="gw-phone-' + esc(planId) + '" placeholder="+25884..." required>' +
+              '<div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap">' +
+              '<button type="button" class="btn btn-primary btn-sm btn-confirm-gateway" data-plan-id="' + esc(planId) + '">Continuar para pagamento</button>' +
+              '<button type="button" class="btn btn-ghost btn-sm btn-cancel-checkout" data-plan-id="' + esc(planId) + '">Cancelar</button>' +
+              '</div><p class="muted plan-checkout-msg" style="margin:.5rem 0 0"></p>';
+            panel.querySelector('.btn-cancel-checkout').addEventListener('click', function () {
+              panel.hidden = true; panel.innerHTML = '';
+            });
+            panel.querySelector('.btn-confirm-gateway').addEventListener('click', async function () {
+              const msg = panel.querySelector('.plan-checkout-msg');
+              try {
+                const token = await ensureCsrf();
+                const method = document.getElementById('gw-method-' + planId).value;
+                const name = document.getElementById('gw-name-' + planId).value.trim();
+                const phone = document.getElementById('gw-phone-' + planId).value.trim();
+                if (!name || !phone) {
+                  if (msg) msg.textContent = 'Nome e telefone são obrigatórios.';
+                  return;
+                }
+                const res = await api('/api/billing/checkout/session', {
+                  method: 'POST',
+                  headers: { 'X-CSRF-Token': token },
+                  body: { planId: planId, method: method, customer: { name: name, phone: phone } },
+                });
+                if (res.ok && res.data && res.data.checkoutUrl) {
+                  window.location.href = res.data.checkoutUrl;
+                } else if (msg) {
+                  msg.textContent = (res.data && res.data.error) || 'Não foi possível iniciar o checkout.';
+                }
+              } catch (e) {
+                if (msg) msg.textContent = (e && e.message) || 'Erro de rede.';
+              }
+            });
+          });
+        });
+      } catch (_) {
+        list.innerHTML = '<p class="muted">Não foi possível carregar os planos disponíveis.</p>';
+      }
+    }
+
+    if (pays) {
+      try {
+        const payments = ((payRes && payRes.data && payRes.data.payments) || []);
         pays.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Histórico de pagamentos</h2>' +
           (payments.length ? payments.map(function (p) {
             const amount = fmtUsd(p.amountCents, p.currency || 'USD');
             return '<div style="border-top:1px solid rgba(148,163,184,.25);padding:.5rem 0">' +
               '<strong>' + esc(p.planName || p.planId || 'Plano') + '</strong> · ' +
               esc(amount) + ' · ' + esc(paymentStatusPt(p.status)) +
+              (p.method ? ' · ' + esc(p.method) : '') +
               (p.createdAt ? ' · ' + esc(String(p.createdAt).slice(0, 10)) : '') +
               '</div>';
           }).join('') : '<p class="muted">Ainda não existem pagamentos.</p>');
+      } catch (_) {
+        pays.innerHTML = '<p class="muted">Histórico de pagamentos indisponível.</p>';
       }
-    } catch (e) {
-      if (currentPanel) currentPanel.innerHTML = '<p class="muted">Não foi possível carregar a informação do plano.</p>';
-      if (usagePanel) usagePanel.innerHTML = '';
     }
   }
 

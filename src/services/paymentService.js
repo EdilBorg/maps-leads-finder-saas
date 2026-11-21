@@ -184,6 +184,10 @@ function mapPayment(row) {
     proofUrl: row.proof_url, idempotencyKey: row.idempotency_key,
     reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at,
     createdAt: row.created_at, updatedAt: row.updated_at,
+    externalCheckoutId: row.external_checkout_id || null,
+    externalPaymentId: row.external_payment_id || null,
+    checkoutUrl: row.checkout_url || null,
+    fxSnapshot: row.fx_snapshot || {},
   };
 }
 

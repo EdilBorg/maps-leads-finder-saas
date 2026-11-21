@@ -37,6 +37,13 @@ function createApp(options = {}) {
 
   app.use(morgan(config.isProduction ? 'combined' : 'dev'));
 
+  app.use('/api/billing/webhooks/payzeno', express.raw({ type: 'application/json', limit: '256kb' }), (req, res, next) => {
+    if (Buffer.isBuffer(req.body)) {
+      req.payzenoRawBody = req.body.toString('utf8');
+      try { req.body = JSON.parse(req.payzenoRawBody); } catch (_) { req.body = {}; }
+    }
+    next();
+  });
   app.use(express.json({ limit: '64kb' }));
   app.use(express.urlencoded({ extended: false }));
 

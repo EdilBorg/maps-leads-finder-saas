@@ -44,7 +44,7 @@ describe('FX and PayZeno unit', () => {
   });
   it('webhook HMAC verifies', () => {
     const secret = 'test-secret';
-    const raw = '{\"status\":\"completed\"}';
+    const raw = '{"status":"completed"}';
     const ts = '1';
     const sig = crypto.createHmac('sha256', secret).update(`${ts}.${raw}`).digest('hex');
     assert.equal(payzeno.verifyWebhookSignature({ rawBody: raw, signature: sig, timestamp: ts, secret }).ok, true);
