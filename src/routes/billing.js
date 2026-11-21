@@ -23,7 +23,7 @@ router.get('/plans', requireAuth, requireVerifiedEmail, async (req, res, next) =
       plans: plans.map((p) => ({
         id: p.id, name: p.name, description: p.description,
         priceCents: p.priceCents, currency: p.currency,
-        maxResultsPerSearch: p.maxResultsPerSearch, features: p.features,
+        maxResultsPerSearch: p.maxResultsPerSearch, maxResultsPerMonth: p.maxResultsPerMonth, features: p.features,
       })),
     });
   } catch (err) { next(err); }
