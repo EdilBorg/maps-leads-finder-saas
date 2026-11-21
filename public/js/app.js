@@ -580,7 +580,7 @@
         showToast(msg, saved > 0 ? 'success' : 'info');
         // Clear selection of processed results
         clearResultsSelection();
-        if (typeof loadDashboard === 'function') {
+        if (saved > 0 && typeof loadDashboard === 'function') {
           try { loadDashboard({ force: true }); } catch (_) {}
         }
       } else if (res.status === 400) {
@@ -745,6 +745,9 @@
       showView('results');
       resetSearchUiButtons();
       activeSearchId = null;
+      if (typeof loadDashboard === 'function') {
+        try { loadDashboard({ force: true }); } catch (_) {}
+      }
       return { outcome: 'success' };
     }
     stopPolling();
@@ -1374,6 +1377,7 @@
       selectedHistoryIds.delete(String(id));
       showToast('Pesquisa eliminada.', 'success');
       loadHistory({ scrollToTop: false });
+      if (typeof loadDashboard === 'function') try { loadDashboard({ force: true }); } catch (_) {}
     } catch (_) {
       showToast('Erro de rede ao eliminar a pesquisa.', 'error');
     }
@@ -1491,6 +1495,7 @@
       showToast(msg, 'success');
       historyPage = 1;
       loadHistory({ scrollToTop: true });
+      if (typeof loadDashboard === 'function') try { loadDashboard({ force: true }); } catch (_) {}
     } catch (_) {
       showToast('Erro de rede ao eliminar o histórico.', 'error');
     }
@@ -2756,10 +2761,13 @@
 
   let dashboardCache = null;
   let dashboardInFlight = null;
+  let dashboardInFlightSeq = 0;
+  let dashboardSeq = 0;
   const DASHBOARD_TTL_MS = 10000;
 
   function invalidateDashboardCache() {
     dashboardCache = null;
+    dashboardSeq += 1;
   }
 
   function applyDashboardPayload(data, box) {
@@ -2806,48 +2814,74 @@
     box.appendChild(wrap);
   }
 
+  function renderDashboardError(box, res) {
+    ['stat-searches', 'stat-results', 'stat-leads'].forEach((id) => {
+      const el = $('#' + id); if (el) el.textContent = '—';
+    });
+    box.innerHTML = '';
+    const empty = document.createElement('p');
+    empty.className = 'empty-hint';
+    empty.id = 'dashboard-recent-empty';
+    if (res && res.status === 401) {
+      empty.textContent = 'Inicia sessão para ver a atividade da conta.';
+    } else if (res && res.status === 403) {
+      empty.textContent = 'Verifica o email para aceder aos dados da conta.';
+    } else {
+      empty.textContent = 'Não foi possível carregar o dashboard.';
+    }
+    box.appendChild(empty);
+  }
+
+  /**
+   * Load dashboard stats. Uses TTL cache for normal navigations.
+   * force:true bumps generation so in-flight older responses are ignored and a fresh request starts.
+   */
   async function loadDashboard(opts) {
     const force = !!(opts && opts.force);
     const box = $('#dashboard-recent');
     if (!box) return;
 
+    if (force) {
+      invalidateDashboardCache();
+    }
+
     if (!force && dashboardCache && (Date.now() - dashboardCache.at) < DASHBOARD_TTL_MS) {
       applyDashboardPayload(dashboardCache.data, box);
       return;
     }
-    if (dashboardInFlight) return dashboardInFlight;
 
-    dashboardInFlight = (async () => {
+    // Reuse in-flight only when it belongs to the current generation and is not a forced refresh.
+    if (!force && dashboardInFlight && dashboardInFlightSeq === dashboardSeq) {
+      return dashboardInFlight;
+    }
+
+    const requestSeq = dashboardSeq;
+    const promise = (async () => {
       try {
         const res = await api('/api/searches/dashboard');
+        if (requestSeq !== dashboardSeq) return;
         if (!res.ok) {
-          invalidateDashboardCache();
-          ['stat-searches', 'stat-results', 'stat-leads'].forEach((id) => {
-            const el = $('#' + id); if (el) el.textContent = '—';
-          });
-          box.innerHTML = '';
-          const empty = document.createElement('p');
-          empty.className = 'empty-hint';
-          empty.id = 'dashboard-recent-empty';
-          empty.textContent = res.status === 401
-            ? 'Inicia sessão para ver a atividade da conta.'
-            : res.status === 403
-              ? 'Verifica o email para aceder aos dados da conta.'
-              : 'Não foi possível carregar o dashboard.';
-          box.appendChild(empty);
+          dashboardCache = null;
+          renderDashboardError(box, res);
           return;
         }
         const data = res.data || {};
         dashboardCache = { at: Date.now(), data: data };
         applyDashboardPayload(data, box);
       } catch (_) {
-        invalidateDashboardCache();
+        if (requestSeq !== dashboardSeq) return;
+        dashboardCache = null;
         box.textContent = 'Não foi possível carregar o dashboard.';
       } finally {
-        dashboardInFlight = null;
+        if (dashboardInFlightSeq === requestSeq) {
+          dashboardInFlight = null;
+        }
       }
     })();
-    return dashboardInFlight;
+
+    dashboardInFlight = promise;
+    dashboardInFlightSeq = requestSeq;
+    return promise;
   }
 
   let settingsInFlight = null;
