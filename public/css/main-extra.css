@@ -1,0 +1,113 @@
+
+.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-body-sm);
+}
+.data th, .data td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-graphite);
+}
+.data th {
+  color: var(--color-fog);
+  font-weight: var(--font-weight-medium);
+  font-size: var(--text-caption);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.data td { color: var(--color-mist); }
+.col-check { width: 2rem; }
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: var(--text-caption);
+  border: 1px solid var(--color-graphite);
+  color: var(--color-mist);
+}
+
+.empty-hint, .state-box { color: var(--color-fog); }
+
+.results-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.results-header-left, .results-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.results-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.85rem;
+}
+.results-pagination {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+.modal { position: fixed; inset: 0; z-index: 70; }
+.modal[hidden] { display: none !important; }
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 9, 10, 0.72);
+}
+.modal-panel {
+  position: relative;
+  z-index: 1;
+  max-width: 440px;
+  margin: 10vh auto;
+  background: var(--surface-elevated);
+  border: 1px solid var(--color-graphite);
+  border-radius: 12px;
+  padding: 1.15rem;
+}
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.search-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.75rem 0;
+  color: var(--color-fog);
+}
+.search-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-graphite);
+  border-top-color: var(--color-acid-lime);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.demo-banner {
+  padding: 0.65rem 1.25rem;
+  background: rgba(228, 242, 34, 0.08);
+  border-bottom: 1px solid rgba(228, 242, 34, 0.2);
+  color: var(--color-mist);
+  font-size: var(--text-body-sm);
+}
+
+.auth-badge { font-size: var(--text-caption); }
+
+/* Results select */
+.results-select-all-label { font-size: var(--text-body-sm); }
+
+/* Utility */
+[hidden] { display: none !important; }
