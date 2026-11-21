@@ -8,6 +8,7 @@ const {
   recoverAbandonedSearches,
   FREE_SEARCH_HOLD_MINUTES,
 } = require('./freeSearchHold');
+const leadQuotaService = require('./leadQuotaService');
 
 function defaultGetPool() {
   return require('../db/pool').getPool();
@@ -57,12 +58,29 @@ async function runOnce(deps = {}) {
     }
     lockHeld = true;
     const result = await recoverFn(client, { graceMinutes: FREE_SEARCH_HOLD_MINUTES + 5 });
+    let leadQuotaRecovery = null;
+    try {
+      const recoverLead = deps.recoverOrphanedLeadHolds || leadQuotaService.recoverOrphanedLeadHolds;
+      leadQuotaRecovery = await recoverLead({ limit: 100, client });
+      log('info', 'lead_quota_orphans', {
+        checked: leadQuotaRecovery.checked,
+        released: leadQuotaRecovery.released,
+        skipped: leadQuotaRecovery.skipped,
+        failed: leadQuotaRecovery.failed,
+      });
+    } catch (lqErr) {
+      log('error', 'lead_quota_orphan_failed', {
+        message: lqErr && lqErr.message ? lqErr.message : String(lqErr),
+      });
+      leadQuotaRecovery = { failed: 1, error: lqErr && lqErr.message };
+    }
     log('info', 'done', {
       abandoned: result.abandoned,
       holdsReleased: result.holdsReleased,
+      leadQuotaReleased: leadQuotaRecovery && leadQuotaRecovery.released,
       ms: Date.now() - startedAt,
     });
-    return { skipped: false, ...result };
+    return { skipped: false, ...result, leadQuotaRecovery };
   } catch (err) {
     log('error', 'failed', {
       message: err && err.message ? err.message : String(err),

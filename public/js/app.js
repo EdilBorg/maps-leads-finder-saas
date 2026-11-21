@@ -210,6 +210,10 @@
     const t = $('#topbar-title');
     if (t) t.textContent = titles[view] || 'Maps Leads Finder';
     closeMobileSidebar();
+    // CRM activity/appointment modals live on document.body after reparent.
+    // Always close them when changing views so they never appear on map/results.
+    if (typeof showActivityForm === 'function') showActivityForm(false);
+    if (typeof showAppointmentForm === 'function') showAppointmentForm(false);
     if (view === 'results') renderResultsState();
     if (view === 'dashboard') loadDashboard();
     if (view === 'history') {
@@ -2361,6 +2365,8 @@
     const form = $('#leads-activity-form');
     if (!form) return;
     form.hidden = !show;
+    if (show) form.removeAttribute('hidden');
+    else form.setAttribute('hidden', '');
     const apptOpen = $('#leads-appointment-form') && !$('#leads-appointment-form').hidden;
     setFormBackdrop(!!show || !!apptOpen);
     if (show) {
@@ -2375,6 +2381,8 @@
     const form = $('#leads-appointment-form');
     if (!form) return;
     form.hidden = !show;
+    if (show) form.removeAttribute('hidden');
+    else form.setAttribute('hidden', '');
     const actOpen = $('#leads-activity-form') && !$('#leads-activity-form').hidden;
     setFormBackdrop(!!show || !!actOpen);
     const idEl = $('#leads-appointment-edit-id');

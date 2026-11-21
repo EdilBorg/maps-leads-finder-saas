@@ -237,26 +237,75 @@ async function releaseLeadQuotaSafe({ userId, searchId, reason = 'unspecified' }
  * Release held commercial quotas for searches that are no longer running.
  * Safe to call repeatedly (idempotent per hold row).
  */
-async function recoverOrphanedLeadHolds({ limit = 100 } = {}) {
+/**
+ * Recover commercial holds stuck on terminal searches.
+ * Re-validates search status under row locks (users → searches → hold)
+ * so we never release a hold for a still-running search or during commit.
+ *
+ * @param {{ limit?: number, client?: object }} [opts]
+ *   If `client` is provided, candidate query runs on it (caller holds advisory lock).
+ *   Each recovery still uses its own short transaction when no external client lifecycle applies.
+ */
+async function recoverOrphanedLeadHolds({ limit = 100, client: externalClient } = {}) {
   const pool = getPool();
-  const { rows } = await pool.query(
-    `SELECT h.id, h.user_id, h.search_id, h.status AS hold_status, s.status AS search_status
-     FROM lead_quota_holds h
-     JOIN searches s ON s.id = h.search_id
-     WHERE h.status = 'held'
-       AND s.status NOT IN ('running', 'pending')
-     ORDER BY h.created_at ASC
-     LIMIT $1`,
-    [limit]
-  );
-  const results = [];
-  for (const row of rows) {
-    const r = await releaseLeadQuotaSafe({
-      userId: row.user_id,
-      searchId: row.search_id,
-      reason: 'orphan_recovery:' + (row.search_status || 'unknown'),
-    });
-    results.push({ searchId: row.search_id, ...r });
+  const listClient = externalClient || await pool.connect();
+  const ownList = !externalClient;
+  const results = { checked: 0, released: 0, skipped: 0, failed: 0, items: [] };
+  try {
+    const { rows } = await listClient.query(
+      `SELECT h.user_id, h.search_id
+       FROM lead_quota_holds h
+       JOIN searches s ON s.id = h.search_id
+       WHERE h.status = 'held'
+         AND s.status NOT IN ('running', 'pending')
+       ORDER BY h.created_at ASC
+       LIMIT $1`,
+      [limit]
+    );
+
+    for (const row of rows) {
+      results.checked += 1;
+      const c = await pool.connect();
+      try {
+        await c.query('BEGIN');
+        await lockUserForUpdate(c, row.user_id);
+        const st = await c.query(
+          `SELECT status FROM searches WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+          [row.search_id, row.user_id]
+        );
+        const searchStatus = st.rows[0] ? st.rows[0].status : null;
+        if (!searchStatus || searchStatus === 'running' || searchStatus === 'pending') {
+          await c.query('ROLLBACK');
+          results.skipped += 1;
+          results.items.push({
+            searchId: row.search_id, ok: true, skipped: true, reason: 'still_active', searchStatus,
+          });
+          continue;
+        }
+        const rel = await releaseLeadQuota(c, { userId: row.user_id, searchId: row.search_id });
+        await c.query('COMMIT');
+        if (rel.skipped || rel.replayed) {
+          results.skipped += 1;
+        } else {
+          results.released += 1;
+        }
+        results.items.push({ searchId: row.search_id, ok: true, searchStatus, ...rel });
+      } catch (err) {
+        try { await c.query('ROLLBACK'); } catch (_) {}
+        results.failed += 1;
+        console.error('[lead-quota-orphan-recovery]', {
+          searchId: row.search_id,
+          message: err && err.message,
+        });
+        results.items.push({
+          searchId: row.search_id, ok: false, error: err && err.message,
+        });
+      } finally {
+        c.release();
+      }
+    }
+  } finally {
+    if (ownList) listClient.release();
   }
   return results;
 }

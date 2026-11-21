@@ -430,6 +430,13 @@ async function runSearchJob(ctx) {
       );
       if (st.rows[0] && st.rows[0].status === 'cancelled') {
         await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
+        // Must release commercial Pro hold before return (was skipped by early return).
+        if (ctx.quotaMode === 'paid') {
+          await leadQuotaService.releaseLeadQuota(client, {
+            userId: ctx.userId,
+            searchId: ctx.searchId,
+          });
+        }
         await client.query('COMMIT');
         return;
       }
@@ -438,9 +445,22 @@ async function runSearchJob(ctx) {
         [ctx.searchId, err.message || 'engine error', ctx.userId]
       );
       if (ctx.holdToken) await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
+      if (ctx.quotaMode === 'paid') {
+        await leadQuotaService.releaseLeadQuota(client, {
+          userId: ctx.userId,
+          searchId: ctx.searchId,
+        });
+      }
       await client.query('COMMIT');
     } catch (e2) {
       try { await client.query('ROLLBACK'); } catch (_) {}
+      // Best-effort outside TX if inner path failed mid-way
+      if (ctx.quotaMode === 'paid') {
+        const lr = await leadQuotaService.releaseLeadQuotaSafe({
+          userId: ctx.userId, searchId: ctx.searchId, reason: 'engine_error_tx_failed',
+        });
+        if (!lr.ok) console.error('[lead-quota-still-held]', ctx.searchId, 'engine_error_tx_failed');
+      }
     } finally {
       client.release();
     }
