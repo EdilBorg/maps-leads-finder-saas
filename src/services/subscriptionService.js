@@ -61,7 +61,7 @@ function resolvePeriodWindow(subscription, now = new Date(), periodDaysOverride 
   };
 }
 
-async function activateSubscription({ userId, planId, source = 'manual', externalRef = null, client }) {
+async function activateSubscription({ userId, planId, source = 'gateway', externalRef = null, client }) {
   const own = !client;
   const db = client || (await getPool().connect());
   try {

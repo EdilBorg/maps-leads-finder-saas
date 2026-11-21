@@ -115,12 +115,12 @@ async function createCheckoutSession({
       `INSERT INTO payments (
          user_id, plan_id, amount_cents, currency, method, status,
          idempotency_key, reference, fx_snapshot, gateway_payload
-       ) VALUES ($1,$2,$3,$4,'gateway','pending',$5,$6,$7::jsonb,'{}'::jsonb)
+       ) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7,$8::jsonb,'{}'::jsonb)
        ON CONFLICT (idempotency_key) DO NOTHING
        RETURNING *`,
       [
-        userId, planId, quote.amountMinor, quote.currency, key,
-        key, // reference = internal key / payment association
+        userId, planId, quote.amountMinor, quote.currency, quote.method,
+        key, String(userId), // reference reserved for internal payment id after insert if needed
         JSON.stringify(quote.fxSnapshot),
       ]
     );
@@ -129,6 +129,13 @@ async function createCheckoutSession({
     } else {
       const again = await client.query(`SELECT * FROM payments WHERE idempotency_key = $1`, [key]);
       payment = again.rows[0];
+    }
+    if (payment && payment.id) {
+      await client.query(
+        `UPDATE payments SET reference = $2 WHERE id = $1 AND (reference IS NULL OR reference = $3)`,
+        [payment.id, String(payment.id), key]
+      );
+      payment.reference = String(payment.id);
     }
     await client.query('COMMIT');
   } catch (err) {
@@ -260,19 +267,63 @@ function verifyWebhookSignature({ rawBody, signature, timestamp, secret }) {
   return { ok: false, reason: 'MISMATCH', documented: false };
 }
 
-async function recordWebhookEvent({ eventId, eventType, paymentId, payload }) {
-  if (!eventId) return { inserted: false };
+async function recordWebhookEvent({ eventId, eventType, paymentId, payload, client }) {
+  if (!eventId) return { inserted: false, eventRow: null };
+  const db = client || getPool();
   try {
-    await getPool().query(
-      `INSERT INTO payment_webhook_events (provider, event_id, event_type, payment_id, payload)
-       VALUES ('payzeno',$1,$2,$3,$4::jsonb)`,
+    const { rows } = await db.query(
+      `INSERT INTO payment_webhook_events (provider, event_id, event_type, payment_id, payload, processing_status)
+       VALUES ('payzeno',$1,$2,$3,$4::jsonb,'received')
+       ON CONFLICT (provider, event_id) DO UPDATE SET
+         payload = EXCLUDED.payload,
+         event_type = COALESCE(EXCLUDED.event_type, payment_webhook_events.event_type),
+         payment_id = COALESCE(EXCLUDED.payment_id, payment_webhook_events.payment_id)
+       WHERE payment_webhook_events.processing_status IS DISTINCT FROM 'processed'
+       RETURNING *`,
       [eventId, eventType || null, paymentId || null, JSON.stringify(payload || {})]
     );
-    return { inserted: true };
+    if (rows[0]) return { inserted: true, eventRow: rows[0], duplicate: false };
+    // Already processed
+    const existing = await db.query(
+      `SELECT * FROM payment_webhook_events WHERE provider='payzeno' AND event_id=$1`,
+      [eventId]
+    );
+    return {
+      inserted: false,
+      duplicate: true,
+      processed: existing.rows[0] && existing.rows[0].processing_status === 'processed',
+      eventRow: existing.rows[0] || null,
+    };
   } catch (e) {
-    if (e && e.code === '23505') return { inserted: false, duplicate: true };
+    if (e && e.code === '23505') {
+      const existing = await db.query(
+        `SELECT * FROM payment_webhook_events WHERE provider='payzeno' AND event_id=$1`,
+        [eventId]
+      );
+      return {
+        inserted: false,
+        duplicate: true,
+        processed: existing.rows[0] && existing.rows[0].processing_status === 'processed',
+        eventRow: existing.rows[0] || null,
+      };
+    }
     throw e;
   }
+}
+
+async function markWebhookProcessed(eventId, client, status = 'processed', errorMessage = null) {
+  if (!eventId) return;
+  const db = client || getPool();
+  await db.query(
+    `UPDATE payment_webhook_events
+     SET processing_status = $2,
+         payload = CASE
+           WHEN $3::text IS NULL THEN payload
+           ELSE payload || jsonb_build_object('lastError', $3::text)
+         END
+     WHERE provider = 'payzeno' AND event_id = $1`,
+    [eventId, status, errorMessage]
+  );
 }
 
 function resolveInternalPaymentId(payload) {
@@ -286,8 +337,8 @@ function resolveInternalPaymentId(payload) {
 
 /**
  * Process official webhook events.
- * payment.succeeded → validate + complete + activate subscription
- * payment.refunded / payment.chargeback → mark and revoke access policy
+ * Idempotency: event is only marked `processed` after successful completion.
+ * A failed attempt leaves status `failed`/`received` so PayZeno retries can re-run.
  */
 async function handleWebhookPayload(payload) {
   const event = String(payload.event || payload.type || '').toLowerCase();
@@ -306,43 +357,54 @@ async function handleWebhookPayload(payload) {
     paymentId: internalId,
     payload,
   });
-  if (rec.duplicate) {
-    return { ok: true, replayed: true, reason: 'duplicate_event' };
+  if (rec.duplicate && rec.processed) {
+    return { ok: true, replayed: true, reason: 'duplicate_event_already_processed' };
   }
 
-  if (event === 'payment.succeeded' || status === 'succeeded' || status === 'paid') {
-    return completePaymentFromGateway({
-      paymentId: internalId,
-      externalPaymentId,
-      checkoutId,
-      amount: payload.amount,
-      currency: payload.currency,
-      eventId,
-      payload,
-    });
+  try {
+    let result;
+    if (event === 'payment.succeeded' || status === 'succeeded' || status === 'paid') {
+      result = await completePaymentFromGateway({
+        paymentId: internalId,
+        externalPaymentId,
+        checkoutId,
+        amount: payload.amount,
+        currency: payload.currency,
+        eventId: eventId || rec.eventRow && rec.eventRow.event_id,
+        payload,
+      });
+    } else if (event === 'payment.refunded' || status === 'refunded') {
+      result = await markPaymentTerminal({
+        paymentId: internalId,
+        checkoutId,
+        externalPaymentId,
+        nextStatus: 'refunded',
+        payload,
+      });
+    } else if (event === 'payment.chargeback' || status === 'chargeback') {
+      result = await markPaymentTerminal({
+        paymentId: internalId,
+        checkoutId,
+        externalPaymentId,
+        nextStatus: 'chargeback',
+        payload,
+      });
+    } else {
+      result = { ok: true, ignored: true, event, status };
+    }
+    await markWebhookProcessed(eventId || (rec.eventRow && rec.eventRow.event_id), null, 'processed');
+    return result;
+  } catch (err) {
+    try {
+      await markWebhookProcessed(
+        eventId || (rec.eventRow && rec.eventRow.event_id),
+        null,
+        'failed',
+        err && err.message
+      );
+    } catch (_) {}
+    throw err;
   }
-
-  if (event === 'payment.refunded' || status === 'refunded') {
-    return markPaymentTerminal({
-      paymentId: internalId,
-      checkoutId,
-      externalPaymentId,
-      nextStatus: 'refunded',
-      payload,
-    });
-  }
-
-  if (event === 'payment.chargeback' || status === 'chargeback') {
-    return markPaymentTerminal({
-      paymentId: internalId,
-      checkoutId,
-      externalPaymentId,
-      nextStatus: 'chargeback',
-      payload,
-    });
-  }
-
-  return { ok: true, ignored: true, event, status };
 }
 
 async function completePaymentFromGateway({
@@ -353,6 +415,22 @@ async function completePaymentFromGateway({
     err.code = 'NO_REFERENCE';
     throw err;
   }
+  if (amount == null || amount === '') {
+    const err = new Error('amount em falta no webhook de sucesso');
+    err.code = 'MISSING_AMOUNT';
+    throw err;
+  }
+  if (!currency) {
+    const err = new Error('currency em falta no webhook de sucesso');
+    err.code = 'MISSING_CURRENCY';
+    throw err;
+  }
+  if (!checkoutId) {
+    const err = new Error('checkout_id em falta no webhook de sucesso');
+    err.code = 'MISSING_CHECKOUT_ID';
+    throw err;
+  }
+
   const pool = getPool();
   const client = await pool.connect();
   try {
@@ -381,50 +459,69 @@ async function completePaymentFromGateway({
       err.code = 'INVALID_STATE';
       throw err;
     }
-    // Validate external identifiers when stored
-    if (checkoutId && pay.external_checkout_id && String(pay.external_checkout_id) !== String(checkoutId)) {
+
+    if (!pay.external_checkout_id) {
+      await client.query('ROLLBACK');
+      const err = new Error('Pagamento interno sem checkout_id armazenado');
+      err.code = 'MISSING_STORED_CHECKOUT';
+      throw err;
+    }
+    if (String(pay.external_checkout_id) !== String(checkoutId)) {
       await client.query('ROLLBACK');
       const err = new Error('checkout_id não corresponde ao pagamento interno');
       err.code = 'CHECKOUT_MISMATCH';
       throw err;
     }
-    if (amount != null && Number(pay.amount_cents) !== Number(amount)) {
+    if (Number(pay.amount_cents) !== Number(amount)) {
       await client.query('ROLLBACK');
       const err = new Error('Valor do webhook não corresponde ao pagamento');
       err.code = 'AMOUNT_MISMATCH';
       throw err;
     }
-    if (currency && String(pay.currency).toUpperCase() !== String(currency).toUpperCase()) {
+    if (String(pay.currency).toUpperCase() !== String(currency).toUpperCase()) {
       await client.query('ROLLBACK');
       const err = new Error('Moeda do webhook não corresponde ao pagamento');
       err.code = 'CURRENCY_MISMATCH';
       throw err;
     }
+    if (
+      pay.external_payment_id &&
+      externalPaymentId &&
+      String(pay.external_payment_id) !== String(externalPaymentId)
+    ) {
+      await client.query('ROLLBACK');
+      const err = new Error('payment_id externo não corresponde');
+      err.code = 'EXTERNAL_PAYMENT_MISMATCH';
+      throw err;
+    }
 
-    await client.query(
-      `UPDATE payments SET status='completed',
-         external_payment_id=COALESCE($2, external_payment_id),
-         external_checkout_id=COALESCE($3, external_checkout_id),
-         gateway_payload = gateway_payload || $4::jsonb,
-         updated_at=NOW()
-       WHERE id=$1`,
-      [
-        paymentId,
-        externalPaymentId || null,
-        checkoutId || null,
-        JSON.stringify({ completedEvent: payload || {}, eventId: eventId || null }),
-      ]
-    );
-    await subscriptionService.activateSubscription({
+    const sub = await subscriptionService.activateSubscription({
       userId: pay.user_id,
       planId: pay.plan_id,
       source: 'gateway',
       externalRef: externalPaymentId || pay.external_checkout_id || pay.id,
       client,
     });
+
+    await client.query(
+      `UPDATE payments SET status='completed',
+         subscription_id = $2,
+         external_payment_id=COALESCE($3, external_payment_id),
+         external_checkout_id=COALESCE($4, external_checkout_id),
+         gateway_payload = gateway_payload || $5::jsonb,
+         updated_at=NOW()
+       WHERE id=$1`,
+      [
+        paymentId,
+        sub && sub.id ? sub.id : null,
+        externalPaymentId || null,
+        checkoutId || null,
+        JSON.stringify({ completedEvent: payload || {}, eventId: eventId || null }),
+      ]
+    );
     await client.query('COMMIT');
     const { rows: updated } = await pool.query(`SELECT * FROM payments WHERE id=$1`, [paymentId]);
-    return { ok: true, replayed: false, payment: paymentService.mapPayment(updated[0]) };
+    return { ok: true, replayed: false, payment: paymentService.mapPayment(updated[0]), subscription: sub };
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
     throw err;
@@ -453,11 +550,12 @@ async function markPaymentTerminal({ paymentId, checkoutId, externalPaymentId, n
       await client.query('COMMIT');
       return { ok: true, ignored: true, reason: 'payment_not_found' };
     }
-    // Do not overwrite completed with weaker states without explicit policy
     if (pay.status === nextStatus) {
       await client.query('COMMIT');
       return { ok: true, replayed: true, payment: paymentService.mapPayment(pay) };
     }
+    // Do not let an older refund/chargeback undo a later completed payment's renewal
+    // only touch the subscription linked to THIS payment.
     await client.query(
       `UPDATE payments SET status=$2,
          external_payment_id=COALESCE($3, external_payment_id),
@@ -466,12 +564,11 @@ async function markPaymentTerminal({ paymentId, checkoutId, externalPaymentId, n
        WHERE id=$1`,
       [pay.id, nextStatus, externalPaymentId || null, JSON.stringify({ terminalEvent: payload || {} })]
     );
-    // Revoke active gateway subscription for this plan when refunded/chargeback
-    if (nextStatus === 'refunded' || nextStatus === 'chargeback') {
+    if ((nextStatus === 'refunded' || nextStatus === 'chargeback') && pay.subscription_id) {
       await client.query(
         `UPDATE subscriptions SET status='cancelled', updated_at=NOW()
-         WHERE user_id=$1 AND plan_id=$2 AND status='active' AND source='gateway'`,
-        [pay.user_id, pay.plan_id]
+         WHERE id=$1 AND user_id=$2 AND status='active'`,
+        [pay.subscription_id, pay.user_id]
       );
     }
     await client.query('COMMIT');
