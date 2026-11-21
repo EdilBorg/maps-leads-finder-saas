@@ -337,6 +337,20 @@ button { cursor: pointer; border: none; background: none; }
 }
 
 .table-wrap { overflow-x: auto; }
+
+.table-wrap-history .data {
+  min-width: 720px;
+}
+
+.table-wrap-leads .data {
+  min-width: 720px;
+}
+
+
+.table-wrap-dashboard .table-dashboard {
+  min-width: 720px;
+}
+
 .data {
   width: 100%;
   border-collapse: collapse;

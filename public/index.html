@@ -148,7 +148,7 @@
             <button type="button" class="btn btn-danger btn-sm" id="history-delete-all">Eliminar tudo</button>
           </div>
           <div class="card">
-            <div class="table-wrap">
+            <div class="table-wrap table-wrap-history">
               <table class="data">
                 <thead>
                   <tr>
@@ -228,7 +228,7 @@
               <button type="button" class="btn btn-danger btn-sm" id="leads-delete-all">Eliminar todos os leads</button>
             </div>
             <div class="card leads-crm-table-card">
-              <div class="table-wrap">
+              <div class="table-wrap table-wrap-leads">
                 <table class="data leads-crm-table">
                   <thead>
                     <tr>
@@ -450,6 +450,32 @@
           <div class="card stack-gap-16">
             <div><span class="form-label">Nome</span><div id="settings-name">—</div></div>
             <div><span class="form-label">Email</span><div id="settings-email">—</div></div>
+            <div><span class="form-label">Verificação do email</span><div id="settings-verified">—</div></div>
+            <div>
+              <button type="button" class="btn btn-secondary" id="btn-show-reset-password">
+                Recuperar palavra-passe
+              </button>
+            </div>
+            <div id="reset-password-panel" class="card stack-gap-16" hidden>
+              <h3 class="card-title">Recuperar palavra-passe</h3>
+              <p class="card-muted">
+                Enviaremos um link de recuperação para o email associado à tua conta.
+              </p>
+              <div>
+                <span class="form-label">Email de recuperação</span>
+                <div id="reset-password-email">—</div>
+              </div>
+              <p id="reset-password-ok" class="success-box" hidden></p>
+              <p id="reset-password-error" class="error-box" hidden></p>
+              <div class="toolbar-left">
+                <button type="button" class="btn btn-primary" id="btn-send-reset-link">
+                  Enviar link
+                </button>
+                <button type="button" class="btn btn-ghost" id="btn-cancel-reset-password">
+                  Cancelar
+                </button>
+              </div>
+            </div>
           </div>
         </section>
       </div>

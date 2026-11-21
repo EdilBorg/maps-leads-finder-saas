@@ -247,9 +247,17 @@ router.post('/leads/saved/:id/appointments/:appointmentId/cancel', requireAuth, 
 
 router.post('/leads/save', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
   try {
-    const ids = (req.body && req.body.ids) || [];
-    const result = await searchService.saveLeads(req.session.userId, ids);
-    return res.json(result);
+    const resultIds = req.body && req.body.resultIds;
+    const ids = resultIds;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'Seleciona pelo menos um resultado para guardar.' });
+    }
+    if (ids.length > 500) {
+      return res.status(400).json({ error: 'Podes guardar no máximo 500 resultados de cada vez.' });
+    }
+    const result = await searchService.saveLeadsFromResults(req.session.userId, ids);
+    const { savedCount, alreadySavedCount } = result;
+    return res.json({ ...result, savedCount, alreadySavedCount });
   } catch (err) {
     if (err.code === 'VALIDATION') {
       return res.status(400).json({ error: err.message });

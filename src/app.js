@@ -66,6 +66,16 @@ function createApp(options = {}) {
 
   app.use(loadUser);
 
+  // Test-only diagnostic endpoint. Never exposed in production.
+  if (config.nodeEnv === 'test' && process.env.ENABLE_TEST_ROUTES === '1') {
+    app.get('/__test/rate-key', (req, res) => {
+      res.json({
+        ip: clientIp(req),
+        rateKey: loginRateKey(req),
+      });
+    });
+  }
+
   function gateDashboard(req, res, next) {
     if (!req.session || !req.session.userId) {
       return res.redirect(302, '/pages/login.html');
