@@ -22,7 +22,7 @@ async function getPeriodDays(client) {
 async function getActiveSubscription(userId, client) {
   const db = client || getPool();
   const { rows } = await db.query(
-    `SELECT s.*, p.name AS plan_name, p.max_results_per_search, p.features
+    `SELECT s.*, p.name AS plan_name, p.max_results_per_search, p.max_results_per_month, p.features
      FROM subscriptions s JOIN plans p ON p.id = s.plan_id
      WHERE s.user_id = $1 AND s.status = 'active'
        AND (s.ends_at IS NULL OR s.ends_at > NOW())
@@ -119,6 +119,7 @@ function mapSubscription(row) {
     externalRef: row.external_ref,
     periodDays: row.period_days != null ? Number(row.period_days) : PERIOD_DAYS_DEFAULT,
     maxResultsPerSearch: row.max_results_per_search != null ? row.max_results_per_search : null,
+    maxResultsPerMonth: row.max_results_per_month != null ? Number(row.max_results_per_month) : null,
     features: row.features || null,
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
