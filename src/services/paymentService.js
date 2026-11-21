@@ -1,6 +1,7 @@
 'use strict';
 /**
- * Payment history mapping. Activation is gateway (PayZeno) or demo when BILLING_DEMO_MODE.
+ * Payment history mapping. Activation is gateway (PayZeno) only.
+ * Historical DEMO rows remain visible via isDemo but cannot activate subscriptions.
  */
 function getPool() {
   return require('../db/pool').getPool();

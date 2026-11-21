@@ -6,7 +6,6 @@ const planService = require('../services/planService');
 const subscriptionService = require('../services/subscriptionService');
 const paymentService = require('../services/paymentService');
 const payzenoService = require('../services/payzenoService');
-const demoPaymentOps = require('../services/demoPaymentOps');
 const authService = require('../services/authService');
 
 const router = express.Router();
@@ -69,12 +68,10 @@ router.get('/payment-methods', requireAuth, requireVerifiedEmail, async (req, re
       code,
       currency: payzenoService.methodCurrency(code),
     }));
-    const demoMode = payzenoService.isBillingDemoMode();
     res.json({
       ok: true,
       methods,
-      gatewayConfigured: Boolean(process.env.PAYZENO_API_KEY) || demoMode,
-      demoMode,
+      gatewayConfigured: Boolean(process.env.PAYZENO_API_KEY),
     });
   } catch (err) { next(err); }
 });
@@ -147,7 +144,6 @@ router.post('/checkout/session', requireAuth, requireVerifiedEmail, requireCsrf,
         fx: result.quote.fxSnapshot,
       },
       replayed: result.replayed,
-      demo: !!result.demo,
     });
   } catch (err) {
     if ([
@@ -158,54 +154,6 @@ router.post('/checkout/session', requireAuth, requireVerifiedEmail, requireCsrf,
       return res.status(code).json({
         ok: false, error: err.message, code: err.code, paymentId: err.paymentId,
       });
-    }
-    next(err);
-  }
-});
-
-router.post('/demo/confirm', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
-  try {
-    const paymentId = req.body && req.body.paymentId;
-    if (!paymentId) return res.status(400).json({ ok: false, error: 'paymentId obrigatório' });
-    const result = await demoPaymentOps.confirmDemoPaymentHardened({
-      isBillingDemoMode: payzenoService.isBillingDemoMode,
-      isDemoPaymentRow: payzenoService.isDemoPaymentRow,
-      getPool: () => require('../db/pool').getPool(),
-      paymentService: require('../services/paymentService'),
-      subscriptionService: require('../services/subscriptionService'),
-      planService: require('../services/planService'),
-    }, {
-      userId: req.session.userId,
-      paymentId,
-    });
-    res.json({ ok: true, payment: result.payment, subscription: result.subscription, replayed: result.replayed });
-  } catch (err) {
-    if (['DEMO_DISABLED', 'NOT_FOUND', 'NOT_DEMO', 'INVALID_STATE', 'NO_REFERENCE', 'PLAN_NOT_FOUND', 'PLAN_INVALID', 'AMOUNT_INVALID', 'CURRENCY_INVALID', 'OWNERSHIP'].includes(err.code)) {
-      const status = err.code === 'DEMO_DISABLED' ? 403 : err.code === 'NOT_FOUND' ? 404 : 400;
-      return res.status(status).json({ ok: false, error: err.message, code: err.code });
-    }
-    next(err);
-  }
-});
-
-router.post('/demo/cancel', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
-  try {
-    const paymentId = req.body && req.body.paymentId;
-    if (!paymentId) return res.status(400).json({ ok: false, error: 'paymentId obrigatório' });
-    const result = await demoPaymentOps.cancelDemoPaymentHardened({
-      isBillingDemoMode: payzenoService.isBillingDemoMode,
-      isDemoPaymentRow: payzenoService.isDemoPaymentRow,
-      getPool: () => require('../db/pool').getPool(),
-      paymentService: require('../services/paymentService'),
-    }, {
-      userId: req.session.userId,
-      paymentId,
-    });
-    res.json({ ok: true, payment: result.payment, replayed: result.replayed });
-  } catch (err) {
-    if (['DEMO_DISABLED', 'NOT_FOUND', 'NOT_DEMO', 'INVALID_STATE', 'NO_REFERENCE', 'OWNERSHIP'].includes(err.code)) {
-      const status = err.code === 'DEMO_DISABLED' ? 403 : err.code === 'NOT_FOUND' ? 404 : 400;
-      return res.status(status).json({ ok: false, error: err.message, code: err.code });
     }
     next(err);
   }

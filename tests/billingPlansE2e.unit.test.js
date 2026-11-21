@@ -38,17 +38,22 @@ describe('billing routes', () => {
 });
 
 describe('FX and PayZeno unit', () => {
-  it('ceil converts USD cents with BigInt', () => {
+  it('ceil converts USD cents to local minor units with BigInt', () => {
+    // 19.99 * 1322.8 = 26442.772 → ceil to minor (2 digits) = 26442.78 → 2644278
     const r = fx.convertUsdCentsToLocal(1999, 1322.8, { minorFactor: 100 });
-    assert.equal(r.majorUnits, 26443);
+    assert.equal(r.minorUnits, 2644278);
+    assert.equal(r.majorUnits, 26442.78);
+    assert.equal(r.minorDigits, 2);
   });
-  it('webhook HMAC verifies', () => {
+  it('webhook HMAC remains fail-closed until official contract', () => {
     const secret = 'test-secret';
     const raw = '{"status":"completed"}';
     const ts = '1';
     const sig = crypto.createHmac('sha256', secret).update(`${ts}.${raw}`).digest('hex');
-    assert.equal(payzeno.verifyWebhookSignature({ rawBody: raw, signature: sig, timestamp: ts, secret }).ok, true);
+    // Speculative formats must not be accepted
+    assert.equal(payzeno.verifyWebhookSignature({ rawBody: raw, signature: sig, timestamp: ts, secret }).ok, false);
     assert.equal(payzeno.verifyWebhookSignature({ rawBody: raw, signature: '00', timestamp: ts, secret }).ok, false);
+    assert.equal(payzeno.verifyWebhookSignature().reason, 'SIGNATURE_CONTRACT_UNCONFIRMED');
   });
   it('maps methods to currencies', () => {
     assert.equal(payzeno.methodCurrency('mpesa'), 'MZN');

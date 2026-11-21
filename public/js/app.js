@@ -3372,7 +3372,6 @@
     window.__billingPlansCache = ((pRes && pRes.data && pRes.data.plans) || []);
     window.__billingMethodsCache = ((methRes && methRes.data && methRes.data.methods) || []);
     window.__billingGatewayOk = !!(methRes && methRes.data && methRes.data.gatewayConfigured);
-    window.__billingDemoMode = !!(methRes && methRes.data && methRes.data.demoMode);
 
     if (pays) {
       const payments = ((payRes && payRes.data && payRes.data.payments) || []);
@@ -3414,18 +3413,11 @@
     const body = document.getElementById('subscribe-modal-body');
     const plans = window.__billingPlansCache || [];
     const methods = window.__billingMethodsCache || [];
-    const gatewayOk = !!window.__billingGatewayOk;
-    const demoMode = !!window.__billingDemoMode;
     const pro = plans.find(function (p) { return String(p.name).toLowerCase() === 'pro'; }) || plans[0];
     function esc(s) { return escapeHtmlPlans(s == null ? '' : String(s)); }
 
     if (!pro) {
       body.innerHTML = '<p class="muted">Plano Pro indisponível.</p>';
-      modal.hidden = false;
-      return;
-    }
-    if (!gatewayOk && !demoMode) {
-      body.innerHTML = '<p class="muted">Checkout PayZeno não configurado no servidor.</p>';
       modal.hidden = false;
       return;
     }
@@ -3435,7 +3427,6 @@
     }).join('');
 
     body.innerHTML =
-      (demoMode ? '<div class="demo-flag" style="display:inline-block;font-size:.7rem;font-weight:700;letter-spacing:.06em;padding:.2rem .45rem;border-radius:4px;background:#fef3c7;color:#92400e;margin-bottom:.75rem">MODO DE DEMONSTRAÇÃO</div>' : '') +
       '<div class="billing-card" style="padding:.85rem;margin-bottom:.9rem">' +
       '<div style="font-weight:600">Pro</div>' +
       '<div class="muted" style="font-size:.9rem;margin-top:.2rem">USD 19.99 · 30 dias · 2.500 leads · pesquisas ilimitadas</div>' +
@@ -3507,14 +3498,14 @@
         });
         if (res.ok && res.data && res.data.checkoutUrl) {
           try { sessionStorage.setItem('billingPaymentId', res.data.payment && res.data.payment.id); } catch (_) {}
-          if (res.data.demo || (res.data.payment && res.data.payment.isDemo)) {
-            modal.hidden = true;
-            showDemoCheckoutPanel(res.data.payment, res.data.quote, methodEl.value);
-          } else {
-            window.location.href = res.data.checkoutUrl;
-          }
+          window.location.href = res.data.checkoutUrl;
         } else if (msg) {
-          msg.textContent = (res.data && res.data.error) || 'Não foi possível iniciar o checkout.';
+          var errCode = res.data && res.data.code;
+          if (errCode === 'PAYZENO_NOT_CONFIGURED') {
+            msg.textContent = 'Pagamentos automáticos não estão configurados no servidor. Contacte o suporte.';
+          } else {
+            msg.textContent = (res.data && res.data.error) || 'Não foi possível iniciar o checkout.';
+          }
           payBtn.disabled = false;
         }
       } catch (e) {
@@ -3526,104 +3517,10 @@
     modal.hidden = false;
   }
 
-  function showDemoCheckoutPanel(payment, quote, method) {
-    let panel = document.getElementById('billing-demo-panel');
-    if (!panel) {
-      panel = document.createElement('div');
-      panel.id = 'billing-demo-panel';
-      panel.className = 'card billing-demo-panel';
-      panel.style.cssText = 'padding:1.25rem;margin-bottom:1rem';
-      const host = document.getElementById('plans-current-panel');
-      if (host && host.parentElement) host.parentElement.insertBefore(panel, host);
-    }
-    panel.hidden = false;
-    const amount = quote && quote.amountMajor != null
-      ? (quote.amountMajor + ' ' + (quote.currency || ''))
-      : 'USD 19.99';
-    function esc(s) { return escapeHtmlPlans(s == null ? '' : String(s)); }
-    panel.innerHTML =
-      '<div class="demo-flag">MODO DE DEMONSTRAÇÃO</div>' +
-      '<h3 style="margin:0 0 .35rem">Maps Leads Finder — Checkout</h3>' +
-      '<p class="muted" style="margin:0 0 .9rem;font-size:.9rem">Simulação local. Não processa dinheiro real.</p>' +
-      '<div class="billing-meta" style="margin-bottom:1rem">' +
-      '<div><span class="label">Plano</span><strong>Pro</strong></div>' +
-      '<div><span class="label">Valor</span><strong>' + esc(amount) + '</strong></div>' +
-      '<div><span class="label">Método</span>' + esc(method || payment && payment.method || '—') + '</div>' +
-      '<div><span class="label">Referência</span>' + esc(payment && payment.id ? String(payment.id).slice(0, 8) : '—') + '</div>' +
-      '<div><span class="label">Estado</span><strong id="demo-pay-status">Pendente</strong></div>' +
-      '</div>' +
-      '<p class="muted" style="font-size:.85rem;margin:0 0 .85rem">Utiliza os botões abaixo para simular a resposta do gateway.</p>' +
-      '<div style="display:flex;gap:.5rem;flex-wrap:wrap">' +
-      '<button type="button" class="btn btn-primary" id="demo-confirm-btn">Simular pagamento confirmado</button>' +
-      '<button type="button" class="btn btn-ghost" id="demo-cancel-btn">Cancelar pagamento</button>' +
-      '</div>' +
-      '<p id="demo-pay-msg" class="muted" style="margin:.75rem 0 0"></p>';
-
-    document.getElementById('demo-confirm-btn').addEventListener('click', async function () {
-      const msg = document.getElementById('demo-pay-msg');
-      const btn = document.getElementById('demo-confirm-btn');
-      try {
-        btn.disabled = true;
-        const token = await ensureCsrf();
-        const res = await api('/api/billing/demo/confirm', {
-          method: 'POST',
-          headers: { 'X-CSRF-Token': token },
-          body: { paymentId: payment.id },
-        });
-        if (res.ok) {
-          document.getElementById('demo-pay-status').textContent = 'Concluído';
-          msg.textContent = 'Pagamento de demonstração confirmado. Subscrição Pro activada.';
-          document.getElementById('demo-cancel-btn').disabled = true;
-          loadPlansQuotaView();
-        } else {
-          msg.textContent = (res.data && res.data.error) || 'Falha ao confirmar.';
-          btn.disabled = false;
-        }
-      } catch (e) {
-        msg.textContent = (e && e.message) || 'Erro de rede.';
-        btn.disabled = false;
-      }
-    });
-    document.getElementById('demo-cancel-btn').addEventListener('click', async function () {
-      const msg = document.getElementById('demo-pay-msg');
-      try {
-        const token = await ensureCsrf();
-        const res = await api('/api/billing/demo/cancel', {
-          method: 'POST',
-          headers: { 'X-CSRF-Token': token },
-          body: { paymentId: payment.id },
-        });
-        if (res.ok) {
-          document.getElementById('demo-pay-status').textContent = 'Cancelado';
-          msg.textContent = 'Pagamento de demonstração cancelado.';
-          document.getElementById('demo-confirm-btn').disabled = true;
-          document.getElementById('demo-cancel-btn').disabled = true;
-        } else {
-          msg.textContent = (res.data && res.data.error) || 'Falha ao cancelar.';
-        }
-      } catch (e) {
-        msg.textContent = (e && e.message) || 'Erro de rede.';
-      }
-    });
-  }
-
   async function handleBillingReturn() {
     const params = new URLSearchParams(window.location.search || '');
     const billing = params.get('billing');
     if (!billing) return;
-
-    if (billing === 'demo') {
-      const paymentId = params.get('payment_id') || sessionStorage.getItem('billingPaymentId');
-      if (paymentId) {
-        try {
-          const res = await api('/api/billing/payments/' + encodeURIComponent(paymentId) + '/status');
-          if (res.ok && res.data && res.data.payment) {
-            showDemoCheckoutPanel(res.data.payment, null, res.data.payment.method);
-            return;
-          }
-        } catch (_) {}
-      }
-    }
 
     let paymentId = params.get('payment_id') || params.get('reference');
     try { if (!paymentId) paymentId = sessionStorage.getItem('billingPaymentId'); } catch (_) {}
@@ -3634,7 +3531,6 @@
       banner.innerHTML = '<strong>Checkout cancelado.</strong> Nenhuma cobrança foi confirmada.';
       return;
     }
-    if (billing === 'demo') return;
     banner.innerHTML = '<strong>A processar pagamento…</strong> A activação só ocorre após confirmação do PayZeno.';
     if (!paymentId) return;
     let attempts = 0;

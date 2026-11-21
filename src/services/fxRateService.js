@@ -114,7 +114,40 @@ async function getUsdRate(quoteCurrency) {
     fetchedAt: again.fetched_at, base: 'USD', quote,
   };
 }
-function convertUsdCentsToLocal(usdCents, rate, { minorFactor = 100 } = {}) {
+/**
+ * ISO 4217 minor units for currencies currently used by PayZeno methods.
+ * Extend this map only when a new method/currency is officially added.
+ */
+const CURRENCY_MINOR_DIGITS = Object.freeze({
+  USD: 2,
+  MZN: 2,
+  AOA: 2,
+  ZAR: 2,
+});
+
+function minorDigitsFor(currency) {
+  const code = String(currency || '').toUpperCase();
+  if (Object.prototype.hasOwnProperty.call(CURRENCY_MINOR_DIGITS, code)) {
+    return CURRENCY_MINOR_DIGITS[code];
+  }
+  // Safe default for unknown ISO currencies: 2 decimal places.
+  return 2;
+}
+
+/**
+ * Convert a USD amount expressed in USD cents into local minor units.
+ *
+ * Policy:
+ * - Never under-charge: result is rounded UP to the next local minor unit.
+ * - Uses scaled integer arithmetic to avoid binary floating-point drift.
+ * - majorUnits is derived from minorUnits / 10^digits (may be fractional for display).
+ *
+ * @param {number} usdCents  Amount in USD minor units (cents).
+ * @param {number} rate      Units of quote currency per 1 USD.
+ * @param {{ currency?: string, minorFactor?: number }} [opts]
+ * @returns {{ majorUnits: number, minorUnits: number, minorDigits: number, raw: number }}
+ */
+function convertUsdCentsToLocal(usdCents, rate, { currency = null, minorFactor = null } = {}) {
   const cents = Number(usdCents);
   const r = Number(rate);
   if (!Number.isFinite(cents) || cents < 0 || !Number.isFinite(r) || r <= 0) {
@@ -122,19 +155,63 @@ function convertUsdCentsToLocal(usdCents, rate, { minorFactor = 100 } = {}) {
     err.code = 'FX_INVALID';
     throw err;
   }
-  const RATE_SCALE = 100000000n;
+
+  let digits;
+  if (minorFactor != null) {
+    const mf = Number(minorFactor);
+    if (!Number.isFinite(mf) || mf <= 0) {
+      const err = new Error('Conversão cambial inválida');
+      err.code = 'FX_INVALID';
+      throw err;
+    }
+    // minorFactor 1 → 0 digits, 100 → 2, 1000 → 3
+    digits = Math.round(Math.log10(mf));
+    if (digits < 0 || 10 ** digits !== mf) {
+      const err = new Error('Conversão cambial inválida');
+      err.code = 'FX_INVALID';
+      throw err;
+    }
+  } else {
+    digits = minorDigitsFor(currency);
+  }
+
+  const factor = 10 ** digits;
+  // localMinor = ceil( (usdCents / 100) * rate * factor )
+  // = ceil( usdCents * rate * factor / 100 )
+  const RATE_SCALE = 100000000n; // 1e8
   const rateScaled = BigInt(Math.round(r * 1e8));
-  const num = BigInt(cents) * rateScaled;
+  const num = BigInt(Math.trunc(cents)) * rateScaled * BigInt(factor);
   const denom = 100n * RATE_SCALE;
-  const major = Number((num + denom - 1n) / denom);
-  if (!Number.isFinite(major) || major <= 0) {
+  const localMinor = Number((num + denom - 1n) / denom); // ceil
+
+  if (!Number.isFinite(localMinor) || localMinor < 0) {
     const err = new Error('Conversão cambial inválida');
     err.code = 'FX_INVALID';
     throw err;
   }
-  return { majorUnits: major, minorUnits: major * minorFactor, raw: Number(cents) / 100 * r };
+  // Guard: zero-value plans are not expected for paid checkout.
+  if (cents > 0 && localMinor <= 0) {
+    const err = new Error('Conversão cambial inválida');
+    err.code = 'FX_INVALID';
+    throw err;
+  }
+
+  return {
+    majorUnits: localMinor / factor,
+    minorUnits: localMinor,
+    minorDigits: digits,
+    raw: (cents / 100) * r,
+  };
 }
+
 module.exports = {
-  getUsdRate, refreshRates, convertUsdCentsToLocal, frankfurterBase,
-  maxAgeHours, refreshIntervalMs, DEFAULT_QUOTES,
+  getUsdRate,
+  refreshRates,
+  convertUsdCentsToLocal,
+  frankfurterBase,
+  maxAgeHours,
+  refreshIntervalMs,
+  DEFAULT_QUOTES,
+  CURRENCY_MINOR_DIGITS,
+  minorDigitsFor,
 };

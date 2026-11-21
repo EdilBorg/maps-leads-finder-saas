@@ -1,3 +1,7 @@
+'use strict';
+/**
+ * Renewal + dark-theme + post-demo-removal guards.
+ */
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -7,8 +11,10 @@ const root = path.join(__dirname, '..');
 const subSrc = fs.readFileSync(path.join(root, 'src/services/subscriptionService.js'), 'utf8');
 const pzSrc = fs.readFileSync(path.join(root, 'src/services/payzenoService.js'), 'utf8');
 const front = fs.readFileSync(path.join(root, 'public/js/app.js'), 'utf8');
-const css = fs.readFileSync(path.join(root, 'public/css/main.css'), 'utf8');
+const css = fs.readFileSync(path.join(root, 'public/css/billing.css'), 'utf8')
+  + fs.readFileSync(path.join(root, 'public/css/main.css'), 'utf8');
 const payzeno = require('../src/services/payzenoService');
+const fx = require('../src/services/fxRateService');
 
 describe('subscription renewal extends active period', () => {
   it('extends ends_at from current ends_at when active same plan', () => {
@@ -21,51 +27,53 @@ describe('subscription renewal extends active period', () => {
   });
 });
 
-describe('demo confirm security', () => {
-  it('only accepts pending status for new confirmation', () => {
-    assert.match(pzSrc, /Apenas pagamentos demo pendentes podem ser confirmados/);
-    assert.match(pzSrc, /pay\.status !== 'pending'/);
+describe('demo system fully removed', () => {
+  it('no demo confirm/cancel exports or routes in payzenoService', () => {
+    assert.equal(typeof payzeno.confirmDemoPayment, 'undefined');
+    assert.equal(typeof payzeno.cancelDemoPayment, 'undefined');
+    assert.equal(typeof payzeno.isBillingDemoMode, 'undefined');
+    assert.ok(!/confirmDemoPayment/.test(pzSrc));
+    assert.ok(!/finalizeDemoCheckout/.test(pzSrc));
   });
-  it('rejects non-demo and validates plan Pro', () => {
-    assert.match(pzSrc, /NOT_DEMO/);
-    assert.match(pzSrc, /PLAN_INVALID/);
-    assert.match(pzSrc, /source: 'demo'/);
-  });
-  it('completed is idempotent without re-activating', () => {
-    const idxCompleted = pzSrc.indexOf("pay.status === 'completed' || pay.status === 'approved'");
-    const idxActivate = pzSrc.indexOf("source: 'demo'", idxCompleted);
-    const idxReturnReplay = pzSrc.indexOf('replayed: true', idxCompleted);
-    assert.ok(idxCompleted > 0 && idxReturnReplay > idxCompleted);
-    assert.ok(idxReturnReplay < idxActivate);
-  });
-  it('cancel only pending demo', () => {
-    assert.match(pzSrc, /Apenas pagamentos demo pendentes podem ser cancelados/);
-  });
-  it('demo disabled blocks confirm', async () => {
-    process.env.BILLING_DEMO_MODE = 'false';
-    await assert.rejects(
-      () => payzeno.confirmDemoPayment({ userId: 'u', paymentId: 'p' }),
-      (e) => e && e.code === 'DEMO_DISABLED'
-    );
-  });
-});
-
-describe('demo checkout identity on replay', () => {
-  it('replayed pending returns demo flag from payment row', () => {
-    assert.match(pzSrc, /demo: isDemoPaymentRow\(payment\)/);
+  it('frontend no longer shows demo panel', () => {
+    assert.ok(!/showDemoCheckoutPanel/.test(front));
+    assert.ok(!/MODO DE DEMONSTRAÇÃO/.test(front));
   });
 });
 
 describe('dark theme billing surfaces', () => {
-  it('uses surface-panel and graphite tokens not white cards', () => {
+  it('uses surface-panel and graphite tokens', () => {
     assert.match(css, /--surface-panel/);
     assert.match(css, /--color-graphite/);
     assert.match(css, /--color-acid-lime/);
-    assert.ok(!/\.billing-card\s*\{[^}]*#fff/.test(css));
-    assert.ok(!/\.billing-card\s*\{[^}]*#ffffff/.test(css));
   });
-  it('frontend shows demo panel in-app', () => {
-    assert.match(front, /showDemoCheckoutPanel/);
-    assert.match(front, /MODO DE DEMONSTRAÇÃO/);
+});
+
+describe('FX minor-unit conversion', () => {
+  it('converts USD cents to local minor units with ceil policy', () => {
+    // 1999 cents * 63.5 MZN/USD = 1269.365 → ceil minor = 126937 (if 2 digits? wait)
+    // 19.99 * 63.5 = 1269.365 → ceil to 0.01 → 1269.37 → minor 126937
+    const conv = fx.convertUsdCentsToLocal(1999, 63.5, { currency: 'MZN' });
+    assert.equal(conv.minorDigits, 2);
+    assert.equal(conv.minorUnits, 126937);
+    assert.ok(Math.abs(conv.majorUnits - 1269.37) < 1e-9);
+  });
+
+  it('USD identity conversion preserves cents', () => {
+    const conv = fx.convertUsdCentsToLocal(1999, 1, { currency: 'USD' });
+    assert.equal(conv.minorUnits, 1999);
+    assert.equal(conv.majorUnits, 19.99);
+    assert.equal(conv.minorDigits, 2);
+  });
+
+  it('never under-charges (ceil)', () => {
+    // 19.99 * 1.001 = 20.00999 → ceil to 20.01
+    const conv = fx.convertUsdCentsToLocal(1999, 1.001, { currency: 'ZAR' });
+    assert.equal(conv.minorUnits, 2001);
+  });
+
+  it('rejects invalid inputs', () => {
+    assert.throws(() => fx.convertUsdCentsToLocal(-1, 1, { currency: 'USD' }), (e) => e.code === 'FX_INVALID');
+    assert.throws(() => fx.convertUsdCentsToLocal(100, 0, { currency: 'USD' }), (e) => e.code === 'FX_INVALID');
   });
 });

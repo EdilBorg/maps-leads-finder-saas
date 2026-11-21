@@ -1,4 +1,9 @@
-const { describe, it, before, after } = require('node:test');
+'use strict';
+/**
+ * Demo payment simulation has been removed.
+ * These tests lock that removal and the remaining real-checkout behaviour.
+ */
+const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
@@ -10,39 +15,51 @@ const front = fs.readFileSync(path.join(root, 'public/js/app.js'), 'utf8');
 const html = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
 const payzeno = require('../src/services/payzenoService');
 
-describe('billing demo mode wiring', () => {
-  it('is controlled by BILLING_DEMO_MODE env only', () => {
-    assert.equal(typeof payzeno.isBillingDemoMode, 'function');
-    const prev = process.env.BILLING_DEMO_MODE;
-    process.env.BILLING_DEMO_MODE = 'true';
-    assert.equal(payzeno.isBillingDemoMode(), true);
-    process.env.BILLING_DEMO_MODE = 'false';
-    assert.equal(payzeno.isBillingDemoMode(), false);
-    delete process.env.BILLING_DEMO_MODE;
-    assert.equal(payzeno.isBillingDemoMode(), false);
-    if (prev !== undefined) process.env.BILLING_DEMO_MODE = prev;
-    else delete process.env.BILLING_DEMO_MODE;
+describe('demo payment system removed', () => {
+  it('does not export demo helpers', () => {
+    assert.equal(typeof payzeno.isBillingDemoMode, 'undefined');
+    assert.equal(typeof payzeno.confirmDemoPayment, 'undefined');
+    assert.equal(typeof payzeno.cancelDemoPayment, 'undefined');
   });
 
-  it('createCheckoutSession branches to finalizeDemoCheckout when demo', () => {
-    assert.match(pzSrc, /if \(demo\) \{\s*return finalizeDemoCheckout/);
-    assert.match(pzSrc, /confirmDemoPayment/);
-    assert.match(pzSrc, /cancelDemoPayment/);
-    assert.match(pzSrc, /source: 'demo'/);
+  it('has no finalizeDemoCheckout or BILLING_DEMO_MODE branch', () => {
+    assert.ok(!/finalizeDemoCheckout/.test(pzSrc));
+    assert.ok(!/BILLING_DEMO_MODE/.test(pzSrc));
+    assert.ok(!/isBillingDemoMode/.test(pzSrc));
+    assert.ok(!/confirmDemoPayment/.test(pzSrc));
+    assert.ok(!/cancelDemoPayment/.test(pzSrc));
   });
 
-  it('demo endpoints exist and real webhook unchanged fail-closed', () => {
-    assert.match(billingSrc, /\/demo\/confirm/);
-    assert.match(billingSrc, /\/demo\/cancel/);
+  it('has no demo routes', () => {
+    assert.ok(!/\/demo\/confirm/.test(billingSrc));
+    assert.ok(!/\/demo\/cancel/.test(billingSrc));
+    assert.ok(!/demoPaymentOps/.test(billingSrc));
+  });
+
+  it('frontend has no demo checkout panel or simulated confirm', () => {
+    assert.ok(!/showDemoCheckoutPanel/.test(front));
+    assert.ok(!/__billingDemoMode/.test(front));
+    assert.ok(!/\/api\/billing\/demo\//.test(front));
+    assert.ok(!/MODO DE DEMONSTRAÇÃO/.test(front));
+  });
+
+  it('webhook remains fail-closed until official HMAC contract', () => {
     assert.match(pzSrc, /SIGNATURE_CONTRACT_UNCONFIRMED/);
   });
+});
 
-  it('demo confirm refuses when mode off', async () => {
-    process.env.BILLING_DEMO_MODE = 'false';
-    await assert.rejects(
-      () => payzeno.confirmDemoPayment({ userId: 'u1', paymentId: 'p1' }),
-      (err) => err && err.code === 'DEMO_DISABLED'
-    );
+describe('subscribe modal opens without API key', () => {
+  it('does not early-return on missing gateway', () => {
+    // Premature block must be gone
+    assert.ok(!/Checkout PayZeno não configurado no servidor/.test(front));
+    assert.match(front, /openSubscribeModal/);
+    assert.match(front, /\/api\/billing\/checkout\/quote/);
+    assert.match(front, /\/api\/billing\/checkout\/session/);
+  });
+
+  it('surfaces PAYZENO_NOT_CONFIGURED only on checkout attempt', () => {
+    assert.match(front, /PAYZENO_NOT_CONFIGURED/);
+    assert.match(front, /Pagamentos automáticos não estão configurados/);
   });
 });
 
@@ -55,17 +72,7 @@ describe('subscription UX and nav', () => {
   });
   it('subscription redesign markers present', () => {
     assert.match(html, /billing-page-header/);
-    assert.match(front, /billing-card-pro/);
-    assert.match(front, /Renovar Pro|Assinar Pro|Reactivar Pro/);
-    assert.match(front, /showDemoCheckoutPanel/);
-    assert.match(front, /MODO DE DEMONSTRAÇÃO/);
-  });
-});
-
-describe('payzeno real path preserved', () => {
-  it('still has hosted checkout and ownership keys', () => {
-    assert.match(pzSrc, /\/v1\/checkout\/sessions/);
-    assert.match(pzSrc, /payzeno:u:\$\{userId\}/);
-    assert.match(pzSrc, /AND user_id = \$2/);
+    assert.match(front, /billing-card-pro|Activar Plano Pro/);
+    assert.match(front, /Renovar Pro|Assinar Pro|Reactivar Pro|Activar Plano Pro/);
   });
 });
