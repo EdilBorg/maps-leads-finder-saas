@@ -68,10 +68,12 @@ router.get('/payment-methods', requireAuth, requireVerifiedEmail, async (req, re
       code,
       currency: payzenoService.methodCurrency(code),
     }));
+    const demoMode = payzenoService.isBillingDemoMode();
     res.json({
       ok: true,
       methods,
-      gatewayConfigured: Boolean(process.env.PAYZENO_API_KEY),
+      gatewayConfigured: Boolean(process.env.PAYZENO_API_KEY) || demoMode,
+      demoMode,
     });
   } catch (err) { next(err); }
 });
@@ -145,6 +147,7 @@ router.post('/checkout/session', requireAuth, requireVerifiedEmail, requireCsrf,
         fx: result.quote.fxSnapshot,
       },
       replayed: result.replayed,
+      demo: !!result.demo,
     });
   } catch (err) {
     if ([
@@ -155,6 +158,43 @@ router.post('/checkout/session', requireAuth, requireVerifiedEmail, requireCsrf,
       return res.status(code).json({
         ok: false, error: err.message, code: err.code, paymentId: err.paymentId,
       });
+    }
+    next(err);
+  }
+});
+
+
+router.post('/demo/confirm', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    const paymentId = req.body && req.body.paymentId;
+    if (!paymentId) return res.status(400).json({ ok: false, error: 'paymentId obrigatório' });
+    const result = await payzenoService.confirmDemoPayment({
+      userId: req.session.userId,
+      paymentId,
+    });
+    res.json({ ok: true, payment: result.payment, subscription: result.subscription, replayed: result.replayed });
+  } catch (err) {
+    if (['DEMO_DISABLED', 'NOT_FOUND', 'NOT_DEMO', 'INVALID_STATE', 'NO_REFERENCE'].includes(err.code)) {
+      const status = err.code === 'DEMO_DISABLED' ? 403 : err.code === 'NOT_FOUND' ? 404 : 400;
+      return res.status(status).json({ ok: false, error: err.message, code: err.code });
+    }
+    next(err);
+  }
+});
+
+router.post('/demo/cancel', requireAuth, requireVerifiedEmail, requireCsrf, async (req, res, next) => {
+  try {
+    const paymentId = req.body && req.body.paymentId;
+    if (!paymentId) return res.status(400).json({ ok: false, error: 'paymentId obrigatório' });
+    const result = await payzenoService.cancelDemoPayment({
+      userId: req.session.userId,
+      paymentId,
+    });
+    res.json({ ok: true, payment: result.payment, replayed: result.replayed });
+  } catch (err) {
+    if (['DEMO_DISABLED', 'NOT_FOUND', 'NOT_DEMO', 'INVALID_STATE'].includes(err.code)) {
+      const status = err.code === 'DEMO_DISABLED' ? 403 : err.code === 'NOT_FOUND' ? 404 : 400;
+      return res.status(status).json({ ok: false, error: err.message, code: err.code });
     }
     next(err);
   }

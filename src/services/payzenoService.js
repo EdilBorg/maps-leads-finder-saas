@@ -18,6 +18,9 @@ function apiBase() {
   return (process.env.PAYZENO_API_BASE || 'https://api.payzeno.io').replace(/\/$/, '');
 }
 function apiKey() { return process.env.PAYZENO_API_KEY || ''; }
+function isBillingDemoMode() {
+  return String(process.env.BILLING_DEMO_MODE || '').toLowerCase() === 'true';
+}
 function allowedMethods() {
   const raw = process.env.PAYZENO_PAYMENT_METHODS || 'mpesa,emola,multicaixa,payfast,card';
   return raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -75,7 +78,8 @@ async function buildCheckoutQuote({ planId, method }) {
 async function createCheckoutSession({
   userId, planId, method, customer, successUrl, cancelUrl, idempotencyKey,
 }) {
-  if (!apiKey()) {
+  const demo = isBillingDemoMode();
+  if (!demo && !apiKey()) {
     const err = new Error('Pagamentos automáticos não estão configurados.');
     err.code = 'PAYZENO_NOT_CONFIGURED';
     throw err;
@@ -173,7 +177,12 @@ async function createCheckoutSession({
       checkoutId: payment.external_checkout_id,
       quote,
       replayed: true,
+      demo: isDemoPaymentRow(payment),
     };
+  }
+
+  if (demo) {
+    return finalizeDemoCheckout({ payment, quote, userId, customer, successUrl });
   }
 
   const body = {
@@ -622,6 +631,182 @@ async function fetchRemoteSessionStatus(checkoutId) {
   }
 }
 
+
+function isDemoPaymentRow(row) {
+  if (!row) return false;
+  const gp = row.gateway_payload;
+  if (!gp) return false;
+  const obj = typeof gp === 'string' ? (() => { try { return JSON.parse(gp); } catch (_) { return {}; } })() : gp;
+  return !!(obj && (obj.demo === true || obj.mode === 'demo'));
+}
+
+async function finalizeDemoCheckout({ payment, quote, userId, customer, successUrl }) {
+  const checkoutId = `demo-${payment.id}`;
+  const base = (process.env.APP_URL || '').replace(/\/$/, '');
+  const checkoutUrl = `${base}/?billing=demo&payment_id=${encodeURIComponent(payment.id)}`;
+  const payload = {
+    demo: true,
+    mode: 'demo',
+    method: quote.method,
+    customer: customer || {},
+    createdAt: new Date().toISOString(),
+  };
+  await getPool().query(
+    `UPDATE payments SET external_checkout_id=$2, checkout_url=$3,
+       gateway_payload=$4::jsonb, reference=COALESCE(reference, $5), updated_at=NOW()
+     WHERE id=$1 AND user_id=$6`,
+    [payment.id, checkoutId, checkoutUrl, JSON.stringify(payload), String(payment.id), userId]
+  );
+  const { rows: updated } = await getPool().query(`SELECT * FROM payments WHERE id=$1`, [payment.id]);
+  return {
+    payment: paymentService.mapPayment(updated[0]),
+    checkoutUrl,
+    checkoutId,
+    quote,
+    replayed: false,
+    demo: true,
+  };
+}
+
+/**
+ * Confirm a demo payment. Only when BILLING_DEMO_MODE=true.
+ * Idempotent; activates subscription via existing service with source=demo.
+ */
+async function confirmDemoPayment({ userId, paymentId }) {
+  if (!isBillingDemoMode()) {
+    const err = new Error('Modo de demonstração desactivado.');
+    err.code = 'DEMO_DISABLED';
+    throw err;
+  }
+  if (!paymentId) {
+    const err = new Error('paymentId obrigatório');
+    err.code = 'NO_REFERENCE';
+    throw err;
+  }
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT * FROM payments WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+      [paymentId, userId]
+    );
+    const pay = rows[0];
+    if (!pay) {
+      await client.query('ROLLBACK');
+      const err = new Error('Pagamento não encontrado');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    if (!isDemoPaymentRow(pay)) {
+      await client.query('ROLLBACK');
+      const err = new Error('Este pagamento não é de demonstração.');
+      err.code = 'NOT_DEMO';
+      throw err;
+    }
+    if (pay.status === 'completed' || pay.status === 'approved') {
+      await client.query('COMMIT');
+      return { ok: true, replayed: true, payment: paymentService.mapPayment(pay) };
+    }
+    if (pay.status !== 'pending' && pay.status !== 'processing') {
+      await client.query('ROLLBACK');
+      const err = new Error('Estado inválido para confirmação demo');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+    const sub = await subscriptionService.activateSubscription({
+      userId: pay.user_id,
+      planId: pay.plan_id,
+      source: 'demo',
+      externalRef: `demo:${pay.id}`,
+      client,
+    });
+    await client.query(
+      `UPDATE payments SET status='completed',
+         subscription_id=$2,
+         external_payment_id=COALESCE(external_payment_id, $3),
+         gateway_payload = gateway_payload || $4::jsonb,
+         updated_at=NOW()
+       WHERE id=$1`,
+      [
+        pay.id,
+        sub && sub.id ? sub.id : null,
+        `demo-paid-${pay.id}`,
+        JSON.stringify({ demoConfirmedAt: new Date().toISOString() }),
+      ]
+    );
+    await client.query('COMMIT');
+    const { rows: updated } = await pool.query(`SELECT * FROM payments WHERE id=$1`, [pay.id]);
+    return {
+      ok: true,
+      replayed: false,
+      payment: paymentService.mapPayment(updated[0]),
+      subscription: sub,
+    };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function cancelDemoPayment({ userId, paymentId }) {
+  if (!isBillingDemoMode()) {
+    const err = new Error('Modo de demonstração desactivado.');
+    err.code = 'DEMO_DISABLED';
+    throw err;
+  }
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT * FROM payments WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+      [paymentId, userId]
+    );
+    const pay = rows[0];
+    if (!pay) {
+      await client.query('ROLLBACK');
+      const err = new Error('Pagamento não encontrado');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    if (!isDemoPaymentRow(pay)) {
+      await client.query('ROLLBACK');
+      const err = new Error('Este pagamento não é de demonstração.');
+      err.code = 'NOT_DEMO';
+      throw err;
+    }
+    if (pay.status === 'cancelled' || pay.status === 'canceled') {
+      await client.query('COMMIT');
+      return { ok: true, replayed: true, payment: paymentService.mapPayment(pay) };
+    }
+    if (pay.status === 'completed' || pay.status === 'approved') {
+      await client.query('ROLLBACK');
+      const err = new Error('Pagamento já confirmado; não pode ser cancelado.');
+      err.code = 'INVALID_STATE';
+      throw err;
+    }
+    await client.query(
+      `UPDATE payments SET status='cancelled',
+         gateway_payload = gateway_payload || $2::jsonb,
+         updated_at=NOW()
+       WHERE id=$1`,
+      [pay.id, JSON.stringify({ demoCancelledAt: new Date().toISOString() })]
+    );
+    await client.query('COMMIT');
+    const { rows: updated } = await pool.query(`SELECT * FROM payments WHERE id=$1`, [pay.id]);
+    return { ok: true, replayed: false, payment: paymentService.mapPayment(updated[0]) };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+
 module.exports = {
   buildCheckoutQuote,
   createCheckoutSession,
@@ -633,4 +818,8 @@ module.exports = {
   allowedMethods,
   methodCurrency,
   apiBase,
+  isBillingDemoMode,
+  confirmDemoPayment,
+  cancelDemoPayment,
+  isDemoPaymentRow,
 };

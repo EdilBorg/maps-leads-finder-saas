@@ -22,7 +22,6 @@
       <nav class="sidebar-nav">
         <button type="button" class="nav-item active" data-view="dashboard" aria-current="page">Dashboard</button>
         <button type="button" class="nav-item" data-view="search">Nova pesquisa</button>
-        <button type="button" class="nav-item" data-view="results">Resultados</button>
         <button type="button" class="nav-item" data-view="history">Histórico</button>
         <button type="button" class="nav-item" data-view="leads">Leads guardados</button>
         <button type="button" class="nav-item" data-view="plans" id="nav-subscribe">Assinar / Renovar</button>
@@ -437,13 +436,18 @@
 
         </section>
                 <section class="view" id="view-plans" hidden>
-          <h2 class="page-heading">Subscrição</h2>
-          <p class="page-sub">Estado, utilização e pagamento</p>
-          <div id="billing-return-banner" class="card" style="padding:1rem;margin-bottom:1rem" hidden></div>
-          <div id="plans-current-panel" class="card" style="padding:1rem;margin-bottom:1rem">
+          <header class="billing-page-header">
+            <div>
+              <h2 class="page-heading">Subscrição</h2>
+              <p class="page-sub">Gere o teu plano, acompanha a utilização e consulta os pagamentos.</p>
+            </div>
+            <div id="billing-status-chip" class="billing-status-chip muted">—</div>
+          </header>
+          <div id="billing-return-banner" class="card billing-banner" hidden></div>
+          <div id="plans-current-panel" class="billing-grid">
             <p class="muted">A carregar…</p>
           </div>
-          <div id="plans-payments-panel" class="card" style="padding:1rem">
+          <div id="plans-payments-panel" class="card billing-history-card">
             <p class="muted">Histórico de pagamentos</p>
           </div>
           <div id="plans-usage-panel" hidden></div>

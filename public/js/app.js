@@ -3234,9 +3234,10 @@
     return plansInFlight;
   }
 
-    async function loadPlansQuotaViewBody() {
+      async function loadPlansQuotaViewBody() {
     const currentPanel = document.getElementById('plans-current-panel');
     const pays = document.getElementById('plans-payments-panel');
+    const chip = document.getElementById('billing-status-chip');
 
     function esc(s) {
       return escapeHtmlPlans(s == null ? '' : String(s));
@@ -3244,6 +3245,13 @@
     function fmtDate(v) {
       if (!v) return '—';
       return String(v).slice(0, 10);
+    }
+    function daysLeft(endsAt) {
+      if (!endsAt) return null;
+      const end = new Date(endsAt);
+      if (Number.isNaN(end.getTime())) return null;
+      const ms = end.getTime() - Date.now();
+      return Math.max(0, Math.ceil(ms / (24 * 60 * 60 * 1000)));
     }
     function fmtMoney(cents, currency) {
       const cur = (currency || 'USD').toUpperCase();
@@ -3254,16 +3262,18 @@
     }
     function paymentStatusPt(st) {
       const s = String(st || '').toLowerCase();
-      if (s === 'paid' || s === 'approved' || s === 'completed' || s === 'succeeded') return 'Confirmado';
+      if (s === 'paid' || s === 'approved' || s === 'completed' || s === 'succeeded') return 'Concluído';
       if (s === 'pending' || s === 'processing') return 'Pendente';
-      if (s === 'failed' || s === 'declined' || s === 'rejected') return 'Recusado';
-      if (s === 'cancelled' || s === 'canceled' || s === 'expired') return 'Cancelado / expirado';
+      if (s === 'failed' || s === 'declined' || s === 'rejected') return 'Falhado';
+      if (s === 'cancelled' || s === 'canceled') return 'Cancelado';
+      if (s === 'expired') return 'Expirado';
       if (s === 'refunded') return 'Reembolsado';
       if (s === 'chargeback') return 'Chargeback';
       return st || '—';
     }
     function methodLabel(m) {
-      if (!m || m === 'gateway' || m === 'manual') return '—';
+      if (!m || m === 'gateway') return '—';
+      if (m === 'manual') return '—';
       return String(m);
     }
 
@@ -3279,51 +3289,82 @@
     const usage = data.usage || {};
     const sub = data.subscription || null;
     const trial = data.trial || {};
-    const planStatus = (current && current.status) || data.planStatus || '';
-    const planName = (current && current.name) || (sub && sub.planName) || null;
-    const subscriptionStatus = String((sub && sub.status) || '').toLowerCase();
-    const active = subscriptionStatus === 'active';
-    const isTrial = !sub && String((current && current.type) || '').toLowerCase() === 'trial';
-    const delivered = typeof usage.deliveredResults === 'number' ? usage.deliveredResults : 0;
-    const planLimit = usage.planLimit != null && Number(usage.planLimit) > 0 ? Number(usage.planLimit) : null;
+    const active = !!(sub && sub.status === 'active');
+    const planName = (current && current.name) || (sub && sub.planName) || (active ? 'Pro' : 'Trial');
     const startsAt = (current && current.startsAt) || (sub && sub.startsAt) || null;
     const endsAt = (current && current.endsAt) || (sub && (sub.endsAt || sub.nextRenewalAt)) || null;
+    const delivered = typeof usage.deliveredResults === 'number' ? usage.deliveredResults : 0;
+    const planLimit = usage.planLimit != null && Number(usage.planLimit) > 0 ? Number(usage.planLimit) : null;
+    const remaining = planLimit != null ? Math.max(0, planLimit - delivered) : null;
+    const pct = planLimit != null && planLimit > 0 ? Math.min(100, Math.round((delivered / planLimit) * 100)) : 0;
+    const left = daysLeft(endsAt);
 
-    let statusLabel = planStatus || '—';
-    if (subscriptionStatus === 'active') statusLabel = 'Activa';
-    else if (subscriptionStatus === 'pending') statusLabel = 'Pendente';
-    else if (subscriptionStatus === 'expired') statusLabel = 'Expirada';
-    else if (subscriptionStatus === 'cancelled' || subscriptionStatus === 'canceled') statusLabel = 'Cancelada';
-    else if (isTrial && trial.used === true) statusLabel = 'Trial esgotado';
-    else if (isTrial && trial.inProgress === true) statusLabel = 'Trial em curso';
-    else if (isTrial && trial.available === true) statusLabel = 'Trial disponível';
-    else if (isTrial && planStatus === 'Concluído') statusLabel = 'Trial concluído';
+    let statusLabel = 'Trial';
+    let chipClass = '';
+    if (active) {
+      statusLabel = 'Pro activo';
+      chipClass = 'is-active';
+    } else if (trial && trial.used) {
+      statusLabel = 'Trial esgotado';
+      chipClass = 'is-danger';
+    } else if (String(planName).toLowerCase() === 'trial') {
+      statusLabel = 'Trial';
+      chipClass = 'is-warn';
+    } else {
+      statusLabel = 'Expirada';
+      chipClass = 'is-danger';
+    }
+
+    if (chip) {
+      chip.textContent = statusLabel;
+      chip.className = 'billing-status-chip ' + chipClass;
+    }
+
+    let cta = 'Assinar Pro';
+    if (active) cta = 'Renovar Pro';
+    else if (statusLabel === 'Expirada') cta = 'Reactivar Pro';
+    else if (statusLabel === 'Trial esgotado') cta = 'Assinar Pro';
 
     if (currentPanel) {
-      let html = '<div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:flex-start">';
-      html += '<div>';
-      html += '<div style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#94a3b8)">Estado</div>';
-      html += '<div style="font-weight:600;margin-top:.15rem">' + esc(statusLabel) + '</div>';
-      html += '<div style="margin-top:.65rem;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#94a3b8)">Plano</div>';
-      html += '<div style="font-weight:600;margin-top:.15rem">' + esc(planName || (active ? 'Pro' : 'Trial')) + '</div>';
-      if (startsAt || endsAt) {
-        html += '<div class="muted" style="margin-top:.5rem;font-size:.9rem">';
-        if (startsAt) html += 'Início ' + esc(fmtDate(startsAt));
-        if (startsAt && endsAt) html += ' · ';
-        if (endsAt) html += 'Expira ' + esc(fmtDate(endsAt));
-        html += '</div>';
+      let html = '';
+      html += '<div class="billing-card">';
+      html += '<h3>Resumo</h3>';
+      html += '<div class="billing-meta">';
+      html += '<div><span class="label">Plano</span><strong>' + esc(planName) + '</strong></div>';
+      html += '<div><span class="label">Estado</span><strong>' + esc(statusLabel) + '</strong></div>';
+      html += '<div><span class="label">Início</span>' + esc(fmtDate(startsAt)) + '</div>';
+      html += '<div><span class="label">Expiração</span>' + esc(fmtDate(endsAt)) + '</div>';
+      if (left != null && active) {
+        html += '<div><span class="label">Dias restantes</span>' + esc(left) + '</div>';
       }
       html += '</div>';
-      html += '<div style="text-align:right">';
-      html += '<div style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#94a3b8)">Leads no ciclo</div>';
+      html += '<div style="margin-top:1.1rem">';
+      html += '<div class="label" style="font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#94a3b8)">Utilização de leads</div>';
       if (planLimit != null) {
-        html += '<div style="font-size:1.35rem;font-weight:700;margin-top:.15rem">' + esc(delivered) + ' <span class="muted" style="font-size:1rem;font-weight:500">/ ' + esc(planLimit) + '</span></div>';
+        html += '<div style="font-size:1.35rem;font-weight:700;margin-top:.2rem">' + esc(delivered) + ' <span class="muted" style="font-size:1rem;font-weight:500">/ ' + esc(planLimit) + '</span></div>';
+        html += '<div class="billing-usage-bar"><span style="width:' + pct + '%"></span></div>';
+        html += '<div class="muted" style="font-size:.85rem">' + esc(remaining) + ' restantes · ' + esc(pct) + '% utilizado</div>';
       } else {
-        html += '<div style="font-size:1.35rem;font-weight:700;margin-top:.15rem">' + esc(delivered) + '</div>';
+        html += '<div style="font-size:1.35rem;font-weight:700;margin-top:.2rem">' + esc(delivered) + '</div>';
       }
-      html += '<button type="button" class="btn btn-primary" id="btn-open-subscribe-modal" style="margin-top:.85rem">' + (active ? 'Renovar' : 'Assinar / Renovar') + '</button>';
+      if (startsAt || endsAt) {
+        html += '<div class="muted" style="font-size:.8rem;margin-top:.35rem">Ciclo: ' + esc(fmtDate(startsAt)) + ' → ' + esc(fmtDate(endsAt)) + '</div>';
+      }
       html += '</div></div>';
+
+      html += '<div class="billing-card billing-card-pro">';
+      html += '<div style="font-size:.75rem;font-weight:700;letter-spacing:.08em">PRO</div>';
+      html += '<div class="billing-pro-price">USD 19.99 <span>/ 30 dias</span></div>';
+      html += '<ul class="billing-benefits">';
+      html += '<li>2.500 leads entregues por ciclo</li>';
+      html += '<li>Pesquisas ilimitadas</li>';
+      html += '<li>Até 500 leads por pesquisa</li>';
+      html += '</ul>';
+      html += '<button type="button" class="btn btn-primary" id="btn-open-subscribe-modal" style="width:100%">' + esc(cta) + '</button>';
+      html += '</div>';
+
       currentPanel.innerHTML = html;
+      currentPanel.className = 'billing-grid';
       const openBtn = document.getElementById('btn-open-subscribe-modal');
       if (openBtn) openBtn.addEventListener('click', function () { openSubscribeModal(); });
     }
@@ -3331,20 +3372,22 @@
     window.__billingPlansCache = ((pRes && pRes.data && pRes.data.plans) || []);
     window.__billingMethodsCache = ((methRes && methRes.data && methRes.data.methods) || []);
     window.__billingGatewayOk = !!(methRes && methRes.data && methRes.data.gatewayConfigured);
+    window.__billingDemoMode = !!(methRes && methRes.data && methRes.data.demoMode);
 
     if (pays) {
       const payments = ((payRes && payRes.data && payRes.data.payments) || []);
-      pays.innerHTML = '<h3 style="margin:0 0 .75rem;font-size:1rem;font-weight:600">Histórico</h3>' +
+      pays.innerHTML = '<h3 style="margin:0 0 .5rem;font-size:1rem">Histórico de pagamentos</h3>' +
         (payments.length ? payments.map(function (p) {
-          return '<div style="border-top:1px solid rgba(148,163,184,.2);padding:.55rem 0;display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">' +
-            '<div><strong>' + esc(p.planName || 'Pro') + '</strong>' +
-            '<div class="muted" style="font-size:.85rem">' + esc(fmtDate(p.createdAt)) +
+          const demoBadge = p.isDemo ? '<span class="billing-badge-demo">DEMO</span>' : '';
+          return '<div class="billing-history-row">' +
+            '<div><strong>' + esc(p.planName || 'Pro') + '</strong>' + demoBadge +
+            '<div class="muted" style="font-size:.82rem;margin-top:.15rem">' + esc(fmtDate(p.createdAt)) +
             (p.reference ? ' · ref. ' + esc(String(p.reference).slice(0, 8)) : '') +
             (methodLabel(p.method) !== '—' ? ' · ' + esc(methodLabel(p.method)) : '') +
             '</div></div>' +
             '<div style="text-align:right"><div>' + esc(fmtMoney(p.amountCents, p.currency)) + '</div>' +
-            '<div class="muted" style="font-size:.85rem">' + esc(paymentStatusPt(p.status)) + '</div></div></div>';
-        }).join('') : '<p class="muted" style="margin:0">Sem pagamentos registados.</p>');
+            '<div class="muted" style="font-size:.82rem">' + esc(paymentStatusPt(p.status)) + '</div></div></div>';
+        }).join('') : '<p class="muted" style="margin:.5rem 0 0">Ainda não existem pagamentos. Quando assinares o Pro, o histórico aparece aqui.</p>');
     }
 
     try { handleBillingReturn(); } catch (_) {}
@@ -3355,14 +3398,12 @@
     if (!modal) {
       modal = document.createElement('div');
       modal.id = 'subscribe-modal';
-      modal.setAttribute('role', 'dialog');
-      modal.setAttribute('aria-modal', 'true');
       modal.hidden = true;
       modal.innerHTML =
-        '<div class="modal-backdrop" data-close-subscribe style="position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:80"></div>' +
-        '<div class="card" style="position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:81;width:min(440px,calc(100vw - 2rem));max-height:90vh;overflow:auto;padding:1.25rem">' +
-        '<h2 style="margin:0 0 .25rem;font-size:1.15rem">Plano Pro</h2>' +
-        '<p class="muted" style="margin:0 0 1rem">USD 19.99 · 30 dias · 2.500 leads · pesquisas ilimitadas · até 500 por pesquisa</p>' +
+        '<div class="modal-backdrop" data-close-subscribe></div>' +
+        '<div class="card billing-modal-shell" role="dialog" aria-modal="true" aria-labelledby="subscribe-modal-title">' +
+        '<h2 id="subscribe-modal-title" style="margin:0 0 .25rem;font-size:1.15rem">Activar Plano Pro</h2>' +
+        '<p class="muted" style="margin:0 0 1rem;font-size:.9rem">Confirma o método e os dados para continuar para o pagamento.</p>' +
         '<div id="subscribe-modal-body"></div>' +
         '<button type="button" class="btn btn-ghost btn-sm" data-close-subscribe style="margin-top:.75rem">Fechar</button></div>';
       document.body.appendChild(modal);
@@ -3374,6 +3415,7 @@
     const plans = window.__billingPlansCache || [];
     const methods = window.__billingMethodsCache || [];
     const gatewayOk = !!window.__billingGatewayOk;
+    const demoMode = !!window.__billingDemoMode;
     const pro = plans.find(function (p) { return String(p.name).toLowerCase() === 'pro'; }) || plans[0];
     function esc(s) { return escapeHtmlPlans(s == null ? '' : String(s)); }
 
@@ -3382,7 +3424,7 @@
       modal.hidden = false;
       return;
     }
-    if (!gatewayOk) {
+    if (!gatewayOk && !demoMode) {
       body.innerHTML = '<p class="muted">Checkout PayZeno não configurado no servidor.</p>';
       modal.hidden = false;
       return;
@@ -3393,13 +3435,20 @@
     }).join('');
 
     body.innerHTML =
+      (demoMode ? '<div class="demo-flag" style="display:inline-block;font-size:.7rem;font-weight:700;letter-spacing:.06em;padding:.2rem .45rem;border-radius:4px;background:#fef3c7;color:#92400e;margin-bottom:.75rem">MODO DE DEMONSTRAÇÃO</div>' : '') +
+      '<div class="billing-card" style="padding:.85rem;margin-bottom:.9rem">' +
+      '<div style="font-weight:600">Pro</div>' +
+      '<div class="muted" style="font-size:.9rem;margin-top:.2rem">USD 19.99 · 30 dias · 2.500 leads · pesquisas ilimitadas</div>' +
+      '</div>' +
       '<label class="form-label">Método de pagamento</label>' +
       '<select class="select" id="subscribe-method">' + methodOpts + '</select>' +
       '<p id="subscribe-quote" class="muted" style="margin:.4rem 0 0;font-size:.9rem"></p>' +
       '<label class="form-label" style="margin-top:.75rem">Nome</label>' +
       '<input class="input" type="text" id="subscribe-name" autocomplete="name">' +
+      '<p id="subscribe-name-err" class="muted" style="margin:.25rem 0 0;color:#dc2626;font-size:.85rem" hidden></p>' +
       '<label class="form-label" style="margin-top:.5rem">Telefone (E.164)</label>' +
       '<input class="input" type="tel" id="subscribe-phone" placeholder="+25884…" autocomplete="tel">' +
+      '<p id="subscribe-phone-err" class="muted" style="margin:.25rem 0 0;color:#dc2626;font-size:.85rem" hidden></p>' +
       '<p id="subscribe-msg" class="muted" style="margin:.6rem 0 0"></p>' +
       '<button type="button" class="btn btn-primary" id="subscribe-pay-btn" style="margin-top:.85rem;width:100%">Continuar para pagamento</button>';
 
@@ -3415,7 +3464,7 @@
           body: { planId: pro.id, method: methodEl.value },
         });
         if (res.ok && res.data) {
-          qEl.textContent = 'Total: ' + res.data.amountMajor + ' ' + res.data.currency + ' (ref. $19.99 USD)';
+          qEl.textContent = 'Total a pagar: ' + res.data.amountMajor + ' ' + res.data.currency + ' (ref. $19.99 USD)';
         } else {
           qEl.textContent = (res.data && res.data.error) || 'Cotação indisponível.';
         }
@@ -3428,28 +3477,24 @@
       refreshQuote();
     }
 
-    let checkoutClientToken = null;
-    let checkoutFingerprint = null;
-
-    document.getElementById('subscribe-pay-btn').addEventListener('click', async function () {
+    const payBtn = document.getElementById('subscribe-pay-btn');
+    payBtn.addEventListener('click', async function () {
       const msg = document.getElementById('subscribe-msg');
+      const nameErr = document.getElementById('subscribe-name-err');
+      const phoneErr = document.getElementById('subscribe-phone-err');
       const name = document.getElementById('subscribe-name').value.trim();
       const phone = document.getElementById('subscribe-phone').value.trim();
-      if (!name || !phone) {
-        if (msg) msg.textContent = 'Nome e telefone são obrigatórios.';
-        return;
-      }
+      nameErr.hidden = true;
+      phoneErr.hidden = true;
+      if (!name) { nameErr.textContent = 'Nome obrigatório.'; nameErr.hidden = false; return; }
+      if (!phone) { phoneErr.textContent = 'Telefone obrigatório.'; phoneErr.hidden = false; return; }
       try {
+        payBtn.disabled = true;
         const token = await ensureCsrf();
         if (msg) msg.textContent = 'A criar sessão…';
-        // Reuse the token for retries of identical checkout data.
-        const fingerprint = JSON.stringify([pro.id, methodEl.value, name, phone]);
-        if (!checkoutClientToken || checkoutFingerprint !== fingerprint) {
-          checkoutFingerprint = fingerprint;
-          checkoutClientToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
-            ? crypto.randomUUID()
-            : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
-        }
+        const clientToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
         const res = await api('/api/billing/checkout/session', {
           method: 'POST',
           headers: { 'X-CSRF-Token': token },
@@ -3457,42 +3502,141 @@
             planId: pro.id,
             method: methodEl.value,
             customer: { name: name, phone: phone },
-            idempotencyKey: checkoutClientToken,
+            idempotencyKey: clientToken,
           },
         });
         if (res.ok && res.data && res.data.checkoutUrl) {
           try { sessionStorage.setItem('billingPaymentId', res.data.payment && res.data.payment.id); } catch (_) {}
-          window.location.href = res.data.checkoutUrl;
+          if (res.data.demo || (res.data.payment && res.data.payment.isDemo)) {
+            modal.hidden = true;
+            showDemoCheckoutPanel(res.data.payment, res.data.quote, methodEl.value);
+          } else {
+            window.location.href = res.data.checkoutUrl;
+          }
         } else if (msg) {
           msg.textContent = (res.data && res.data.error) || 'Não foi possível iniciar o checkout.';
+          payBtn.disabled = false;
         }
       } catch (e) {
         if (msg) msg.textContent = (e && e.message) || 'Erro de rede.';
+        payBtn.disabled = false;
       }
     });
 
     modal.hidden = false;
   }
 
+  function showDemoCheckoutPanel(payment, quote, method) {
+    let panel = document.getElementById('billing-demo-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'billing-demo-panel';
+      panel.className = 'card billing-demo-panel';
+      panel.style.cssText = 'padding:1.25rem;margin-bottom:1rem';
+      const host = document.getElementById('plans-current-panel');
+      if (host && host.parentElement) host.parentElement.insertBefore(panel, host);
+    }
+    panel.hidden = false;
+    const amount = quote && quote.amountMajor != null
+      ? (quote.amountMajor + ' ' + (quote.currency || ''))
+      : 'USD 19.99';
+    function esc(s) { return escapeHtmlPlans(s == null ? '' : String(s)); }
+    panel.innerHTML =
+      '<div class="demo-flag">MODO DE DEMONSTRAÇÃO</div>' +
+      '<h3 style="margin:0 0 .35rem">Maps Leads Finder — Checkout</h3>' +
+      '<p class="muted" style="margin:0 0 .9rem;font-size:.9rem">Simulação local. Não processa dinheiro real.</p>' +
+      '<div class="billing-meta" style="margin-bottom:1rem">' +
+      '<div><span class="label">Plano</span><strong>Pro</strong></div>' +
+      '<div><span class="label">Valor</span><strong>' + esc(amount) + '</strong></div>' +
+      '<div><span class="label">Método</span>' + esc(method || payment && payment.method || '—') + '</div>' +
+      '<div><span class="label">Referência</span>' + esc(payment && payment.id ? String(payment.id).slice(0, 8) : '—') + '</div>' +
+      '<div><span class="label">Estado</span><strong id="demo-pay-status">Pendente</strong></div>' +
+      '</div>' +
+      '<p class="muted" style="font-size:.85rem;margin:0 0 .85rem">Utiliza os botões abaixo para simular a resposta do gateway.</p>' +
+      '<div style="display:flex;gap:.5rem;flex-wrap:wrap">' +
+      '<button type="button" class="btn btn-primary" id="demo-confirm-btn">Simular pagamento confirmado</button>' +
+      '<button type="button" class="btn btn-ghost" id="demo-cancel-btn">Cancelar pagamento</button>' +
+      '</div>' +
+      '<p id="demo-pay-msg" class="muted" style="margin:.75rem 0 0"></p>';
+
+    document.getElementById('demo-confirm-btn').addEventListener('click', async function () {
+      const msg = document.getElementById('demo-pay-msg');
+      const btn = document.getElementById('demo-confirm-btn');
+      try {
+        btn.disabled = true;
+        const token = await ensureCsrf();
+        const res = await api('/api/billing/demo/confirm', {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': token },
+          body: { paymentId: payment.id },
+        });
+        if (res.ok) {
+          document.getElementById('demo-pay-status').textContent = 'Concluído';
+          msg.textContent = 'Pagamento de demonstração confirmado. Subscrição Pro activada.';
+          document.getElementById('demo-cancel-btn').disabled = true;
+          loadPlansQuotaView();
+        } else {
+          msg.textContent = (res.data && res.data.error) || 'Falha ao confirmar.';
+          btn.disabled = false;
+        }
+      } catch (e) {
+        msg.textContent = (e && e.message) || 'Erro de rede.';
+        btn.disabled = false;
+      }
+    });
+    document.getElementById('demo-cancel-btn').addEventListener('click', async function () {
+      const msg = document.getElementById('demo-pay-msg');
+      try {
+        const token = await ensureCsrf();
+        const res = await api('/api/billing/demo/cancel', {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': token },
+          body: { paymentId: payment.id },
+        });
+        if (res.ok) {
+          document.getElementById('demo-pay-status').textContent = 'Cancelado';
+          msg.textContent = 'Pagamento de demonstração cancelado.';
+          document.getElementById('demo-confirm-btn').disabled = true;
+          document.getElementById('demo-cancel-btn').disabled = true;
+        } else {
+          msg.textContent = (res.data && res.data.error) || 'Falha ao cancelar.';
+        }
+      } catch (e) {
+        msg.textContent = (e && e.message) || 'Erro de rede.';
+      }
+    });
+  }
+
   async function handleBillingReturn() {
     const params = new URLSearchParams(window.location.search || '');
     const billing = params.get('billing');
     if (!billing) return;
+
+    if (billing === 'demo') {
+      const paymentId = params.get('payment_id') || sessionStorage.getItem('billingPaymentId');
+      if (paymentId) {
+        try {
+          const res = await api('/api/billing/payments/' + encodeURIComponent(paymentId) + '/status');
+          if (res.ok && res.data && res.data.payment) {
+            showDemoCheckoutPanel(res.data.payment, null, res.data.payment.method);
+            return;
+          }
+        } catch (_) {}
+      }
+    }
+
     let paymentId = params.get('payment_id') || params.get('reference');
     try { if (!paymentId) paymentId = sessionStorage.getItem('billingPaymentId'); } catch (_) {}
-
     const banner = document.getElementById('billing-return-banner');
     if (!banner) return;
     banner.hidden = false;
-
     if (billing === 'cancel') {
       banner.innerHTML = '<strong>Checkout cancelado.</strong> Nenhuma cobrança foi confirmada.';
       return;
     }
-
+    if (billing === 'demo') return;
     banner.innerHTML = '<strong>A processar pagamento…</strong> A activação só ocorre após confirmação do PayZeno.';
     if (!paymentId) return;
-
     let attempts = 0;
     const poll = async function () {
       attempts += 1;

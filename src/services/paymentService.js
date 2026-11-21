@@ -1,13 +1,23 @@
 'use strict';
 /**
- * Payment history mapping. Activation is gateway-only (PayZeno webhooks).
+ * Payment history mapping. Activation is gateway (PayZeno) or demo when BILLING_DEMO_MODE.
  */
 function getPool() {
   return require('../db/pool').getPool();
 }
 
+function isDemoPayload(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  return payload.demo === true || payload.mode === 'demo';
+}
+
 function mapPayment(row) {
   if (!row) return null;
+  const gp = row.gateway_payload && typeof row.gateway_payload === 'object'
+    ? row.gateway_payload
+    : (typeof row.gateway_payload === 'string'
+      ? (() => { try { return JSON.parse(row.gateway_payload); } catch (_) { return {}; } })()
+      : {});
   return {
     id: row.id,
     userId: row.user_id,
@@ -29,6 +39,7 @@ function mapPayment(row) {
     externalPaymentId: row.external_payment_id || null,
     checkoutUrl: row.checkout_url || null,
     fxSnapshot: row.fx_snapshot || {},
+    isDemo: isDemoPayload(gp),
   };
 }
 
