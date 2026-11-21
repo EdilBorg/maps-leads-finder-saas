@@ -82,25 +82,28 @@ async function assertLeadOwned(clientOrPool, userId, leadId) {
  */
 async function listAppointments(userId, leadId) {
   const pool = getPool();
-  const own = await assertLeadOwned(pool, userId, leadId);
-  if (!own) return null;
-
   const { rows } = await pool.query(
-    `SELECT id, lead_id, title, description, scheduled_at, status, created_at, updated_at
-     FROM saved_lead_appointments
-     WHERE user_id = $1 AND lead_id = $2
+    `SELECT a.id, a.lead_id, a.title, a.description, a.scheduled_at, a.status,
+            a.created_at, a.updated_at
+     FROM saved_leads sl
+     LEFT JOIN saved_lead_appointments a
+       ON a.lead_id = sl.id AND a.user_id = $1
+     WHERE sl.id = $2 AND sl.user_id = $1
      ORDER BY
-       CASE status WHEN 'scheduled' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END,
-       CASE WHEN status = 'scheduled' THEN scheduled_at END ASC NULLS LAST,
-       CASE WHEN status <> 'scheduled' THEN scheduled_at END DESC NULLS LAST`,
+       CASE a.status WHEN 'scheduled' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END,
+       CASE WHEN a.status = 'scheduled' THEN a.scheduled_at END ASC NULLS LAST,
+       CASE WHEN a.status IS DISTINCT FROM 'scheduled' THEN a.scheduled_at END DESC NULLS LAST`,
     [userId, leadId]
   );
 
+  if (!rows.length) return null;
+
+  const apptRows = rows.filter((r) => r.id != null);
   return {
-    items: rows.map(mapAppointmentRow),
-    upcoming: rows.filter((r) => r.status === 'scheduled').map(mapAppointmentRow),
-    completed: rows.filter((r) => r.status === 'completed').map(mapAppointmentRow),
-    cancelled: rows.filter((r) => r.status === 'cancelled').map(mapAppointmentRow),
+    items: apptRows.map(mapAppointmentRow),
+    upcoming: apptRows.filter((r) => r.status === 'scheduled').map(mapAppointmentRow),
+    completed: apptRows.filter((r) => r.status === 'completed').map(mapAppointmentRow),
+    cancelled: apptRows.filter((r) => r.status === 'cancelled').map(mapAppointmentRow),
   };
 }
 
@@ -124,28 +127,22 @@ async function createAppointment(userId, leadId, input) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const own = await client.query(
-      `SELECT id FROM saved_leads WHERE id = $1 AND user_id = $2 FOR SHARE`,
-      [leadId, userId]
-    );
-    if (!own.rows[0]) {
+    const own = await assertLeadOwned(client, userId, leadId);
+    if (!own) {
       await client.query('ROLLBACK');
       return null;
     }
-
-    const ins = await client.query(
+    const { rows } = await client.query(
       `INSERT INTO saved_lead_appointments (
          user_id, lead_id, title, description, scheduled_at, status
        ) VALUES ($1, $2, $3, $4, $5::timestamptz, 'scheduled')
        RETURNING id, lead_id, title, description, scheduled_at, status, created_at, updated_at`,
       [userId, leadId, title, description, scheduledAt]
     );
-
     const { insertOtherActivity } = require('./savedLeadActivities');
-    await insertOtherActivity(client, userId, leadId, `Agendamento criado: ${title}`);
-
+    await insertOtherActivity(client, userId, leadId, `Compromisso agendado: ${title}`);
     await client.query('COMMIT');
-    return mapAppointmentRow(ins.rows[0]);
+    return mapAppointmentRow(rows[0]);
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
     throw err;
@@ -154,18 +151,13 @@ async function createAppointment(userId, leadId, input) {
   }
 }
 
-/**
- * Patch title, description, scheduledAt. Preserves identity (same row).
- * If scheduledAt changes while status is scheduled, logs a reschedule activity.
- */
-async function updateAppointment(userId, leadId, appointmentId, patch) {
+async function updateAppointment(userId, leadId, appointmentId, input) {
   const pool = getPool();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-
     const cur = await client.query(
-      `SELECT id, lead_id, title, description, scheduled_at, status, created_at, updated_at
+      `SELECT id, title, description, scheduled_at, status
        FROM saved_lead_appointments
        WHERE id = $1 AND lead_id = $2 AND user_id = $3
        FOR UPDATE`,
@@ -175,65 +167,34 @@ async function updateAppointment(userId, leadId, appointmentId, patch) {
       await client.query('ROLLBACK');
       return null;
     }
-    const row = cur.rows[0];
-
-    const updates = [];
-    const params = [];
-    let p = 1;
-    let newTitle = row.title;
-    let rescheduled = false;
-    let prevScheduledAt = row.scheduled_at;
-
-    if (patch && Object.prototype.hasOwnProperty.call(patch, 'title')) {
-      newTitle = validateTitle(patch.title);
-      updates.push(`title = $${p}`);
-      params.push(newTitle);
-      p += 1;
-    }
-    if (patch && Object.prototype.hasOwnProperty.call(patch, 'description')) {
-      const description = validateDescription(patch.description);
-      updates.push(`description = $${p}`);
-      params.push(description);
-      p += 1;
-    }
-    if (patch && Object.prototype.hasOwnProperty.call(patch, 'scheduledAt')) {
-      const scheduledAt = parseScheduledAt(patch.scheduledAt);
-      updates.push(`scheduled_at = $${p}::timestamptz`);
-      params.push(scheduledAt);
-      p += 1;
-      const prevIso = new Date(row.scheduled_at).toISOString();
-      if (prevIso !== scheduledAt) rescheduled = true;
-    }
-
-    if (!updates.length) {
-      await client.query('ROLLBACK');
-      const err = new Error('Nada para atualizar.');
+    const existing = cur.rows[0];
+    if (existing.status !== 'scheduled') {
+      const err = new Error('Apenas compromissos agendados podem ser editados.');
       err.code = 'VALIDATION';
+      await client.query('ROLLBACK');
       throw err;
     }
 
-    updates.push('updated_at = NOW()');
-    params.push(appointmentId, leadId, userId);
+    const title = input && Object.prototype.hasOwnProperty.call(input, 'title')
+      ? validateTitle(input.title)
+      : existing.title;
+    const description = input && Object.prototype.hasOwnProperty.call(input, 'description')
+      ? validateDescription(input.description)
+      : existing.description;
+    const scheduledAt = input && Object.prototype.hasOwnProperty.call(input, 'scheduledAt')
+      ? parseScheduledAt(input.scheduledAt)
+      : existing.scheduled_at;
 
     const { rows } = await client.query(
       `UPDATE saved_lead_appointments
-       SET ${updates.join(', ')}
-       WHERE id = $${p} AND lead_id = $${p + 1} AND user_id = $${p + 2}
+       SET title = $1, description = $2, scheduled_at = $3::timestamptz, updated_at = NOW()
+       WHERE id = $4 AND lead_id = $5 AND user_id = $6
        RETURNING id, lead_id, title, description, scheduled_at, status, created_at, updated_at`,
-      params
+      [title, description, scheduledAt, appointmentId, leadId, userId]
     );
 
-    if (rescheduled && row.status === 'scheduled') {
-      const prevLabel = new Date(prevScheduledAt).toISOString();
-      const nextLabel = new Date(rows[0].scheduled_at).toISOString();
-      const { insertOtherActivity } = require('./savedLeadActivities');
-      await insertOtherActivity(
-        client,
-        userId,
-        leadId,
-        `Compromisso reagendado: ${newTitle} (${prevLabel} → ${nextLabel})`
-      );
-    }
+    const { insertOtherActivity } = require('./savedLeadActivities');
+    await insertOtherActivity(client, userId, leadId, `Compromisso actualizado: ${title}`);
 
     await client.query('COMMIT');
     return mapAppointmentRow(rows[0]);
