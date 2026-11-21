@@ -14,18 +14,18 @@ async function listPlans({ activeOnly = true } = {}) {
   return rows.map(mapPlan);
 }
 
-async function getPlanById(planId) {
-  const pool = getPool();
-  const { rows } = await pool.query(`SELECT * FROM plans WHERE id = $1`, [planId]);
+async function getPlanById(planId, client) {
+  const db = client || getPool();
+  const { rows } = await db.query(`SELECT * FROM plans WHERE id = $1`, [planId]);
   if (!rows[0]) return null;
   const plan = mapPlan(rows[0]);
-  plan.providerLimits = await listProviderLimits(planId);
+  plan.providerLimits = await listProviderLimits(planId, client);
   return plan;
 }
 
-async function listProviderLimits(planId) {
-  const pool = getPool();
-  const { rows } = await pool.query(
+async function listProviderLimits(planId, client) {
+  const db = client || getPool();
+  const { rows } = await db.query(
     `SELECT * FROM plan_provider_limits WHERE plan_id = $1 ORDER BY provider_code`,
     [planId]
   );

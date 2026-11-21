@@ -29,6 +29,7 @@ const {
   FREE_SEARCH_RENEW_INTERVAL_MS,
 } = require('./freeSearchHold');
 const quotaService = require('./quotaService');
+const leadQuotaService = require('./leadQuotaService');
 
 const RETENTION_DAYS = 30;
 
@@ -169,6 +170,8 @@ async function startSearch(opts) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // Global lock order: users → searches (prevent concurrent over-reservation)
+      await lockUserForUpdate(client, opts.userId);
       const limit = normalizeLimit(opts.limit);
 
       // 1) Create search row first so every reservation is keyed by a real searchId
@@ -211,8 +214,15 @@ async function startSearch(opts) {
       }
 
       holdToken = auth.holdToken || null;
-      const effectiveLimit = auth.limit != null ? normalizeLimit(Math.min(auth.limit, limit)) : limit;
-      const finalLimit = auth.mode === 'trial' ? Math.min(effectiveLimit, 200) : effectiveLimit;
+      // Paid: auth.limit may be < 100 (partial remaining quota) — never bump via normalizeLimit
+      let finalLimit;
+      if (auth.mode === 'trial') {
+        finalLimit = Math.min(auth.limit != null ? Number(auth.limit) : limit, 200);
+      } else if (auth.limit != null) {
+        finalLimit = Math.max(1, Math.min(Number(auth.limit), 500));
+      } else {
+        finalLimit = limit;
+      }
       const allowedCodes = (auth.providers || []).filter((p) => p.allowed).map((p) => p.code);
       const providersInit = ['apify', 'tomtom', 'brightdata'].map((code) => {
         const p = (auth.providers || []).find((x) => x.code === code);
@@ -270,12 +280,17 @@ async function startSearch(opts) {
   activeRuns.set(String(searchId), {
     controller, userId: opts.userId, holdToken,
     quotaMode: auth.mode, providers: auth.providers || [],
+    leadQuotaReserved: auth.leadHold && auth.leadHold.reserved != null
+      ? auth.leadHold.reserved
+      : (auth.limit != null ? auth.limit : null),
   });
 
   const allowedProviders = (auth.providers || []).filter((p) => p.allowed).map((p) => p.code);
   const effectiveLimit = auth.mode === 'trial'
     ? Math.min(normalizeLimit(opts.limit), 200)
-    : (auth.limit != null ? normalizeLimit(auth.limit) : normalizeLimit(opts.limit));
+    : (auth.limit != null
+        ? Math.max(1, Math.min(Number(auth.limit) || normalizeLimit(opts.limit), 500))
+        : normalizeLimit(opts.limit));
 
   setImmediate(() => {
     runSearchJob({
@@ -291,6 +306,9 @@ async function startSearch(opts) {
       quotaMode: auth.mode,
       quotaProviders: auth.providers || [],
       allowedProviders,
+      leadQuotaReserved: auth.leadHold && auth.leadHold.reserved != null
+        ? auth.leadHold.reserved
+        : (auth.limit != null ? auth.limit : null),
     }).catch((err) => {
       console.error('[search-job]', searchId, err && err.message ? err.message : err);
     });
@@ -422,6 +440,18 @@ async function runSearchJob(ctx) {
       try {
         await quotaService.releaseAllReservations(ctx.userId, ctx.searchId, ctx.quotaProviders || []);
       } catch (_) {}
+      try {
+        const c2 = await getPool().connect();
+        try {
+          await c2.query('BEGIN');
+          await leadQuotaService.releaseLeadQuota(c2, { userId: ctx.userId, searchId: ctx.searchId });
+          await c2.query('COMMIT');
+        } catch (e) {
+          try { await c2.query('ROLLBACK'); } catch (_) {}
+        } finally {
+          c2.release();
+        }
+      } catch (_) {}
     }
     return;
   } finally {
@@ -486,7 +516,14 @@ async function runSearchJob(ctx) {
     );
 
     const RESULT_INSERT_BATCH = 100;
-    const leadsToPersist = Array.isArray(engineResult.results) ? engineResult.results : [];
+    let leadsToPersist = Array.isArray(engineResult.results) ? engineResult.results.slice() : [];
+    // Never persist more leads than commercially reserved for this search
+    if (ctx.quotaMode === 'paid' && ctx.leadQuotaReserved != null) {
+      const maxAllowed = Math.max(0, Number(ctx.leadQuotaReserved) || 0);
+      if (leadsToPersist.length > maxAllowed) {
+        leadsToPersist = leadsToPersist.slice(0, maxAllowed);
+      }
+    }
     let insertedCount = 0;
     for (let i = 0; i < leadsToPersist.length; i += RESULT_INSERT_BATCH) {
       const batch = leadsToPersist.slice(i, i + RESULT_INSERT_BATCH);
@@ -531,6 +568,15 @@ async function runSearchJob(ctx) {
       insertedCount += batch.length;
     }
 
+    // Align stored totals with rows actually persisted
+    if (insertedCount !== (engineResult.totals && engineResult.totals.afterFilters)) {
+      await client.query(
+        `UPDATE searches SET total_after_filters = $2
+         WHERE id = $1 AND user_id = $3 AND status IN ('completed','partial','failed')`,
+        [ctx.searchId, insertedCount, ctx.userId]
+      );
+    }
+
     const needConsume =
       insertedCount > 0 &&
       (engineResult.outcome === 'results' || engineResult.searchStatus === 'partial');
@@ -546,6 +592,21 @@ async function runSearchJob(ctx) {
         }
       } else {
         await releaseFreeSearchHold(client, ctx.userId, ctx.holdToken);
+      }
+    }
+
+    if (ctx.quotaMode === 'paid') {
+      if (needConsume) {
+        await leadQuotaService.commitLeadQuota(client, {
+          userId: ctx.userId,
+          searchId: ctx.searchId,
+          deliveredCount: insertedCount,
+        });
+      } else {
+        await leadQuotaService.releaseLeadQuota(client, {
+          userId: ctx.userId,
+          searchId: ctx.searchId,
+        });
       }
     }
 
@@ -649,6 +710,21 @@ async function cancelSearch(userId, searchId) {
         await quotaService.releaseAllReservations(userId, searchId, fromRun);
       } catch (e) {
         console.error('[cancel-quota-release]', searchId, e && e.message);
+      }
+      try {
+        const c2 = await getPool().connect();
+        try {
+          await c2.query('BEGIN');
+          await leadQuotaService.releaseLeadQuota(c2, { userId, searchId });
+          await c2.query('COMMIT');
+        } catch (e2) {
+          try { await c2.query('ROLLBACK'); } catch (_) {}
+          console.error('[cancel-lead-quota]', searchId, e2 && e2.message);
+        } finally {
+          c2.release();
+        }
+      } catch (e3) {
+        console.error('[cancel-lead-quota]', searchId, e3 && e3.message);
       }
     }
 

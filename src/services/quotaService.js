@@ -11,6 +11,7 @@
  */
 const planService = require('./planService');
 const subscriptionService = require('./subscriptionService');
+const leadQuotaService = require('./leadQuotaService');
 const providerUsageService = require('./providerUsageService');
 const { acquireFreeSearchHold } = require('./freeSearchHold');
 const { PROVIDER_MAX } = require('./searchEngine');
@@ -128,7 +129,36 @@ async function authorizeAndReserve(client, {
     };
   }
 
-  const planLimits = await planService.listProviderLimits(sub.planId);
+  // Commercial delivered-leads quota (plan.max_results_per_month)
+  const planRow = await planService.getPlanById(sub.planId, client);
+  const planLeadLimit = planRow && planRow.maxResultsPerMonth != null
+    ? Number(planRow.maxResultsPerMonth)
+    : null;
+
+  let leadHold = null;
+  if (planLeadLimit != null && planLeadLimit > 0) {
+    leadHold = await leadQuotaService.reserveLeadQuota(client, {
+      userId,
+      searchId,
+      requestedLimit,
+      planLimit: planLeadLimit,
+      periodStart: window.periodStart,
+      periodEnd: window.periodEnd,
+      idempotencyKey: `lead-quota:${userId}:${searchId}`,
+    });
+    if (!leadHold.ok) {
+      return {
+        mode: 'denied',
+        reason: leadHold.reason || 'QUOTA_EXHAUSTED',
+        message: leadHold.message || 'Quota de leads esgotada neste ciclo.',
+        holdToken: null,
+        providers: [],
+        leadHold,
+      };
+    }
+  }
+
+  const planLimits = await planService.listProviderLimits(sub.planId, client);
   const limitByCode = {};
   for (const pl of planLimits) limitByCode[pl.providerCode] = pl;
 
@@ -239,6 +269,9 @@ async function authorizeAndReserve(client, {
   }
 
   if (allowed.length === 0) {
+    if (leadHold && leadHold.ok && searchId) {
+      try { await leadQuotaService.releaseLeadQuota(client, { userId, searchId }); } catch (_) {}
+    }
     return {
       mode: 'denied',
       reason: 'PROVIDERS_EXHAUSTED',
@@ -252,13 +285,19 @@ async function authorizeAndReserve(client, {
 
   const planCap = sub.maxResultsPerSearch != null && sub.maxResultsPerSearch > 0
     ? sub.maxResultsPerSearch : requestedLimit;
+  let limit = Math.min(requestedLimit, planCap);
+  if (leadHold && leadHold.ok && leadHold.effectiveLimit != null) {
+    // Use commercial hold size as-is (may be < 100); do not re-normalize upward.
+    limit = Math.min(limit, leadHold.effectiveLimit);
+  }
 
   return {
     mode: 'paid',
     holdToken: null,
     subscription: sub,
     period: window,
-    limit: Math.min(requestedLimit, planCap),
+    limit,
+    leadHold: leadHold || null,
     providers: [...allowed, ...skipped],
   };
 }
@@ -538,7 +577,20 @@ async function getClientQuotaView(userId) {
     }
   }
 
-  const remaining = planLimit != null ? Math.max(0, planLimit - deliveredResults) : null;
+  let reservedLeads = 0;
+  if (sub && period && period.periodStart) {
+    try {
+      reservedLeads = await leadQuotaService.getReservedForUser(userId, period.periodStart);
+    } catch (resErr) {
+      const err = new Error('Não foi possível calcular leads reservados neste ciclo.');
+      err.code = 'QUOTA_VIEW_RESERVED_FAILED';
+      err.cause = resErr;
+      throw err;
+    }
+  }
+  const remaining = planLimit != null
+    ? Math.max(0, planLimit - deliveredResults - reservedLeads)
+    : null;
 
   let planStatus = 'Disponível';
   if (sub) {
@@ -588,6 +640,8 @@ async function getClientQuotaView(userId) {
     },
     usage: {
       deliveredResults,
+      reservedLeads,
+      availableLeads: remaining,
       planLimit,
       remaining,
       duplicatesRemoved,
