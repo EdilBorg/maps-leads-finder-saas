@@ -437,19 +437,17 @@
 
         </section>
                 <section class="view" id="view-plans" hidden>
-          <h1 class="page-title">Planos e utilização</h1>
-          <p class="page-sub">Plano actual, consumo de resultados e pagamentos</p>
-
-          <div id="plans-current-panel" class="card stack-gap-16" style="padding:1rem;margin-bottom:1rem">
+          <h2 class="page-heading">Subscrição</h2>
+          <p class="page-sub">Estado, utilização e pagamento</p>
+          <div id="billing-return-banner" class="card" style="padding:1rem;margin-bottom:1rem" hidden></div>
+          <div id="plans-current-panel" class="card" style="padding:1rem;margin-bottom:1rem">
             <p class="muted">A carregar…</p>
           </div>
-
-          <div id="plans-usage-panel" class="card stack-gap-16" style="padding:1rem;margin-bottom:1rem">
-            <p class="muted">A carregar consumo…</p>
+          <div id="plans-payments-panel" class="card" style="padding:1rem">
+            <p class="muted">Histórico de pagamentos</p>
           </div>
-
-          <div id="plans-list-panel" class="card" style="padding:1rem;margin-bottom:1rem"></div>
-          <div id="plans-payments-panel" class="card" style="padding:1rem"></div>
+          <div id="plans-usage-panel" hidden></div>
+          <div id="plans-list-panel" hidden></div>
         </section>
 <section class="view" id="view-settings" aria-label="Configurações">
           <h2 class="page-heading">Configurações</h2>

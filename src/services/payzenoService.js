@@ -4,12 +4,9 @@
  * Docs: https://www.payzeno.io/api
  * OpenAPI: https://api.payzeno.io/swagger/v1/swagger.json
  *
- * Webhook signature: public OpenAPI does not document HMAC headers/format.
- * We require PAYZENO_WEBHOOK_SECRET and accept common HMAC-SHA256 patterns
- * (raw body, or timestamp.body) with hex digest. This is a defensive measure;
- * production readiness requires confirmation of the official signature contract.
+ * Webhook signature: official PayZeno HMAC contract is unconfirmed.
+ * Webhook processing remains fail-closed until the provider confirms it.
  */
-const crypto = require('crypto');
 const { randomUUID } = require('crypto');
 const fxRateService = require('./fxRateService');
 const planService = require('./planService');
@@ -21,7 +18,6 @@ function apiBase() {
   return (process.env.PAYZENO_API_BASE || 'https://api.payzeno.io').replace(/\/$/, '');
 }
 function apiKey() { return process.env.PAYZENO_API_KEY || ''; }
-function webhookSecret() { return process.env.PAYZENO_WEBHOOK_SECRET || ''; }
 function allowedMethods() {
   const raw = process.env.PAYZENO_PAYMENT_METHODS || 'mpesa,emola,multicaixa,payfast,card';
   return raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -85,15 +81,30 @@ async function createCheckoutSession({
     throw err;
   }
   const quote = await buildCheckoutQuote({ planId, method });
-  const key = idempotencyKey || `payzeno:${userId}:${planId}:${method}`;
+  // Server-owned idempotency: never trust client keys for cross-user identity.
+  // Client may send a short clientToken for same-user retry; it is namespaced by userId.
+  let clientToken = idempotencyKey
+    ? String(idempotencyKey).replace(/[^a-zA-Z0-9:_-]/g, '').slice(0, 64)
+    : '';
+  if (!clientToken) clientToken = randomUUID();
+  let key = `payzeno:u:${userId}:p:${planId}:m:${quote.method}:t:${clientToken}`;
   const pool = getPool();
   const client = await pool.connect();
   let payment;
   try {
     await client.query('BEGIN');
-    const existing = await client.query(`SELECT * FROM payments WHERE idempotency_key = $1`, [key]);
+    const existing = await client.query(
+      `SELECT * FROM payments WHERE idempotency_key = $1 AND user_id = $2`,
+      [key, userId]
+    );
     if (existing.rows[0]) {
       const row = existing.rows[0];
+      if (String(row.user_id) !== String(userId)) {
+        await client.query('ROLLBACK');
+        const err = new Error('Pagamento não pertence a este utilizador.');
+        err.code = 'OWNERSHIP';
+        throw err;
+      }
       await client.query('COMMIT');
       if (row.checkout_url && (row.status === 'pending' || row.status === 'processing')) {
         return {
@@ -104,12 +115,13 @@ async function createCheckoutSession({
           replayed: true,
         };
       }
-      // Terminal or incomplete previous attempt with same key → new key suffix
       if (row.status === 'completed' || row.status === 'approved') {
-        const err = new Error('Já existe um pagamento concluído para este pedido.');
+        const err = new Error('Já existe um pagamento concluído para esta tentativa. Inicie um novo checkout.');
         err.code = 'ALREADY_PAID';
         throw err;
       }
+      // Failed/expired/cancelled: mint a fresh idempotency key for this user only
+      key = `payzeno:u:${userId}:p:${planId}:m:${quote.method}:t:${randomUUID()}`;
     }
     const { rows } = await client.query(
       `INSERT INTO payments (
@@ -127,8 +139,17 @@ async function createCheckoutSession({
     if (rows[0]) {
       payment = rows[0];
     } else {
-      const again = await client.query(`SELECT * FROM payments WHERE idempotency_key = $1`, [key]);
+      const again = await client.query(
+        `SELECT * FROM payments WHERE idempotency_key = $1 AND user_id = $2`,
+        [key, userId]
+      );
       payment = again.rows[0];
+      if (payment && String(payment.user_id) !== String(userId)) {
+        await client.query('ROLLBACK');
+        const err = new Error('Pagamento não pertence a este utilizador.');
+        err.code = 'OWNERSHIP';
+        throw err;
+      }
     }
     if (payment && payment.id) {
       await client.query(
@@ -243,28 +264,17 @@ async function createCheckoutSession({
 
 /**
  * Webhook signature verification.
- * Official public docs do not specify header names or HMAC format.
- * Accepts HMAC-SHA256 hex of rawBody or `${timestamp}.${rawBody}` against
- * X-PayZeno-Signature / X-Signature / Payzeno-Signature (optional v1= prefix).
+ * Official signature contract is unconfirmed. Reject all signatures
+ * until PayZeno confirms the exact header, signed bytes, encoding and replay rules.
  */
-function verifyWebhookSignature({ rawBody, signature, timestamp, secret }) {
-  const sec = secret || webhookSecret();
-  if (!sec) return { ok: false, reason: 'NO_SECRET', documented: false };
-  if (!signature || rawBody == null) return { ok: false, reason: 'MISSING', documented: false };
-  const cleanSig = String(signature).replace(/^v1=/, '').trim();
-  const candidates = [String(rawBody)];
-  if (timestamp) candidates.push(`${timestamp}.${rawBody}`);
-  for (const payload of candidates) {
-    const expected = crypto.createHmac('sha256', sec).update(payload, 'utf8').digest('hex');
-    try {
-      const a = Buffer.from(expected, 'hex');
-      const b = Buffer.from(cleanSig, 'hex');
-      if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
-        return { ok: true, documented: false, pattern: payload === rawBody ? 'body' : 'timestamp.body' };
-      }
-    } catch (_) { /* continue */ }
-  }
-  return { ok: false, reason: 'MISMATCH', documented: false };
+function verifyWebhookSignature() {
+  // Fail closed: the official PayZeno signature contract is not confirmed.
+  // Never accept speculative HMAC formats for payment activation.
+  return {
+    ok: false,
+    reason: 'SIGNATURE_CONTRACT_UNCONFIRMED',
+    documented: false,
+  };
 }
 
 async function recordWebhookEvent({ eventId, eventType, paymentId, payload, client }) {

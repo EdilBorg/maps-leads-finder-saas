@@ -73,7 +73,7 @@ describe('refund/chargeback scoped to payment subscription', () => {
 });
 
 describe('HMAC verification (contract not officially documented)', () => {
-  it('rejects missing secret and mismatch; accepts body HMAC', () => {
+  it('fails closed until the official signature contract is confirmed', () => {
     const secret = 'whsec_test';
     const raw = JSON.stringify({
       event: 'payment.succeeded',
@@ -87,7 +87,9 @@ describe('HMAC verification (contract not officially documented)', () => {
     assert.equal(payzeno.verifyWebhookSignature({ rawBody: raw, signature: '', secret }).ok, false);
     assert.equal(payzeno.verifyWebhookSignature({ rawBody: raw, signature: 'x' }).ok, false);
     const sig = crypto.createHmac('sha256', secret).update(raw).digest('hex');
-    assert.equal(payzeno.verifyWebhookSignature({ rawBody: raw, signature: sig, secret }).ok, true);
+    const result = payzeno.verifyWebhookSignature({ rawBody: raw, signature: sig, secret });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'SIGNATURE_CONTRACT_UNCONFIRMED');
   });
   it('documents that official HMAC contract is unconfirmed', () => {
     assert.match(payzenoSrc, /documented: false|not document|OpenAPI does not document/i);

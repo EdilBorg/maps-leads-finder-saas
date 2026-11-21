@@ -38,7 +38,7 @@ describe('PayZeno official webhook events', () => {
     assert.equal(typeof payzeno.handleWebhookPayload, 'function');
     assert.equal(typeof payzeno.verifyWebhookSignature, 'function');
   });
-  it('HMAC verifies body and timestamp.body patterns', () => {
+  it('rejects speculative body and timestamp.body HMAC patterns', () => {
     const secret = 'test-secret';
     const raw = JSON.stringify({
       event: 'payment.succeeded',
@@ -50,11 +50,17 @@ describe('PayZeno official webhook events', () => {
       currency: 'USD',
     });
     const sig = crypto.createHmac('sha256', secret).update(raw).digest('hex');
-    assert.equal(payzeno.verifyWebhookSignature({ rawBody: raw, signature: sig, secret }).ok, true);
+    const bodyResult = payzeno.verifyWebhookSignature({ rawBody: raw, signature: sig, secret });
+    assert.equal(bodyResult.ok, false);
+    assert.equal(bodyResult.reason, 'SIGNATURE_CONTRACT_UNCONFIRMED');
+
     const ts = '1710000000';
     const sig2 = crypto.createHmac('sha256', secret).update(`${ts}.${raw}`).digest('hex');
-    assert.equal(payzeno.verifyWebhookSignature({ rawBody: raw, signature: sig2, timestamp: ts, secret }).ok, true);
-    assert.equal(payzeno.verifyWebhookSignature({ rawBody: raw, signature: '00', secret }).ok, false);
+    const timestampResult = payzeno.verifyWebhookSignature({
+      rawBody: raw, signature: sig2, timestamp: ts, secret,
+    });
+    assert.equal(timestampResult.ok, false);
+    assert.equal(timestampResult.reason, 'SIGNATURE_CONTRACT_UNCONFIRMED');
   });
   it('methods map to currencies', () => {
     assert.equal(payzeno.methodCurrency('mpesa'), 'MZN');

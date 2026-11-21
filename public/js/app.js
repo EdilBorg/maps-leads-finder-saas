@@ -3236,8 +3236,6 @@
 
     async function loadPlansQuotaViewBody() {
     const currentPanel = document.getElementById('plans-current-panel');
-    const usagePanel = document.getElementById('plans-usage-panel');
-    const list = document.getElementById('plans-list-panel');
     const pays = document.getElementById('plans-payments-panel');
 
     function esc(s) {
@@ -3247,7 +3245,7 @@
       if (!v) return '—';
       return String(v).slice(0, 10);
     }
-    function fmtUsd(cents, currency) {
+    function fmtMoney(cents, currency) {
       const cur = (currency || 'USD').toUpperCase();
       if (cents == null || !Number.isFinite(Number(cents))) return '—';
       const n = Number(cents) / 100;
@@ -3256,13 +3254,17 @@
     }
     function paymentStatusPt(st) {
       const s = String(st || '').toLowerCase();
-      if (s === 'paid' || s === 'approved' || s === 'completed' || s === 'succeeded' || s === 'success') return 'Confirmado';
-      if (s === 'pending' || s === 'processing' || s === 'awaiting') return 'Pendente';
-      if (s === 'rejected' || s === 'failed' || s === 'declined') return 'Recusado';
+      if (s === 'paid' || s === 'approved' || s === 'completed' || s === 'succeeded') return 'Confirmado';
+      if (s === 'pending' || s === 'processing') return 'Pendente';
+      if (s === 'failed' || s === 'declined' || s === 'rejected') return 'Recusado';
       if (s === 'cancelled' || s === 'canceled' || s === 'expired') return 'Cancelado / expirado';
       if (s === 'refunded') return 'Reembolsado';
       if (s === 'chargeback') return 'Chargeback';
       return st || '—';
+    }
+    function methodLabel(m) {
+      if (!m || m === 'gateway' || m === 'manual') return '—';
+      return String(m);
     }
 
     const [qRes, pRes, payRes, methRes] = await Promise.all([
@@ -3276,58 +3278,54 @@
     const current = data.currentPlan || null;
     const usage = data.usage || {};
     const sub = data.subscription || null;
+    const trial = data.trial || {};
+    const planStatus = (current && current.status) || data.planStatus || '';
+    const planName = (current && current.name) || (sub && sub.planName) || null;
+    const subscriptionStatus = String((sub && sub.status) || '').toLowerCase();
+    const active = subscriptionStatus === 'active';
+    const isTrial = !sub && String((current && current.type) || '').toLowerCase() === 'trial';
+    const delivered = typeof usage.deliveredResults === 'number' ? usage.deliveredResults : 0;
+    const planLimit = usage.planLimit != null && Number(usage.planLimit) > 0 ? Number(usage.planLimit) : null;
+    const startsAt = (current && current.startsAt) || (sub && sub.startsAt) || null;
+    const endsAt = (current && current.endsAt) || (sub && (sub.endsAt || sub.nextRenewalAt)) || null;
+
+    let statusLabel = planStatus || '—';
+    if (subscriptionStatus === 'active') statusLabel = 'Activa';
+    else if (subscriptionStatus === 'pending') statusLabel = 'Pendente';
+    else if (subscriptionStatus === 'expired') statusLabel = 'Expirada';
+    else if (subscriptionStatus === 'cancelled' || subscriptionStatus === 'canceled') statusLabel = 'Cancelada';
+    else if (isTrial && trial.used === true) statusLabel = 'Trial esgotado';
+    else if (isTrial && trial.inProgress === true) statusLabel = 'Trial em curso';
+    else if (isTrial && trial.available === true) statusLabel = 'Trial disponível';
+    else if (isTrial && planStatus === 'Concluído') statusLabel = 'Trial concluído';
 
     if (currentPanel) {
-      try {
-        const planName = (current && current.name) || (sub && sub.planName) || 'Trial';
-        const planStatus = (current && current.status) || data.planStatus || 'Disponível';
-        const startsAt = (current && current.startsAt) || (sub && sub.startsAt) || null;
-        const endsAt = (current && current.endsAt) || (sub && (sub.endsAt || sub.nextRenewalAt)) || null;
-        const active = !!(sub && (sub.status === 'active' || planStatus === 'Activo' || planStatus === 'Ativo'));
-        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">A sua subscrição</h2>';
-        html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">';
-        html += '<div><span class="form-label">Plano</span><div style="font-weight:600">' + esc(planName) + '</div></div>';
-        html += '<div><span class="form-label">Estado</span><div>' + esc(planStatus) + '</div></div>';
-        if (startsAt) html += '<div><span class="form-label">Início</span><div>' + esc(fmtDate(startsAt)) + '</div></div>';
-        if (endsAt) html += '<div><span class="form-label">Expira</span><div>' + esc(fmtDate(endsAt)) + '</div></div>';
+      let html = '<div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:flex-start">';
+      html += '<div>';
+      html += '<div style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#94a3b8)">Estado</div>';
+      html += '<div style="font-weight:600;margin-top:.15rem">' + esc(statusLabel) + '</div>';
+      html += '<div style="margin-top:.65rem;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#94a3b8)">Plano</div>';
+      html += '<div style="font-weight:600;margin-top:.15rem">' + esc(planName || (active ? 'Pro' : 'Trial')) + '</div>';
+      if (startsAt || endsAt) {
+        html += '<div class="muted" style="margin-top:.5rem;font-size:.9rem">';
+        if (startsAt) html += 'Início ' + esc(fmtDate(startsAt));
+        if (startsAt && endsAt) html += ' · ';
+        if (endsAt) html += 'Expira ' + esc(fmtDate(endsAt));
         html += '</div>';
-        html += '<div style="margin-top:1rem">';
-        html += '<button type="button" class="btn btn-primary" id="btn-open-subscribe-modal">' + (active ? 'Renovar' : 'Assinar / Renovar') + '</button>';
-        html += '</div>';
-        currentPanel.innerHTML = html;
-        const openBtn = document.getElementById('btn-open-subscribe-modal');
-        if (openBtn) openBtn.addEventListener('click', function () { openSubscribeModal(); });
-      } catch (_) {
-        currentPanel.innerHTML = '<p class="muted">Não foi possível carregar a subscrição.</p>';
       }
-    }
-
-    if (usagePanel) {
-      try {
-        const delivered = typeof usage.deliveredResults === 'number' ? usage.deliveredResults : 0;
-        const reserved = typeof usage.reservedLeads === 'number' ? usage.reservedLeads : 0;
-        const limit = usage.planLimit != null && Number(usage.planLimit) > 0 ? Number(usage.planLimit) : null;
-        const remaining = limit != null
-          ? (usage.availableLeads != null ? Number(usage.availableLeads) : Math.max(0, limit - delivered - reserved))
-          : null;
-        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Utilização de leads</h2>';
-        if (limit != null) {
-          const pct = limit > 0 ? Math.min(100, Math.round((delivered / limit) * 100)) : 0;
-          html += '<div style="font-size:1.15rem;font-weight:600;margin-bottom:.35rem">' + esc(delivered) + ' / ' + esc(limit) + '</div>';
-          html += '<div class="muted" style="margin-bottom:.25rem">Reservados: ' + esc(reserved) + ' · Disponíveis: ' + esc(remaining) + '</div>';
-          html += '<div style="height:8px;background:rgba(148,163,184,.25);border-radius:4px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:var(--color-accent,#3b82f6);border-radius:4px"></div></div>';
-        } else {
-          html += '<div style="font-size:1.15rem;font-weight:600">' + esc(delivered) + '</div>';
-          html += '<p class="muted" style="margin:.35rem 0 0">Leads finais no ciclo actual / trial.</p>';
-        }
-        usagePanel.innerHTML = html;
-      } catch (_) {
-        usagePanel.innerHTML = '<p class="muted">Utilização indisponível.</p>';
+      html += '</div>';
+      html += '<div style="text-align:right">';
+      html += '<div style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#94a3b8)">Leads no ciclo</div>';
+      if (planLimit != null) {
+        html += '<div style="font-size:1.35rem;font-weight:700;margin-top:.15rem">' + esc(delivered) + ' <span class="muted" style="font-size:1rem;font-weight:500">/ ' + esc(planLimit) + '</span></div>';
+      } else {
+        html += '<div style="font-size:1.35rem;font-weight:700;margin-top:.15rem">' + esc(delivered) + '</div>';
       }
-    }
-
-    if (list) {
-      list.innerHTML = '<p class="muted" style="margin:0">Utilize <strong>Assinar / Renovar</strong> para ver o plano Pro e concluir o pagamento seguro via PayZeno.</p>';
+      html += '<button type="button" class="btn btn-primary" id="btn-open-subscribe-modal" style="margin-top:.85rem">' + (active ? 'Renovar' : 'Assinar / Renovar') + '</button>';
+      html += '</div></div>';
+      currentPanel.innerHTML = html;
+      const openBtn = document.getElementById('btn-open-subscribe-modal');
+      if (openBtn) openBtn.addEventListener('click', function () { openSubscribeModal(); });
     }
 
     window.__billingPlansCache = ((pRes && pRes.data && pRes.data.plans) || []);
@@ -3335,20 +3333,18 @@
     window.__billingGatewayOk = !!(methRes && methRes.data && methRes.data.gatewayConfigured);
 
     if (pays) {
-      try {
-        const payments = ((payRes && payRes.data && payRes.data.payments) || []);
-        pays.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Histórico de pagamentos</h2>' +
-          (payments.length ? payments.map(function (p) {
-            const amount = fmtUsd(p.amountCents, p.currency || 'USD');
-            return '<div style="border-top:1px solid rgba(148,163,184,.25);padding:.5rem 0">' +
-              '<strong>' + esc(p.planName || 'Pro') + '</strong> · ' + esc(amount) + ' · ' + esc(paymentStatusPt(p.status)) +
-              (p.method ? ' · ' + esc(p.method) : '') +
-              (p.createdAt ? ' · ' + esc(String(p.createdAt).slice(0, 10)) : '') +
-              '</div>';
-          }).join('') : '<p class="muted">Ainda não existem pagamentos.</p>');
-      } catch (_) {
-        pays.innerHTML = '<p class="muted">Histórico indisponível.</p>';
-      }
+      const payments = ((payRes && payRes.data && payRes.data.payments) || []);
+      pays.innerHTML = '<h3 style="margin:0 0 .75rem;font-size:1rem;font-weight:600">Histórico</h3>' +
+        (payments.length ? payments.map(function (p) {
+          return '<div style="border-top:1px solid rgba(148,163,184,.2);padding:.55rem 0;display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">' +
+            '<div><strong>' + esc(p.planName || 'Pro') + '</strong>' +
+            '<div class="muted" style="font-size:.85rem">' + esc(fmtDate(p.createdAt)) +
+            (p.reference ? ' · ref. ' + esc(String(p.reference).slice(0, 8)) : '') +
+            (methodLabel(p.method) !== '—' ? ' · ' + esc(methodLabel(p.method)) : '') +
+            '</div></div>' +
+            '<div style="text-align:right"><div>' + esc(fmtMoney(p.amountCents, p.currency)) + '</div>' +
+            '<div class="muted" style="font-size:.85rem">' + esc(paymentStatusPt(p.status)) + '</div></div></div>';
+        }).join('') : '<p class="muted" style="margin:0">Sem pagamentos registados.</p>');
     }
 
     try { handleBillingReturn(); } catch (_) {}
@@ -3359,16 +3355,16 @@
     if (!modal) {
       modal = document.createElement('div');
       modal.id = 'subscribe-modal';
-      modal.className = 'modal';
+      modal.setAttribute('role', 'dialog');
+      modal.setAttribute('aria-modal', 'true');
       modal.hidden = true;
       modal.innerHTML =
-        '<div class="modal-backdrop" data-close-subscribe></div>' +
-        '<div class="modal-dialog card" role="dialog" aria-modal="true" aria-labelledby="subscribe-modal-title" style="max-width:480px;padding:1.25rem">' +
-        '<h2 id="subscribe-modal-title" style="margin:0 0 1rem;font-size:1.1rem">Assinar / Renovar — Plano Pro</h2>' +
+        '<div class="modal-backdrop" data-close-subscribe style="position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:80"></div>' +
+        '<div class="card" style="position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:81;width:min(440px,calc(100vw - 2rem));max-height:90vh;overflow:auto;padding:1.25rem">' +
+        '<h2 style="margin:0 0 .25rem;font-size:1.15rem">Plano Pro</h2>' +
+        '<p class="muted" style="margin:0 0 1rem">USD 19.99 · 30 dias · 2.500 leads · pesquisas ilimitadas · até 500 por pesquisa</p>' +
         '<div id="subscribe-modal-body"></div>' +
-        '<div style="margin-top:1rem;display:flex;gap:.5rem;justify-content:flex-end;flex-wrap:wrap">' +
-        '<button type="button" class="btn btn-ghost" data-close-subscribe>Fechar</button>' +
-        '</div></div>';
+        '<button type="button" class="btn btn-ghost btn-sm" data-close-subscribe style="margin-top:.75rem">Fechar</button></div>';
       document.body.appendChild(modal);
       modal.querySelectorAll('[data-close-subscribe]').forEach(function (el) {
         el.addEventListener('click', function () { modal.hidden = true; });
@@ -3379,43 +3375,33 @@
     const methods = window.__billingMethodsCache || [];
     const gatewayOk = !!window.__billingGatewayOk;
     const pro = plans.find(function (p) { return String(p.name).toLowerCase() === 'pro'; }) || plans[0];
-
-    function esc(s) {
-      return escapeHtmlPlans(s == null ? '' : String(s));
-    }
+    function esc(s) { return escapeHtmlPlans(s == null ? '' : String(s)); }
 
     if (!pro) {
-      body.innerHTML = '<p class="muted">Plano Pro indisponível. Confirme que a migration 018 foi aplicada.</p>';
+      body.innerHTML = '<p class="muted">Plano Pro indisponível.</p>';
       modal.hidden = false;
       return;
     }
     if (!gatewayOk) {
-      body.innerHTML = '<p class="muted">Checkout PayZeno ainda não está configurado no servidor.</p>';
+      body.innerHTML = '<p class="muted">Checkout PayZeno não configurado no servidor.</p>';
       modal.hidden = false;
       return;
     }
 
     const methodOpts = methods.map(function (m) {
-      return '<option value="' + esc(m.code) + '">' + esc(String(m.code).toUpperCase()) + ' · ' + esc(m.currency) + '</option>';
+      return '<option value="' + esc(m.code) + '">' + esc(String(m.code).toUpperCase()) + ' (' + esc(m.currency) + ')</option>';
     }).join('');
 
     body.innerHTML =
-      '<div style="margin-bottom:1rem">' +
-      '<div style="font-size:1.5rem;font-weight:700">$19.99 <span class="muted" style="font-size:.95rem;font-weight:500">USD / 30 dias</span></div>' +
-      '<ul class="muted" style="margin:.75rem 0 0;padding-left:1.1rem;font-size:.9rem;line-height:1.5">' +
-      '<li>2.500 leads entregues por ciclo</li>' +
-      '<li>Pesquisas ilimitadas em quantidade</li>' +
-      '<li>Até 500 resultados por pesquisa</li>' +
-      '</ul></div>' +
       '<label class="form-label">Método de pagamento</label>' +
       '<select class="select" id="subscribe-method">' + methodOpts + '</select>' +
-      '<p id="subscribe-quote" class="muted" style="margin:.5rem 0 0;font-size:.9rem">Seleccione o método para ver o valor final.</p>' +
+      '<p id="subscribe-quote" class="muted" style="margin:.4rem 0 0;font-size:.9rem"></p>' +
       '<label class="form-label" style="margin-top:.75rem">Nome</label>' +
       '<input class="input" type="text" id="subscribe-name" autocomplete="name">' +
       '<label class="form-label" style="margin-top:.5rem">Telefone (E.164)</label>' +
       '<input class="input" type="tel" id="subscribe-phone" placeholder="+25884…" autocomplete="tel">' +
-      '<p id="subscribe-msg" class="muted" style="margin:.75rem 0 0"></p>' +
-      '<button type="button" class="btn btn-primary" id="subscribe-pay-btn" style="margin-top:1rem;width:100%">Continuar para pagamento</button>';
+      '<p id="subscribe-msg" class="muted" style="margin:.6rem 0 0"></p>' +
+      '<button type="button" class="btn btn-primary" id="subscribe-pay-btn" style="margin-top:.85rem;width:100%">Continuar para pagamento</button>';
 
     const methodEl = document.getElementById('subscribe-method');
     async function refreshQuote() {
@@ -3429,11 +3415,11 @@
           body: { planId: pro.id, method: methodEl.value },
         });
         if (res.ok && res.data) {
-          qEl.textContent = 'Total a pagar: ' + res.data.amountMajor + ' ' + res.data.currency + ' (referência comercial $19.99 USD).';
+          qEl.textContent = 'Total: ' + res.data.amountMajor + ' ' + res.data.currency + ' (ref. $19.99 USD)';
         } else {
           qEl.textContent = (res.data && res.data.error) || 'Cotação indisponível.';
         }
-      } catch (e) {
+      } catch (_) {
         qEl.textContent = 'Não foi possível obter a cotação.';
       }
     }
@@ -3441,6 +3427,9 @@
       methodEl.addEventListener('change', refreshQuote);
       refreshQuote();
     }
+
+    let checkoutClientToken = null;
+    let checkoutFingerprint = null;
 
     document.getElementById('subscribe-pay-btn').addEventListener('click', async function () {
       const msg = document.getElementById('subscribe-msg');
@@ -3452,7 +3441,15 @@
       }
       try {
         const token = await ensureCsrf();
-        if (msg) msg.textContent = 'A criar sessão de pagamento…';
+        if (msg) msg.textContent = 'A criar sessão…';
+        // Reuse the token for retries of identical checkout data.
+        const fingerprint = JSON.stringify([pro.id, methodEl.value, name, phone]);
+        if (!checkoutClientToken || checkoutFingerprint !== fingerprint) {
+          checkoutFingerprint = fingerprint;
+          checkoutClientToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
+            ? crypto.randomUUID()
+            : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
+        }
         const res = await api('/api/billing/checkout/session', {
           method: 'POST',
           headers: { 'X-CSRF-Token': token },
@@ -3460,7 +3457,7 @@
             planId: pro.id,
             method: methodEl.value,
             customer: { name: name, phone: phone },
-            idempotencyKey: 'payzeno:' + pro.id + ':' + methodEl.value,
+            idempotencyKey: checkoutClientToken,
           },
         });
         if (res.ok && res.data && res.data.checkoutUrl) {
@@ -3484,27 +3481,17 @@
     let paymentId = params.get('payment_id') || params.get('reference');
     try { if (!paymentId) paymentId = sessionStorage.getItem('billingPaymentId'); } catch (_) {}
 
-    let banner = document.getElementById('billing-return-banner');
-    if (!banner) {
-      banner = document.createElement('div');
-      banner.id = 'billing-return-banner';
-      banner.className = 'card';
-      banner.style.cssText = 'padding:1rem;margin-bottom:1rem';
-      const host = document.getElementById('plans-current-panel');
-      if (host && host.parentElement) host.parentElement.insertBefore(banner, host);
-    }
+    const banner = document.getElementById('billing-return-banner');
+    if (!banner) return;
+    banner.hidden = false;
 
     if (billing === 'cancel') {
       banner.innerHTML = '<strong>Checkout cancelado.</strong> Nenhuma cobrança foi confirmada.';
       return;
     }
 
-    banner.innerHTML = '<strong>A processar pagamento…</strong> A aguardar confirmação segura do PayZeno.';
-
-    if (!paymentId) {
-      banner.innerHTML = '<strong>Pagamento em processamento.</strong> A activação ocorre apenas após confirmação do PayZeno.';
-      return;
-    }
+    banner.innerHTML = '<strong>A processar pagamento…</strong> A activação só ocorre após confirmação do PayZeno.';
+    if (!paymentId) return;
 
     let attempts = 0;
     const poll = async function () {
@@ -3514,7 +3501,7 @@
         if (res.ok && res.data && res.data.payment) {
           const st = String(res.data.payment.status || '').toLowerCase();
           if (st === 'completed' || st === 'approved') {
-            banner.innerHTML = '<strong>Pagamento confirmado.</strong> A sua subscrição Pro está activa.';
+            banner.innerHTML = '<strong>Pagamento confirmado.</strong> Subscrição Pro activa.';
             try { sessionStorage.removeItem('billingPaymentId'); } catch (_) {}
             loadPlansQuotaView();
             return;
@@ -3526,10 +3513,11 @@
         }
       } catch (_) {}
       if (attempts < 15) setTimeout(poll, 2000);
-      else banner.innerHTML = '<strong>Confirmação ainda pendente.</strong> O acesso será activado quando o PayZeno confirmar.';
+      else banner.innerHTML = '<strong>Confirmação pendente.</strong> O acesso activa-se quando o PayZeno confirmar.';
     };
     poll();
   }
+
 
 
   function initUi() {
