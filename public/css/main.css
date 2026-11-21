@@ -1,1 +1,10 @@
-/* placeholder - will fix */
+/**
+ * Maps Leads Finder SaaS — Core layout & components
+ * Visual system: DESIGN.md (Linear midnight precision)
+ * Acid Lime (#e4f222) only for primary CTA and allowed active indicators.
+ */
+
+@import url('/css/tokens.css');
+@import url('/css/billing.css');
+
+/* CRITICAL RESTORE - full main.css will follow in next commit if truncated */
