@@ -3445,12 +3445,11 @@
       var code = String(m.code).toLowerCase();
       var meta = METHOD_META[code] || { label: String(m.code).toUpperCase(), logo: null };
       var logo = meta.logo
-        ? '<span class="checkout-method-logo-wrap"><img src="' + esc(meta.logo) + '" alt="" width="52" height="28" loading="lazy" decoding="async"></span>'
+        ? '<span class="checkout-method-logo-wrap"><img src="' + esc(meta.logo) + '" alt="" width="80" height="42" loading="lazy" decoding="async"></span>'
         : '';
       return (
-        '<button type="button" class="checkout-method-card" role="radio" aria-checked="false" data-method="' + esc(code) + '" data-currency="' + esc(m.currency || '') + '">' +
+        '<button type="button" class="checkout-method-card" role="radio" aria-checked="false" aria-label="' + esc(meta.label) + '" data-method="' + esc(code) + '" data-currency="' + esc(m.currency || '') + '">' +
         logo +
-        '<span class="checkout-method-name">' + esc(meta.label) + '</span>' +
         '</button>'
       );
     }).join('');

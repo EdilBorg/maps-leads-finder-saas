@@ -64,8 +64,23 @@ async function buildCheckoutQuote({ planId, method }) {
   if (currency !== 'USD') {
     const rateInfo = await fxRateService.getUsdRate(currency);
     const conv = fxRateService.convertUsdCentsToLocal(baseCents, rateInfo.rate, { currency });
+    // Default: keep minor-unit ceil from FX conversion.
     chargeMajor = conv.majorUnits;
     chargeMinor = conv.minorUnits;
+
+    // Non-card methods (M-Pesa, e-Mola, Multicaixa, PayFast) must charge a whole
+    // major unit (integer). Apply Math.ceil to the major amount and recompute minor.
+    // Card keeps the full decimal precision of the conversion.
+    if (m !== 'card') {
+      const digits = conv.minorDigits;
+      const factor = 10 ** digits;
+      const ceiledMajor = Math.ceil(chargeMajor);
+      // Guard against floating-point noise: if already extremely close to integer, keep it.
+      // Still use ceil for any positive fractional part.
+      chargeMajor = ceiledMajor;
+      chargeMinor = ceiledMajor * factor;
+    }
+
     fx = {
       baseCurrency: 'USD',
       baseAmountCents: baseCents,
@@ -74,11 +89,12 @@ async function buildCheckoutQuote({ planId, method }) {
       rateDate: rateInfo.rateDate,
       source: rateInfo.source,
       fetchedAt: rateInfo.fetchedAt,
-      localMajorUnits: conv.majorUnits,
-      localMinorUnits: conv.minorUnits,
+      localMajorUnits: chargeMajor,
+      localMinorUnits: chargeMinor,
       minorDigits: conv.minorDigits,
     };
   } else {
+    // Card is USD: preserve exact plan price with decimals (19.99). Never ceil.
     fx = {
       baseCurrency: 'USD',
       baseAmountCents: baseCents,

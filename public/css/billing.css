@@ -275,25 +275,23 @@
   box-shadow: 0 0 0 1px rgba(228, 242, 34, 0.25);
 }
 .checkout-method-logo-wrap {
-  width: 64px;
-  height: 34px;
+  width: 80px;
+  height: 42px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .checkout-method-logo-wrap img {
-  max-width: 64px;
-  max-height: 34px;
+  max-width: 80px;
+  max-height: 42px;
   width: auto;
   height: auto;
   object-fit: contain;
   display: block;
 }
+/* Names removed from visual presentation; aria-label provides accessible name */
 .checkout-method-name {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--color-mist);
-  line-height: 1.2;
+  display: none;
 }
 .checkout-method-card.is-selected .checkout-method-name {
   color: var(--color-paper);

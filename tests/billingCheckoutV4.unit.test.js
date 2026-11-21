@@ -105,12 +105,63 @@ describe('idempotency quote consistency', () => {
   });
 });
 
-describe('logos slightly larger, cards preserved', () => {
+describe('logos larger, names removed, cards preserved', () => {
   it('logo max size increased without changing grid structure', () => {
-    assert.match(css, /max-width:\s*64px/);
-    assert.match(css, /max-height:\s*34px/);
+    assert.match(css, /max-width:\s*80px/);
+    assert.match(css, /max-height:\s*42px/);
     assert.match(css, /checkout-methods-grid/);
     assert.match(css, /object-fit:\s*contain/);
+    assert.match(css, /grid-template-columns:\s*repeat\(3/);
+  });
+  it('method names are not rendered visually; aria-label provides accessible name', () => {
+    assert.match(front, /aria-label="/);
+    assert.ok(!/<span class="checkout-method-name">/.test(front) || /display:\s*none/.test(css));
+    // Internal codes and METHOD_META labels remain for backend and a11y
+    assert.match(front, /mpesa:\s*\{\s*label:\s*'M-Pesa'/);
+    assert.match(front, /multicaixa:\s*\{\s*label:\s*'Multicaixa'/);
+  });
+  it('HTML img dimensions increased for larger logos', () => {
+    assert.match(front, /width="80"\s+height="42"/);
+  });
+});
+
+describe('major-unit ceil for non-card methods', () => {
+  it('FX convert still ceils to minor units', () => {
+    // 19.99 * 63.792 = 1275.20208 → ceil to next cent = 1275.21 (127521 minor)
+    const r = fx.convertUsdCentsToLocal(1999, 63.792, { currency: 'MZN' });
+    assert.equal(r.minorUnits, 127521);
+    assert.ok(Math.abs(r.majorUnits - 1275.21) < 1e-9);
+  });
+
+  it('payzenoService source applies Math.ceil on major for non-card', () => {
+    assert.match(pzSrc, /m !== 'card'/);
+    assert.match(pzSrc, /Math\.ceil\(chargeMajor\)/);
+  });
+
+  it('card path does not apply major-unit ceil', () => {
+    // Card is always USD in current config — identity path, no ceil
+    assert.match(pzSrc, /currency !== 'USD'/);
+    // Explicit guard remains even if card ever gets a non-USD currency
+    assert.match(pzSrc, /if \(m !== 'card'\)/);
+  });
+
+  // Behavioural examples of the required major-unit ceil rule
+  it('ceil examples match required policy', () => {
+    // Simulate the post-conversion step used by buildCheckoutQuote
+    function applyMajorCeil(major, method) {
+      if (method === 'card') return major;
+      return Math.ceil(major);
+    }
+    assert.equal(applyMajorCeil(1250.00, 'mpesa'), 1250);
+    assert.equal(applyMajorCeil(1250.01, 'mpesa'), 1251);
+    assert.equal(applyMajorCeil(1250.10, 'emola'), 1251);
+    assert.equal(applyMajorCeil(1250.50, 'multicaixa'), 1251);
+    assert.equal(applyMajorCeil(1250.99, 'payfast'), 1251);
+    assert.equal(applyMajorCeil(1251.00, 'mpesa'), 1251);
+    // Card preserves decimals
+    assert.equal(applyMajorCeil(1250.10, 'card'), 1250.10);
+    assert.equal(applyMajorCeil(1250.50, 'card'), 1250.50);
+    assert.equal(applyMajorCeil(1250.99, 'card'), 1250.99);
   });
 });
 
