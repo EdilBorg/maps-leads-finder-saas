@@ -581,7 +581,7 @@
         // Clear selection of processed results
         clearResultsSelection();
         if (typeof loadDashboard === 'function') {
-          try { loadDashboard(); } catch (_) {}
+          try { loadDashboard({ force: true }); } catch (_) {}
         }
       } else if (res.status === 400) {
         showToast((data && data.error) || 'Pedido inválido. Seleciona pelo menos um resultado.', 'error');
@@ -1243,7 +1243,7 @@
         if (list) list.hidden = false;
       }
       loadLeads({ scrollToTop: false });
-      if (typeof loadDashboard === 'function') try { loadDashboard(); } catch (_) {}
+      if (typeof loadDashboard === 'function') try { loadDashboard({ force: true }); } catch (_) {}
     } catch (_) {
       showToast('Erro de rede ao eliminar o lead.', 'error');
     }
@@ -1313,7 +1313,7 @@
       }
       if (!stoppedEarly) {
         showToast(totalDeleted + ' lead' + (totalDeleted === 1 ? '' : 's') + ' eliminado' + (totalDeleted === 1 ? '' : 's') + '.', 'success');
-        if (typeof loadDashboard === 'function') try { loadDashboard(); } catch (_) {}
+        if (typeof loadDashboard === 'function') try { loadDashboard({ force: true }); } catch (_) {}
       }
       loadLeads({ scrollToTop: false });
     } catch (_) {
@@ -1346,7 +1346,7 @@
       selectedLeadIds.clear();
       showToast(n + ' lead' + (n === 1 ? '' : 's') + ' eliminado' + (n === 1 ? '' : 's') + '.', 'success');
       loadLeads({ scrollToTop: true });
-      if (typeof loadDashboard === 'function') try { loadDashboard(); } catch (_) {}
+      if (typeof loadDashboard === 'function') try { loadDashboard({ force: true }); } catch (_) {}
     } catch (_) {
       showToast('Erro de rede ao eliminar leads.', 'error');
     }
@@ -2754,75 +2754,111 @@
     }
   }
 
-  async function loadDashboard() {
-    const box = $('#dashboard-recent');
-    if (!box) return;
-    try {
-      const res = await api('/api/searches/dashboard');
-      if (!res.ok) {
-        ['stat-searches', 'stat-results', 'stat-leads'].forEach((id) => {
-          const el = $('#' + id); if (el) el.textContent = '—';
-        });
-        box.innerHTML = '';
-        const empty = document.createElement('p');
-        empty.className = 'empty-hint';
-        empty.id = 'dashboard-recent-empty';
-        empty.textContent = res.status === 401
-          ? 'Inicia sessão para ver a atividade da conta.'
-          : res.status === 403
-            ? 'Verifica o email para aceder aos dados da conta.'
-            : 'Não foi possível carregar o dashboard.';
-        box.appendChild(empty);
-        return;
-      }
-      const data = res.data || {};
-      if ($('#stat-searches')) $('#stat-searches').textContent = String(data.searchesCount != null ? data.searchesCount : '—');
-      if ($('#stat-results')) $('#stat-results').textContent = String(data.resultsCount != null ? data.resultsCount : '—');
-      if ($('#stat-leads')) $('#stat-leads').textContent = String(data.savedLeadsCount != null ? data.savedLeadsCount : '—');
-      box.innerHTML = '';
-      const recent = data.recentSearches || [];
-      if (!recent.length) {
-        const p = document.createElement('p');
-        p.className = 'empty-hint';
-        p.textContent = 'Ainda não existem pesquisas.';
-        box.appendChild(p);
-        return;
-      }
-      const wrap = document.createElement('div');
-      wrap.className = 'table-wrap table-wrap-dashboard';
-      const table = document.createElement('table');
-      table.className = 'data table-dashboard';
-      const thead = document.createElement('thead');
-      thead.innerHTML = '<tr><th>Categoria</th><th>Localização</th><th>Resultados</th><th>Estado</th><th>Data</th></tr>';
-      table.appendChild(thead);
-      const tbody = document.createElement('tbody');
-      recent.forEach((item) => {
-        const tr = document.createElement('tr');
-        tr.style.cursor = 'pointer';
-        tr.addEventListener('click', () => openSearch(item.id));
-        [item.query, item.location, item.resultsCount != null ? item.resultsCount : '—', item.status, formatDate(item.createdAt)].forEach((val, idx) => {
-          const td = document.createElement('td');
-          if (idx === 3) {
-            const pill = document.createElement('span');
-            pill.className = 'status-pill ' + esc(item.status);
-            pill.textContent = esc(item.status);
-            td.appendChild(pill);
-          } else {
-            td.textContent = val == null ? '—' : String(val);
-          }
-          tr.appendChild(td);
-        });
-        tbody.appendChild(tr);
-      });
-      table.appendChild(tbody);
-      wrap.appendChild(table);
-      box.appendChild(wrap);
-    } catch (_) {
-      box.textContent = 'Não foi possível carregar o dashboard.';
-    }
+  let dashboardCache = null;
+  let dashboardInFlight = null;
+  const DASHBOARD_TTL_MS = 10000;
+
+  function invalidateDashboardCache() {
+    dashboardCache = null;
   }
 
+  function applyDashboardPayload(data, box) {
+    if ($('#stat-searches')) $('#stat-searches').textContent = String(data.searchesCount != null ? data.searchesCount : '—');
+    if ($('#stat-results')) $('#stat-results').textContent = String(data.resultsCount != null ? data.resultsCount : '—');
+    if ($('#stat-leads')) $('#stat-leads').textContent = String(data.savedLeadsCount != null ? data.savedLeadsCount : '—');
+    box.innerHTML = '';
+    const recent = data.recentSearches || [];
+    if (!recent.length) {
+      const p = document.createElement('p');
+      p.className = 'empty-hint';
+      p.textContent = 'Ainda não existem pesquisas.';
+      box.appendChild(p);
+      return;
+    }
+    const wrap = document.createElement('div');
+    wrap.className = 'table-wrap table-wrap-dashboard';
+    const table = document.createElement('table');
+    table.className = 'data table-dashboard';
+    const thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>Categoria</th><th>Localização</th><th>Resultados</th><th>Estado</th><th>Data</th></tr>';
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    recent.forEach((item) => {
+      const tr = document.createElement('tr');
+      tr.style.cursor = 'pointer';
+      tr.addEventListener('click', () => openSearch(item.id));
+      [item.query, item.location, item.resultsCount != null ? item.resultsCount : '—', item.status, formatDate(item.createdAt)].forEach((val, idx) => {
+        const td = document.createElement('td');
+        if (idx === 3) {
+          const pill = document.createElement('span');
+          pill.className = 'status-pill ' + String(item.status || '');
+          pill.textContent = item.status != null ? String(item.status) : '—';
+          td.appendChild(pill);
+        } else {
+          td.textContent = val == null ? '—' : String(val);
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    box.appendChild(wrap);
+  }
+
+  async function loadDashboard(opts) {
+    const force = !!(opts && opts.force);
+    const box = $('#dashboard-recent');
+    if (!box) return;
+
+    if (!force && dashboardCache && (Date.now() - dashboardCache.at) < DASHBOARD_TTL_MS) {
+      applyDashboardPayload(dashboardCache.data, box);
+      return;
+    }
+    if (dashboardInFlight) return dashboardInFlight;
+
+    dashboardInFlight = (async () => {
+      try {
+        const res = await api('/api/searches/dashboard');
+        if (!res.ok) {
+          invalidateDashboardCache();
+          ['stat-searches', 'stat-results', 'stat-leads'].forEach((id) => {
+            const el = $('#' + id); if (el) el.textContent = '—';
+          });
+          box.innerHTML = '';
+          const empty = document.createElement('p');
+          empty.className = 'empty-hint';
+          empty.id = 'dashboard-recent-empty';
+          empty.textContent = res.status === 401
+            ? 'Inicia sessão para ver a atividade da conta.'
+            : res.status === 403
+              ? 'Verifica o email para aceder aos dados da conta.'
+              : 'Não foi possível carregar o dashboard.';
+          box.appendChild(empty);
+          return;
+        }
+        const data = res.data || {};
+        dashboardCache = { at: Date.now(), data: data };
+        applyDashboardPayload(data, box);
+      } catch (_) {
+        invalidateDashboardCache();
+        box.textContent = 'Não foi possível carregar o dashboard.';
+      } finally {
+        dashboardInFlight = null;
+      }
+    })();
+    return dashboardInFlight;
+  }
+
+  let settingsInFlight = null;
+
   async function loadSettings() {
+    if (settingsInFlight) return settingsInFlight;
+    settingsInFlight = loadSettingsBody().finally(function () { settingsInFlight = null; });
+    return settingsInFlight;
+  }
+
+  async function loadSettingsBody() {
     const nameEl = $('#settings-name');
     const emailEl = $('#settings-email');
     const verifiedEl = $('#settings-verified');
@@ -3100,7 +3136,15 @@
     if (row.max == null) return 'Sem limite por cliente' + (row.used ? ' (uso: ' + row.used + ')' : '');
     return (row.used || 0) + ' / ' + row.max + ' (restam ' + (row.remaining != null ? row.remaining : '—') + ')';
   }
+  let plansInFlight = null;
+
   async function loadPlansQuotaView() {
+    if (plansInFlight) return plansInFlight;
+    plansInFlight = loadPlansQuotaViewBody().finally(function () { plansInFlight = null; });
+    return plansInFlight;
+  }
+
+  async function loadPlansQuotaViewBody() {
     const currentPanel = document.getElementById('plans-current-panel');
     const usagePanel = document.getElementById('plans-usage-panel');
     const list = document.getElementById('plans-list-panel');
@@ -3130,9 +3174,11 @@
     }
 
     try {
-      const qRes = await api('/api/billing/quota');
-      const pRes = await api('/api/billing/plans');
-      const payRes = await api('/api/billing/payments');
+      const [qRes, pRes, payRes] = await Promise.all([
+        api('/api/billing/quota'),
+        api('/api/billing/plans'),
+        api('/api/billing/payments'),
+      ]);
       const data = (qRes && qRes.data) || {};
       const current = data.currentPlan || null;
       const usage = data.usage || {};
@@ -3258,7 +3304,7 @@
   }
 
 
-  function init() {
+  function initUi() {
     initNav();
     initMobileNav();
     initLogout();
@@ -3268,13 +3314,22 @@
     initConfirmModal();
     reparentLeadForms();
     initBulkActions();
+  }
+
+  let appBootstrapped = false;
+  async function bootstrap() {
+    if (appBootstrapped) return;
+    appBootstrapped = true;
+    initUi();
+    try {
+      await refreshAuthUi();
+    } catch (_) {}
     showView('dashboard');
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => { init(); refreshAuthUi(); });
+    document.addEventListener('DOMContentLoaded', function () { bootstrap(); });
   } else {
-    init();
-    refreshAuthUi();
+    bootstrap();
   }
 })();
