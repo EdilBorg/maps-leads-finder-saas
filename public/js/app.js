@@ -3472,8 +3472,11 @@
       '<div class="checkout-fields" id="checkout-fields" hidden>' +
       '<label class="form-label" for="subscribe-name">Nome</label>' +
       '<input class="input" type="text" id="subscribe-name" autocomplete="name">' +
-      '<label class="form-label" for="subscribe-phone" id="subscribe-phone-label">Telefone (E.164)</label>' +
-      '<input class="input" type="tel" id="subscribe-phone" placeholder="+25884…" autocomplete="tel">' +
+      '<label class="form-label" for="subscribe-phone" id="subscribe-phone-label">Telefone</label>' +
+      '<div id="subscribe-phone-row" style="display:flex;gap:.4rem;align-items:center">' +
+      '<span id="subscribe-phone-prefix" class="checkout-phone-prefix" style="display:none;flex-shrink:0;padding:.45rem .55rem;border:1px solid var(--color-graphite);border-radius:var(--radius-inputs);background:var(--surface-panel);color:var(--color-fog);font-size:.88rem;font-weight:600"></span>' +
+      '<input class="input" type="tel" id="subscribe-phone" placeholder="" autocomplete="tel" inputmode="tel" style="flex:1">' +
+      '</div>' +
       '</div>' +
       '<p class="checkout-msg" id="subscribe-msg" role="status"></p>' +
       '<button type="button" class="btn btn-primary" id="subscribe-pay-btn" disabled>Continuar para pagamento</button>';
@@ -3507,9 +3510,93 @@
       }
     }
 
-    // Stable idempotency token per logical attempt (plan + method)
-    function getOrCreateAttemptToken(planId, method) {
-      var storageKey = 'billingAttempt:' + String(planId) + ':' + String(method);
+    // Phone prefix by payment method region (mobile money tied to currency/country)
+    var METHOD_PHONE = {
+      mpesa: { prefix: '+258', nationalMin: 8, nationalMax: 9, label: 'Moçambique' },
+      emola: { prefix: '+258', nationalMin: 8, nationalMax: 9, label: 'Moçambique' },
+      multicaixa: { prefix: '+244', nationalMin: 9, nationalMax: 9, label: 'Angola' },
+      payfast: { prefix: '+27', nationalMin: 9, nationalMax: 9, label: 'África do Sul' },
+      card: { prefix: null, nationalMin: 8, nationalMax: 15, label: null }
+    };
+
+    function digitsOnly(s) {
+      return String(s || '').replace(/\D+/g, '');
+    }
+
+    function applyPhoneUiForMethod(method) {
+      var cfg = METHOD_PHONE[method] || METHOD_PHONE.card;
+      var prefixEl = document.getElementById('subscribe-phone-prefix');
+      var input = document.getElementById('subscribe-phone');
+      if (!prefixEl || !input) return;
+      if (cfg.prefix) {
+        prefixEl.style.display = 'inline-block';
+        prefixEl.textContent = cfg.prefix;
+        input.placeholder = '84 XXX XXXX';
+        input.setAttribute('aria-label', 'Número nacional ' + (cfg.label || ''));
+        // Strip accidental prefix from existing value
+        var d = digitsOnly(input.value);
+        var pDigits = digitsOnly(cfg.prefix);
+        if (d.indexOf(pDigits) === 0) d = d.slice(pDigits.length);
+        input.value = d;
+      } else {
+        prefixEl.style.display = 'none';
+        prefixEl.textContent = '';
+        input.placeholder = '+258 84 XXX XXXX';
+        input.setAttribute('aria-label', 'Telefone internacional E.164');
+      }
+    }
+
+    /**
+     * Build E.164 phone for PayZeno customer.phone.
+     * Mobile money: prefix + national digits.
+     * Card: user-provided full international number.
+     */
+    function normalizePhoneForMethod(method, rawInput) {
+      var cfg = METHOD_PHONE[method] || METHOD_PHONE.card;
+      var cleaned = String(rawInput || '').trim();
+      if (!cleaned) return { ok: false, error: 'Telefone obrigatório.' };
+      if (/[a-zA-Z]/.test(cleaned)) return { ok: false, error: 'O telefone não pode conter letras.' };
+
+      if (cfg.prefix) {
+        var national = digitsOnly(cleaned);
+        var pDigits = digitsOnly(cfg.prefix);
+        // User may have pasted full international number
+        if (national.indexOf(pDigits) === 0) national = national.slice(pDigits.length);
+        if (national.length < cfg.nationalMin || national.length > cfg.nationalMax) {
+          return {
+            ok: false,
+            error: 'Número inválido para ' + (cfg.label || method) +
+              ' (esperado ' + cfg.nationalMin + (cfg.nationalMin !== cfg.nationalMax ? '–' + cfg.nationalMax : '') + ' dígitos).'
+          };
+        }
+        return { ok: true, e164: cfg.prefix + national };
+      }
+
+      // Card: full E.164 entered by user
+      var full = digitsOnly(cleaned);
+      // Keep leading + semantics: if user typed +, we already stripped non-digits
+      if (cleaned.indexOf('+') === 0) {
+        if (full.length < 8 || full.length > 15) {
+          return { ok: false, error: 'Número internacional inválido (8–15 dígitos).' };
+        }
+        return { ok: true, e164: '+' + full };
+      }
+      // No +: accept if looks like full international with country code
+      if (full.length < 8 || full.length > 15) {
+        return { ok: false, error: 'Introduza o número completo com indicativo (ex.: +258…).' };
+      }
+      return { ok: true, e164: '+' + full };
+    }
+
+    // Stable idempotency token per logical attempt (plan + method + amount/currency fingerprint).
+    // When the displayed quote changes, a new attempt key is issued so the backend never
+    // silently replays a session with a different amount.
+    function attemptStorageKey(planId, method, amountMinor, currency) {
+      return 'billingAttempt:' + String(planId) + ':' + String(method) + ':' +
+        String(amountMinor || '') + ':' + String(currency || '');
+    }
+    function getOrCreateAttemptToken(planId, method, amountMinor, currency) {
+      var storageKey = attemptStorageKey(planId, method, amountMinor, currency);
       try {
         var existing = sessionStorage.getItem(storageKey);
         if (existing && existing.length >= 8) return existing;
@@ -3521,8 +3608,8 @@
       return token;
     }
 
-    function clearAttemptToken(planId, method) {
-      try { sessionStorage.removeItem('billingAttempt:' + String(planId) + ':' + String(method)); } catch (_) {}
+    function clearAttemptToken(planId, method, amountMinor, currency) {
+      try { sessionStorage.removeItem(attemptStorageKey(planId, method, amountMinor, currency)); } catch (_) {}
     }
 
     async function refreshQuote(method) {
@@ -3575,15 +3662,7 @@
         selectedMethod = card.getAttribute('data-method');
         selectedCurrency = card.getAttribute('data-currency');
         fieldsEl.hidden = false;
-        // Phone more relevant for mobile money; still collect name always
-        if (PHONE_METHODS[selectedMethod]) {
-          phoneLabel.hidden = false;
-          phoneInput.hidden = false;
-        } else {
-          // Card / PayFast: name still required by backend; phone optional-ish but backend requires it today
-          phoneLabel.hidden = false;
-          phoneInput.hidden = false;
-        }
+        applyPhoneUiForMethod(selectedMethod);
         payBtn.disabled = true;
         amountEl.textContent = '…';
         summaryEl.hidden = false;
@@ -3598,23 +3677,26 @@
         return;
       }
       var name = (document.getElementById('subscribe-name').value || '').trim();
-      var phone = (document.getElementById('subscribe-phone').value || '').trim();
+      var phoneRaw = (document.getElementById('subscribe-phone').value || '').trim();
       if (!name) { setMsg('Nome obrigatório.', true); return; }
-      if (!phone) { setMsg('Telefone obrigatório (formato E.164).', true); return; }
+      var phoneNorm = normalizePhoneForMethod(selectedMethod, phoneRaw);
+      if (!phoneNorm.ok) { setMsg(phoneNorm.error, true); return; }
 
       payBtn.disabled = true;
       var prevLabel = payBtn.textContent;
       payBtn.textContent = 'A criar sessão…';
       try {
         var token = await ensureCsrf();
-        var clientToken = getOrCreateAttemptToken(pro.id, selectedMethod);
+        var amountMinor = lastQuote && lastQuote.amountMinor != null ? lastQuote.amountMinor : '';
+        var currency = lastQuote && lastQuote.currency ? lastQuote.currency : '';
+        var clientToken = getOrCreateAttemptToken(pro.id, selectedMethod, amountMinor, currency);
         var res = await api('/api/billing/checkout/session', {
           method: 'POST',
           headers: { 'X-CSRF-Token': token },
           body: {
             planId: pro.id,
             method: selectedMethod,
-            customer: { name: name, phone: phone },
+            customer: { name: name, phone: phoneNorm.e164 },
             idempotencyKey: clientToken,
           },
         });
@@ -3622,10 +3704,6 @@
           try {
             sessionStorage.setItem('billingPaymentId', res.data.payment && res.data.payment.id);
           } catch (_) {}
-          // Successful hand-off: clear attempt token so a later intentional retry is new
-          if (!res.data.replayed) {
-            // keep token for uncertain retries; only clear after browser navigates away
-          }
           window.location.href = res.data.checkoutUrl;
           return;
         }
@@ -3633,10 +3711,9 @@
         if (errCode === 'PAYZENO_NOT_CONFIGURED') {
           setMsg('Pagamentos automáticos não estão configurados no servidor. Contacte o suporte.', true);
         } else if (errCode === 'ALREADY_PAID') {
-          clearAttemptToken(pro.id, selectedMethod);
+          clearAttemptToken(pro.id, selectedMethod, amountMinor, currency);
           setMsg((res.data && res.data.error) || 'Pagamento já concluído para esta tentativa.', true);
         } else if (errCode === 'PAYZENO_UNCERTAIN') {
-          // Keep same token so retry recovers the same attempt
           setMsg((res.data && res.data.error) || 'Não foi possível confirmar a sessão. Tente novamente.', true);
         } else {
           setMsg((res.data && res.data.error) || 'Não foi possível iniciar o checkout.', true);

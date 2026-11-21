@@ -275,15 +275,15 @@
   box-shadow: 0 0 0 1px rgba(228, 242, 34, 0.25);
 }
 .checkout-method-logo-wrap {
-  width: 52px;
-  height: 28px;
+  width: 64px;
+  height: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .checkout-method-logo-wrap img {
-  max-width: 52px;
-  max-height: 28px;
+  max-width: 64px;
+  max-height: 34px;
   width: auto;
   height: auto;
   object-fit: contain;
@@ -350,4 +350,24 @@
 #subscribe-modal .checkout-close {
   margin-top: 0.55rem;
   width: 100%;
+}
+
+@media (max-height: 720px) {
+  #subscribe-modal .billing-modal-shell {
+    padding: 0.85rem 1rem 0.75rem;
+  }
+  .checkout-pro-header { margin-bottom: 0.55rem; }
+  .checkout-pro-header .checkout-price { font-size: 1.55rem; }
+  .checkout-methods-grid { gap: 0.35rem; margin-bottom: 0.55rem; }
+  .checkout-method-card { padding: 0.4rem 0.3rem 0.35rem; }
+  .checkout-summary { margin-bottom: 0.5rem; padding: 0.45rem 0.55rem; }
+  #subscribe-modal #subscribe-pay-btn { margin-top: 0.45rem; }
+}
+@media (max-height: 640px) {
+  #subscribe-modal .billing-modal-shell {
+    top: 0.5rem;
+    transform: translate(-50%, 0);
+    max-height: calc(100vh - 1rem);
+    overflow-y: auto;
+  }
 }

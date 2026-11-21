@@ -128,22 +128,47 @@ async function createCheckoutSession({
         err.code = 'OWNERSHIP';
         throw err;
       }
-      await client.query('COMMIT');
-      if (row.checkout_url && (row.status === 'pending' || row.status === 'processing')) {
+
+      // Material change: amount/currency/method must match the stored payment.
+      // If the current quote differs, this is a new logical attempt — mint a fresh key.
+      const storedMinor = Number(row.amount_cents);
+      const storedCurrency = String(row.currency || '').toUpperCase();
+      const storedMethod = String(row.method || '').toLowerCase();
+      const quoteMatches =
+        Number.isFinite(storedMinor) &&
+        storedMinor === Number(quote.amountMinor) &&
+        storedCurrency === String(quote.currency).toUpperCase() &&
+        storedMethod === String(quote.method).toLowerCase();
+
+      if (row.checkout_url && (row.status === 'pending' || row.status === 'processing') && quoteMatches) {
+        await client.query('COMMIT');
+        // Rebuild quote presentation from the immutable payment snapshot (not a fresh FX pull).
+        const snap = row.fx_snapshot && typeof row.fx_snapshot === 'object' ? row.fx_snapshot : {};
+        const replayQuote = {
+          plan: quote.plan,
+          method: storedMethod,
+          currency: storedCurrency,
+          amountMinor: storedMinor,
+          amountMajor: snap.localMajorUnits != null
+            ? Number(snap.localMajorUnits)
+            : storedMinor / (snap.minorDigits != null ? 10 ** Number(snap.minorDigits) : 100),
+          fxSnapshot: snap,
+        };
         return {
           payment: paymentService.mapPayment(row),
           checkoutUrl: row.checkout_url,
           checkoutId: row.external_checkout_id,
-          quote,
+          quote: replayQuote,
           replayed: true,
         };
       }
       if (row.status === 'completed' || row.status === 'approved') {
+        await client.query('COMMIT');
         const err = new Error('Já existe um pagamento concluído para esta tentativa. Inicie um novo checkout.');
         err.code = 'ALREADY_PAID';
         throw err;
       }
-      // Failed/expired/cancelled: mint a fresh idempotency key for this user only
+      // Failed/expired/cancelled OR quote no longer matches: mint a fresh idempotency key
       key = `payzeno:u:${userId}:p:${planId}:m:${quote.method}:t:${randomUUID()}`;
     }
     const { rows } = await client.query(

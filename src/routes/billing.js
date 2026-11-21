@@ -121,6 +121,19 @@ router.post('/checkout/session', requireAuth, requireVerifiedEmail, requireCsrf,
         code: 'CUSTOMER_REQUIRED',
       });
     }
+    // Normalize to E.164-ish: leading +, digits only after
+    const phoneDigits = phone.replace(/[^0-9+]/g, '');
+    const normalizedPhone = phoneDigits.startsWith('+')
+      ? '+' + phoneDigits.slice(1).replace(/\D/g, '')
+      : '+' + phoneDigits.replace(/\D/g, '');
+    if (!/^\+[1-9]\d{7,14}$/.test(normalizedPhone)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Telefone inválido. Utilize formato internacional E.164 (ex.: +25884…).',
+        code: 'PHONE_INVALID',
+      });
+    }
+    phone = normalizedPhone;
 
     // Return URLs are server-owned only (never trust client-supplied URLs — open redirect risk).
     const appUrl = String(process.env.APP_URL || '').replace(/\/$/, '');
