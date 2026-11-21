@@ -519,6 +519,46 @@ async function executeSearch(input, opts = {}) {
   };
 }
 
+function isSafeGoogleMapsUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const url = new URL(value.trim());
+    const host = url.hostname.toLowerCase();
+    return url.protocol === 'https:' &&
+      (host === 'google.com' || host.endsWith('.google.com')) &&
+      (host === 'maps.google.com' || host.startsWith('maps.') ||
+       url.pathname.toLowerCase().startsWith('/maps'));
+  } catch (_) {
+    return false;
+  }
+}
+
+function buildMapsUrl(lead = {}) {
+  const candidates = [lead.mapsUrl, lead.googleMapsUrl,
+    lead.raw && lead.raw.googleMapsUrl, lead.raw && lead.raw.url];
+
+  for (const candidate of candidates) {
+    if (isSafeGoogleMapsUrl(candidate)) return candidate.trim();
+  }
+
+  const lat = Number(lead.lat);
+  const lng = Number(lead.lng);
+  if (lead.lat != null && lead.lng != null &&
+      Number.isFinite(lat) && Number.isFinite(lng) &&
+      lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+    return 'https://www.google.com/maps/search/?api=1&query=' +
+      encodeURIComponent(`${lat},${lng}`);
+  }
+
+  const query = [lead.name, lead.address].filter(
+    value => typeof value === 'string' && value.trim()
+  ).join(' ').trim();
+
+  if (!query) return null;
+  return 'https://www.google.com/maps/search/?api=1&query=' +
+    encodeURIComponent(query);
+}
+
 /** Google Place IDs typically start with ChIJ. Never treat TomTom/non-Google external IDs as place IDs. */
 function isGooglePlaceId(id) {
   if (!id || typeof id !== 'string') return false;
@@ -547,6 +587,7 @@ function publicLead(lead, index) {
     rating: lead.rating, reviewsCount: lead.reviewsCount != null ? lead.reviewsCount : lead.reviews_count,
     category: lead.category, lat: lead.lat, lng: lead.lng, photoUrl: lead.photoUrl || null,
     googleMapsUrl: googleMapsUrl || null,
+    mapsUrl: buildMapsUrl({ ...lead, googleMapsUrl }),
     googlePlaceId: googlePlaceId || null,
   };
 }
@@ -587,7 +628,7 @@ module.exports = {
   PROVIDER_CODES, PROVIDER_MAX, ALLOWED_LIMITS, normalizeLimit, providerLimit, normalizeText, normalizePhone, normalizeWebsite,
   classifyWebsiteUrl, SOCIAL_MEDIA_DOMAINS, DIRECTORY_DOMAINS, WEBSITE_CATEGORY_RANK, pickPreferredWebsite,
   normalizeLead, deduplicate, mergeLeads, applyFilters, perProviderLimit, normalizeProviderResult,
-  runProviderSafe, classifySearchOutcome, executeSearch, publicLead, isGooglePlaceId, leadIdentityKey, clientMessageForOutcome, clientHintForOutcome,
+  runProviderSafe, classifySearchOutcome, executeSearch, publicLead, isGooglePlaceId, isSafeGoogleMapsUrl, buildMapsUrl, leadIdentityKey, clientMessageForOutcome, clientHintForOutcome,
   MODALITIES: { standard: { id: 'standard', providerCodes: PROVIDER_CODES } },
   resolveModality: () => ({ id: 'standard', providerCodes: PROVIDER_CODES }),
   providersForModality: () => PROVIDER_CODES.slice(),
