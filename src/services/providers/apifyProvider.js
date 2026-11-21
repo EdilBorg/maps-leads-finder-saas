@@ -329,4 +329,6 @@ module.exports = {
   mapItem,
   buildActorInput,
   extractPhotoUrl,
+  escapeJsonString,
+  MAX_RAW,
 };
