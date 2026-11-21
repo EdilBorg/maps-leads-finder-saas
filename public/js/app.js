@@ -2827,6 +2827,9 @@
     const emailEl = $('#settings-email');
     const verifiedEl = $('#settings-verified');
     const recoveryEmailEl = $('#reset-password-email');
+    const createdEl = $('#settings-created');
+    const lastLoginEl = $('#settings-last-login');
+    const verifyActions = $('#settings-verify-actions');
     if (!currentUser) {
       try {
         const res = await api('/api/auth/me');
@@ -2836,10 +2839,24 @@
     if (currentUser) {
       if (nameEl) nameEl.textContent = currentUser.name || '—';
       if (emailEl) emailEl.textContent = currentUser.email || '—';
-      if (verifiedEl) verifiedEl.textContent = currentUser.emailVerified ? 'Verificado' : 'Não verificado';
+      if (verifiedEl) {
+        verifiedEl.textContent = currentUser.emailVerified ? 'Verificado' : 'Não verificado';
+      }
+      if (verifyActions) verifyActions.hidden = !!currentUser.emailVerified;
       if (recoveryEmailEl) recoveryEmailEl.textContent = currentUser.email ? maskEmail(currentUser.email) : '—';
-    } else if (recoveryEmailEl) {
-      recoveryEmailEl.textContent = '—';
+      if (createdEl) {
+        createdEl.textContent = currentUser.createdAt
+          ? String(currentUser.createdAt).slice(0, 10)
+          : '—';
+      }
+      if (lastLoginEl) {
+        lastLoginEl.textContent = currentUser.lastLoginAt
+          ? String(currentUser.lastLoginAt).slice(0, 19).replace('T', ' ')
+          : '—';
+      }
+    } else {
+      if (recoveryEmailEl) recoveryEmailEl.textContent = '—';
+      if (verifyActions) verifyActions.hidden = true;
     }
   }
 
@@ -3048,6 +3065,84 @@
         }
       });
     }
+
+    const formCp = $('#form-change-password');
+    if (formCp) {
+      formCp.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const ok = $('#cp-ok');
+        const err = $('#cp-error');
+        if (ok) { ok.hidden = true; ok.textContent = ''; }
+        if (err) { err.hidden = true; err.textContent = ''; }
+        const currentPassword = ($('#cp-current') && $('#cp-current').value) || '';
+        const newPassword = ($('#cp-new') && $('#cp-new').value) || '';
+        const newPasswordConfirm = ($('#cp-confirm') && $('#cp-confirm').value) || '';
+        if (newPassword.length < 8 || newPassword.length > 128) {
+          if (err) { err.hidden = false; err.textContent = 'A nova palavra-passe deve ter entre 8 e 128 caracteres.'; }
+          return;
+        }
+        if (newPassword !== newPasswordConfirm) {
+          if (err) { err.hidden = false; err.textContent = 'A confirmação da nova palavra-passe não coincide.'; }
+          return;
+        }
+        try {
+          const token = await ensureCsrf();
+          const res = await api('/api/auth/change-password', {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': token },
+            body: { currentPassword, newPassword, newPasswordConfirm },
+          });
+          const data = res.data || {};
+          if (res.ok) {
+            if (ok) {
+              ok.hidden = false;
+              ok.textContent = data.message || 'Palavra-passe actualizada. Vai ser redireccionado para iniciar sessão.';
+            }
+            formCp.reset();
+            setTimeout(function () { window.location.href = '/pages/login.html'; }, 1500);
+          } else if (err) {
+            err.hidden = false;
+            err.textContent = data.error || 'Não foi possível alterar a palavra-passe.';
+          }
+        } catch (_) {
+          if (err) { err.hidden = false; err.textContent = 'Erro de rede.'; }
+        }
+      });
+    }
+
+    const resendBtn = $('#btn-resend-verification');
+    if (resendBtn) {
+      resendBtn.addEventListener('click', async () => {
+        const ok = $('#settings-verify-ok');
+        const err = $('#settings-verify-error');
+        if (ok) { ok.hidden = true; ok.textContent = ''; }
+        if (err) { err.hidden = true; err.textContent = ''; }
+        try {
+          if (!currentUser || !currentUser.email) {
+            if (err) { err.hidden = false; err.textContent = 'Sessão inválida.'; }
+            return;
+          }
+          const token = await ensureCsrf();
+          const res = await api('/api/auth/resend-verification', {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': token },
+            body: { email: currentUser.email },
+          });
+          const data = res.data || {};
+          if (res.ok) {
+            if (ok) {
+              ok.hidden = false;
+              ok.textContent = data.message || 'Se a conta existir e o email não estiver verificado, enviámos instruções.';
+            }
+          } else if (err) {
+            err.hidden = false;
+            err.textContent = data.error || 'Não foi possível reenviar o email.';
+          }
+        } catch (_) {
+          if (err) { err.hidden = false; err.textContent = 'Erro de rede.'; }
+        }
+      });
+    }
   }
 
 
@@ -3061,71 +3156,148 @@
     return (row.used || 0) + ' / ' + row.max + ' (restam ' + (row.remaining != null ? row.remaining : '—') + ')';
   }
   async function loadPlansQuotaView() {
-    const panel = document.getElementById('plans-quota-panel');
+    const subPanel = document.getElementById('plans-subscription-panel');
+    const usagePanel = document.getElementById('plans-usage-panel');
+    const trialPanel = document.getElementById('plans-trial-panel');
     const list = document.getElementById('plans-list-panel');
     const pays = document.getElementById('plans-payments-panel');
-    if (!panel) return;
+
+    function esc(s) {
+      return escapeHtmlPlans(s == null ? '' : String(s));
+    }
+    function fmtDate(v) {
+      if (!v) return '—';
+      return String(v).slice(0, 10);
+    }
+
     try {
       const qRes = await api('/api/billing/quota');
       const pRes = await api('/api/billing/plans');
       const payRes = await api('/api/billing/payments');
-      const q = (qRes && qRes.data) || {};
-      const trial = q.trial || {};
-      const sub = q.subscription;
-      const prov = q.providers || {};
-      panel.innerHTML =
-        '<h2 style="margin:0 0 .75rem;font-size:1rem">A sua conta</h2>' +
-        '<p><strong>Trial:</strong> ' +
-        (trial.available ? 'Disponível (máx. ' + (trial.maxLeads || 200) + ' leads)' :
-          trial.inProgress ? 'Em curso' : 'Já utilizado') + '</p>' +
-        '<p><strong>Subscrição:</strong> ' +
-        (sub ? escapeHtmlPlans(sub.planName || 'Plano') + ' · ' + escapeHtmlPlans(sub.status) +
-          (sub.endsAt ? ' · até ' + escapeHtmlPlans(String(sub.endsAt).slice(0, 10)) : '')
-          : 'Nenhuma activa') + '</p>' +
-        '<p><strong>Apify:</strong> ' + fmtQuotaRow(prov.apify) + '</p>' +
-        '<p><strong>Bright Data:</strong> ' + fmtQuotaRow(prov.brightdata) + '</p>' +
-        '<p><strong>TomTom:</strong> ' + fmtQuotaRow(prov.tomtom) + '</p>';
+      const data = (qRes && qRes.data) || {};
+      const sub = data.subscription || null;
+      const period = data.period || null;
+      const usage = data.usage || {};
+      const trial = data.trial || {};
+
+      if (subPanel) {
+        if (sub) {
+          subPanel.innerHTML =
+            '<h2 style="margin:0 0 .75rem;font-size:1rem">Subscrição actual</h2>' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">' +
+            '<div><span class="form-label">Plano</span><div>' + esc(sub.planName || '—') + '</div></div>' +
+            '<div><span class="form-label">Estado</span><div>' + esc(sub.status || '—') + '</div></div>' +
+            '<div><span class="form-label">Início</span><div>' + esc(fmtDate(sub.startsAt)) + '</div></div>' +
+            '<div><span class="form-label">Fim / renovação</span><div>' + esc(fmtDate(sub.nextRenewalAt || sub.endsAt)) + '</div></div>' +
+            '<div><span class="form-label">Ciclo</span><div>' +
+              (period && period.periodDays ? esc(period.periodDays + ' dias') :
+                (sub.periodDays ? esc(sub.periodDays + ' dias') : '—')) +
+            '</div></div>' +
+            (period ? '<div><span class="form-label">Período actual</span><div>' +
+              esc(fmtDate(period.periodStart) + ' → ' + fmtDate(period.periodEnd)) + '</div></div>' : '') +
+            '</div>';
+        } else {
+          subPanel.innerHTML =
+            '<h2 style="margin:0 0 .75rem;font-size:1rem">Subscrição actual</h2>' +
+            '<p class="muted" style="margin:0">Não tem uma subscrição activa. Pode activar um plano abaixo ou utilizar a demonstração gratuita (se ainda disponível).</p>';
+        }
+      }
+
+      if (usagePanel) {
+        const delivered = typeof usage.deliveredResults === 'number' ? usage.deliveredResults : 0;
+        const limit = usage.planLimit != null && usage.planLimit > 0 ? usage.planLimit : null;
+        const remaining = limit != null ? Math.max(0, limit - delivered) : null;
+        let html = '<h2 style="margin:0 0 .75rem;font-size:1rem">Consumo do plano</h2>';
+        html += '<p class="card-muted" style="margin:0 0 .75rem">Resultados finais entregues neste ciclo (após deduplicação). Não inclui pesquisas falhadas, canceladas nem a demonstração gratuita.</p>';
+        html += '<div><span class="form-label">Resultados entregues</span><div style="font-size:1.25rem;font-weight:600">' + esc(delivered) + '</div></div>';
+        if (limit != null) {
+          const pct = limit > 0 ? Math.min(100, Math.round((delivered / limit) * 100)) : 0;
+          html += '<div style="margin-top:.75rem"><span class="form-label">Limite do plano</span><div>' + esc(limit) + '</div></div>';
+          html += '<div style="margin-top:.5rem"><span class="form-label">Restantes</span><div>' + esc(remaining) + '</div></div>';
+          html += '<div style="margin-top:.75rem;height:8px;background:#1f2937;border-radius:4px;overflow:hidden">' +
+            '<div style="height:100%;width:' + pct + '%;background:#3b82f6;border-radius:4px"></div></div>';
+          html += '<p class="muted" style="margin:.35rem 0 0;font-size:.85rem">' + pct + '% utilizado</p>';
+        } else if (!sub) {
+          html += '<p class="muted" style="margin-top:.75rem">Sem limite de plano activo. O consumo acima reflecte apenas pesquisas pagas no período, se existirem.</p>';
+        } else {
+          html += '<p class="muted" style="margin-top:.75rem">Este plano não define um limite global de resultados finais no ciclo.</p>';
+        }
+        usagePanel.innerHTML = html;
+      }
+
+      if (trialPanel) {
+        let statusLabel = 'Indisponível';
+        if (trial.inProgress) statusLabel = 'Em curso';
+        else if (trial.available) statusLabel = 'Disponível';
+        else if (trial.used) statusLabel = 'Já utilizada';
+        trialPanel.innerHTML =
+          '<h2 style="margin:0 0 .75rem;font-size:1rem">Demonstração gratuita</h2>' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">' +
+          '<div><span class="form-label">Estado</span><div>' + esc(statusLabel) + '</div></div>' +
+          '<div><span class="form-label">Máximo de leads</span><div>' + esc(trial.maxLeads != null ? trial.maxLeads : 200) + '</div></div>' +
+          '</div>' +
+          '<p class="card-muted" style="margin:.75rem 0 0">Uma única pesquisa gratuita por conta, até 200 leads finais. Não renova e é independente da subscrição paga.</p>';
+      }
+
       const plans = ((pRes && pRes.data && pRes.data.plans) || []);
       if (list) {
-        list.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Planos</h2>' +
+        list.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Planos disponíveis</h2>' +
           (plans.length ? plans.map(function (p) {
-            return '<div style="border-top:1px solid #e5e7eb;padding:.75rem 0">' +
-              '<strong>' + escapeHtmlPlans(p.name) + '</strong>' +
-              '<div class="muted">' + escapeHtmlPlans(p.description || '') + '</div>' +
-              '<button type="button" class="btn btn-secondary btn-sm" data-request-plan="' +
-              escapeHtmlPlans(p.id) + '">Solicitar pagamento</button></div>';
-          }).join('') : '<p class="muted">Nenhum plano publicado.</p>');
-        list.querySelectorAll('[data-request-plan]').forEach(function (btn) {
+            const price = (p.priceCents != null ? (Number(p.priceCents) / 100).toFixed(2) : '—') +
+              ' ' + (p.currency || 'USD');
+            return '<div style="border-top:1px solid #e5e7eb;padding:.75rem 0;display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:center">' +
+              '<div><strong>' + esc(p.name) + '</strong>' +
+              (p.description ? '<div class="muted">' + esc(p.description) + '</div>' : '') +
+              '<div class="muted">' + esc(price) +
+              (p.maxResultsPerSearch ? ' · até ' + esc(p.maxResultsPerSearch) + ' resultados/pesquisa' : '') +
+              '</div></div>' +
+              '<button type="button" class="btn btn-secondary btn-request-plan" data-plan-id="' + esc(p.id) + '">Pedir activação</button>' +
+              '</div>';
+          }).join('') : '<p class="muted">Nenhum plano disponível de momento.</p>');
+        list.querySelectorAll('.btn-request-plan').forEach(function (btn) {
           btn.addEventListener('click', async function () {
             try {
               const token = await ensureCsrf();
-              await api('/api/billing/payments', {
+              const res = await api('/api/billing/payments', {
                 method: 'POST',
                 headers: { 'X-CSRF-Token': token },
-                body: { planId: btn.getAttribute('data-request-plan') },
+                body: { planId: btn.getAttribute('data-plan-id') },
               });
-              alert('Pedido registado. Aguarde aprovação.');
-              loadPlansQuotaView();
+              if (res.ok) {
+                alert('Pedido de pagamento registado. A equipa fará a activação manual.');
+                loadPlansQuotaView();
+              } else {
+                alert(((res.data && res.data.error) || 'Falha ao registar pedido'));
+              }
             } catch (e) {
               alert((e && e.message) || 'Falha');
             }
           });
         });
       }
+
       const payments = ((payRes && payRes.data && payRes.data.payments) || []);
       if (pays) {
-        pays.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Pagamentos</h2>' +
+        pays.innerHTML = '<h2 style="margin:0 0 .75rem;font-size:1rem">Histórico de pagamentos</h2>' +
           (payments.length ? payments.map(function (p) {
+            const amount = p.amountCents != null
+              ? (Number(p.amountCents) / 100).toFixed(2) + ' ' + (p.currency || 'USD')
+              : '—';
             return '<div style="border-top:1px solid #e5e7eb;padding:.5rem 0">' +
-              escapeHtmlPlans(p.planName || p.planId) + ' · ' + escapeHtmlPlans(p.status) +
-              (p.createdAt ? ' · ' + escapeHtmlPlans(String(p.createdAt).slice(0, 10)) : '') +
+              '<strong>' + esc(p.planName || p.planId || 'Plano') + '</strong> · ' +
+              esc(amount) + ' · ' + esc(p.status || '—') +
+              (p.method ? ' · ' + esc(p.method) : '') +
+              (p.createdAt ? ' · ' + esc(String(p.createdAt).slice(0, 10)) : '') +
               '</div>';
           }).join('') : '<p class="muted">Sem pagamentos.</p>');
       }
     } catch (e) {
-      panel.innerHTML = '<p class="muted">Não foi possível carregar quotas.</p>';
+      if (subPanel) subPanel.innerHTML = '<p class="muted">Não foi possível carregar a informação do plano.</p>';
+      if (usagePanel) usagePanel.innerHTML = '';
+      if (trialPanel) trialPanel.innerHTML = '';
     }
   }
+
 
   function init() {
     initNav();
