@@ -3445,7 +3445,7 @@
       var code = String(m.code).toLowerCase();
       var meta = METHOD_META[code] || { label: String(m.code).toUpperCase(), logo: null };
       var logo = meta.logo
-        ? '<span class="checkout-method-logo-wrap"><img src="' + esc(meta.logo) + '" alt="" width="80" height="42" loading="lazy" decoding="async"></span>'
+        ? '<span class="checkout-method-logo-wrap"><img src="' + esc(meta.logo) + '" alt="" width="96" height="50" loading="lazy" decoding="async"></span>'
         : '';
       return (
         '<button type="button" class="checkout-method-card" role="radio" aria-checked="false" aria-label="' + esc(meta.label) + '" data-method="' + esc(code) + '" data-currency="' + esc(m.currency || '') + '">' +

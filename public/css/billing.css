@@ -250,16 +250,22 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.3rem;
-  padding: 0.55rem 0.35rem 0.45rem;
+  gap: 0;
+  /* Pre-V5 reference height (logo 34px + name ~14px + padding ~16px) ≈ 72px.
+     Keep external card size stable while allowing larger logos inside. */
+  height: 72px;
+  min-height: 72px;
+  max-height: 72px;
+  padding: 0.35rem 0.3rem;
   border-radius: 10px;
   border: 1px solid var(--color-graphite);
   background: var(--surface-panel);
   color: var(--color-mist);
   cursor: pointer;
   transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
-  min-height: 0;
   text-align: center;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 .checkout-method-card:hover {
   border-color: rgba(228, 242, 34, 0.35);
@@ -275,15 +281,17 @@
   box-shadow: 0 0 0 1px rgba(228, 242, 34, 0.25);
 }
 .checkout-method-logo-wrap {
-  width: 80px;
-  height: 42px;
+  width: 96px;
+  height: 50px;
+  max-width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 .checkout-method-logo-wrap img {
-  max-width: 80px;
-  max-height: 42px;
+  max-width: 96px;
+  max-height: 50px;
   width: auto;
   height: auto;
   object-fit: contain;
@@ -357,7 +365,8 @@
   .checkout-pro-header { margin-bottom: 0.55rem; }
   .checkout-pro-header .checkout-price { font-size: 1.55rem; }
   .checkout-methods-grid { gap: 0.35rem; margin-bottom: 0.55rem; }
-  .checkout-method-card { padding: 0.4rem 0.3rem 0.35rem; }
+  /* Keep fixed card height from base rule; only reduce horizontal padding slightly */
+  .checkout-method-card { padding: 0.3rem 0.25rem; }
   .checkout-summary { margin-bottom: 0.5rem; padding: 0.45rem 0.55rem; }
   #subscribe-modal #subscribe-pay-btn { margin-top: 0.45rem; }
 }
