@@ -437,43 +437,84 @@
 
         </section>
                 <section class="view" id="view-plans" hidden>
-          <h1 class="page-title">Planos e quotas</h1>
-          <div id="plans-quota-panel" class="card" style="padding:1rem">
-            <p class="muted">A carregar informação da conta…</p>
+          <h1 class="page-title">Planos e consumo</h1>
+          <p class="page-sub">Subscrição, utilização de resultados e pagamentos</p>
+
+          <div id="plans-subscription-panel" class="card stack-gap-16" style="padding:1rem;margin-bottom:1rem">
+            <p class="muted">A carregar…</p>
           </div>
+
+          <div id="plans-usage-panel" class="card stack-gap-16" style="padding:1rem;margin-bottom:1rem">
+            <p class="muted">A carregar consumo…</p>
+          </div>
+
+          <div id="plans-trial-panel" class="card stack-gap-16" style="padding:1rem;margin-bottom:1rem">
+            <p class="muted">A carregar trial…</p>
+          </div>
+
           <div id="plans-list-panel" class="card" style="padding:1rem;margin-top:1rem"></div>
           <div id="plans-payments-panel" class="card" style="padding:1rem;margin-top:1rem"></div>
         </section>
 <section class="view" id="view-settings" aria-label="Configurações">
           <h2 class="page-heading">Configurações</h2>
-          <p class="page-sub">Conta e preferências</p>
-          <div class="card stack-gap-16">
-            <div><span class="form-label">Nome</span><div id="settings-name">—</div></div>
-            <div><span class="form-label">Email</span><div id="settings-email">—</div></div>
-            <div><span class="form-label">Verificação do email</span><div id="settings-verified">—</div></div>
-            <div>
-              <button type="button" class="btn btn-secondary" id="btn-show-reset-password">
-                Recuperar palavra-passe
-              </button>
+          <p class="page-sub">Gestão da conta e segurança</p>
+
+          <div class="card stack-gap-16" style="margin-bottom:1rem">
+            <h3 class="card-title" style="margin:0">Dados da conta</h3>
+            <div class="grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+              <div><span class="form-label">Nome</span><div id="settings-name">—</div></div>
+              <div><span class="form-label">Email</span><div id="settings-email">—</div></div>
+              <div><span class="form-label">Membro desde</span><div id="settings-created">—</div></div>
+              <div><span class="form-label">Último acesso</span><div id="settings-last-login">—</div></div>
             </div>
-            <div id="reset-password-panel" class="card stack-gap-16" hidden>
-              <h3 class="card-title">Recuperar palavra-passe</h3>
-              <p class="card-muted">
-                Enviaremos um link de recuperação para o email associado à tua conta.
-              </p>
+          </div>
+
+          <div class="card stack-gap-16" style="margin-bottom:1rem">
+            <h3 class="card-title" style="margin:0">Verificação do email</h3>
+            <div id="settings-verified">—</div>
+            <div id="settings-verify-actions" hidden>
+              <p class="card-muted" style="margin:0">O email ainda não está verificado. Reenvie o email de verificação para activar todas as funcionalidades.</p>
+              <button type="button" class="btn btn-secondary" id="btn-resend-verification">Reenviar email de verificação</button>
+              <p id="settings-verify-ok" class="success-box" hidden></p>
+              <p id="settings-verify-error" class="error-box" hidden></p>
+            </div>
+          </div>
+
+          <div class="card stack-gap-16" style="margin-bottom:1rem">
+            <h3 class="card-title" style="margin:0">Segurança — alterar palavra-passe</h3>
+            <form id="form-change-password" class="stack-gap-16" autocomplete="off">
               <div>
-                <span class="form-label">Email de recuperação</span>
-                <div id="reset-password-email">—</div>
+                <label class="form-label" for="cp-current">Palavra-passe actual</label>
+                <input class="form-input" type="password" id="cp-current" name="currentPassword" required minlength="1" autocomplete="current-password">
               </div>
+              <div>
+                <label class="form-label" for="cp-new">Nova palavra-passe</label>
+                <input class="form-input" type="password" id="cp-new" name="newPassword" required minlength="8" maxlength="128" autocomplete="new-password">
+              </div>
+              <div>
+                <label class="form-label" for="cp-confirm">Confirmar nova palavra-passe</label>
+                <input class="form-input" type="password" id="cp-confirm" name="newPasswordConfirm" required minlength="8" maxlength="128" autocomplete="new-password">
+              </div>
+              <p id="cp-ok" class="success-box" hidden></p>
+              <p id="cp-error" class="error-box" hidden></p>
+              <button type="submit" class="btn btn-primary" id="btn-change-password">Actualizar palavra-passe</button>
+            </form>
+          </div>
+
+          <div class="card stack-gap-16">
+            <h3 class="card-title" style="margin:0">Recuperar palavra-passe</h3>
+            <p class="card-muted" style="margin:0">Se não se lembrar da palavra-passe actual, pode pedir um link de recuperação para o email da conta.</p>
+            <div>
+              <span class="form-label">Email da conta</span>
+              <div id="reset-password-email">—</div>
+            </div>
+            <button type="button" class="btn btn-secondary" id="btn-show-reset-password">Pedir link de recuperação</button>
+            <div id="reset-password-panel" class="stack-gap-16" hidden>
               <p id="reset-password-ok" class="success-box" hidden></p>
               <p id="reset-password-error" class="error-box" hidden></p>
-              <div class="toolbar-left">
-                <button type="button" class="btn btn-primary" id="btn-send-reset-link">
-                  Enviar link
-                </button>
-                <button type="button" class="btn btn-ghost" id="btn-cancel-reset-password">
-                  Cancelar
-                </button>
+              <div class="toolbar-left" style="display:flex;gap:.5rem;flex-wrap:wrap">
+                <button type="button" class="btn btn-primary" id="btn-send-reset-link">Enviar link</button>
+                <button type="button" class="btn btn-ghost" id="btn-cancel-reset-password">Cancelar</button>
               </div>
             </div>
           </div>

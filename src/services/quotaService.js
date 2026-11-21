@@ -486,6 +486,28 @@ async function getClientQuotaView(userId) {
     return { max, used, remaining: Math.max(0, max - used) };
   }
 
+  // Delivered final results in the current paid period (after dedup/filters).
+  // Exclude failed/cancelled; exclude trial searches (quotaMode=trial).
+  let deliveredResults = 0;
+  let planLimit = null;
+  if (sub && period && period.periodStart && period.periodEnd) {
+    const { rows: delRows } = await pool.query(
+      `SELECT COALESCE(SUM(total_after_filters), 0)::int AS delivered
+       FROM searches
+       WHERE user_id = $1
+         AND status IN ('completed', 'partial')
+         AND completed_at IS NOT NULL
+         AND completed_at >= $2::timestamptz
+         AND completed_at < $3::timestamptz
+         AND COALESCE(filters->>'quotaMode', '') = 'paid'`,
+      [userId, period.periodStart, period.periodEnd]
+    );
+    deliveredResults = delRows[0] ? Number(delRows[0].delivered) || 0 : 0;
+    if (sub.maxResultsPerMonth != null && Number(sub.maxResultsPerMonth) > 0) {
+      planLimit = Number(sub.maxResultsPerMonth);
+    }
+  }
+
   return {
     trial: {
       available: Boolean(trialAvailable),
@@ -499,8 +521,18 @@ async function getClientQuotaView(userId) {
     subscription: sub ? {
       id: sub.id, status: sub.status, planId: sub.planId, planName: sub.planName,
       startsAt: sub.startsAt, endsAt: sub.endsAt, nextRenewalAt: sub.endsAt,
+      maxResultsPerMonth: sub.maxResultsPerMonth != null ? Number(sub.maxResultsPerMonth) : null,
+      maxResultsPerSearch: sub.maxResultsPerSearch != null ? Number(sub.maxResultsPerSearch) : null,
+      periodDays: period && period.periodDays != null ? period.periodDays : null,
     } : null,
     period,
+    usage: {
+      // Client-facing consumption: final delivered leads in the current cycle
+      deliveredResults,
+      planLimit,
+      remaining: planLimit != null ? Math.max(0, planLimit - deliveredResults) : null,
+    },
+    // Internal provider quotas kept for admin/debug callers; client UI must not render these.
     providers: {
       apify: remainingFor('apify'),
       brightdata: remainingFor('brightdata'),
