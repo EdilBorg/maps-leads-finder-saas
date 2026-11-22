@@ -362,7 +362,7 @@ async function runSearchJob(ctx) {
           const reservation = (ctx.quotaProviders || []).find((p) => p.code === code && p.allowed && p.reserve);
           if (!reservation || !reservation.reserve) {
             // Trial path: still track remote id for operational recovery without paid reservation
-            if (ctx.quotaMode === 'trial' && (code === 'apify' || code === 'brightdata')) {
+            if (ctx.quotaMode === 'trial' && (code === 'apify' || code === 'brightdata' || code === 'dataforseo')) {
               try {
                 await quotaService.markPendingRemote(
                   ctx.userId,
@@ -381,8 +381,8 @@ async function runSearchJob(ctx) {
                   }
                 );
               } catch (e) {
-                if (code === 'apify') {
-                  const err = new Error('Failed to persist Apify run id: ' + (e && e.message));
+                if (code === 'apify' || code === 'dataforseo') {
+                  const err = new Error('Failed to persist ' + code + ' run id: ' + (e && e.message));
                   err.code = 'REMOTE_PERSIST_FAILED';
                   throw err;
                 }
@@ -404,8 +404,8 @@ async function runSearchJob(ctx) {
               }
             );
           } catch (e) {
-            if (code === 'apify') {
-              const err = new Error('Failed to persist Apify run id: ' + (e && e.message));
+            if (code === 'apify' || code === 'dataforseo') {
+              const err = new Error('Failed to persist ' + code + ' run id: ' + (e && e.message));
               err.code = 'REMOTE_PERSIST_FAILED';
               throw err;
             }

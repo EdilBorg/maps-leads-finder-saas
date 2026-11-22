@@ -189,6 +189,9 @@ function errorResult(a, b, c, d) {
       if (details.metadata.recoverable != null) metadata.recoverable = Boolean(details.metadata.recoverable);
       if (Object.keys(metadata).length) out.metadata = metadata;
     }
+    if (details.pendingRemote != null) out.pendingRemote = Boolean(details.pendingRemote);
+    if (details.externalRunId != null) out.externalRunId = String(details.externalRunId).slice(0, 200);
+    if (details.runId != null) out.runId = String(details.runId).slice(0, 200);
   }
   return out;
 }

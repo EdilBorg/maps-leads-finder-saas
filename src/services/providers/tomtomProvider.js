@@ -56,40 +56,88 @@ function isValidLatLng(lat, lng) {
 /**
  * Map Discover v3 result item to internal lead contract.
  */
+/**
+ * Map Discover v3 result item to internal lead contract.
+ * Official schema (docs.tomtom.com Places Search Discover):
+ *   title, subtitles[], position.coordinates [lon, lat],
+ *   address.{street,houseNumber,municipality,postalCode,country,...},
+ *   contacts[].{phones[], websites[]}, poiTypes[].{id,name}, id, type
+ */
 function mapDiscoverItem(r, idx, criteria) {
   if (!r || typeof r !== 'object') return null;
 
+  // Official field is `title` (not name)
   const name =
+    r.title ||
     r.name ||
     (r.poi && r.poi.name) ||
-    (r.address && (r.address.freeformAddress || r.address.streetName)) ||
     null;
-  if (!name) return null;
+  if (!name || !String(name).trim()) return null;
 
-  const addrObj = r.address || {};
-  const address =
-    addrObj.freeformAddress ||
-    [addrObj.streetName, addrObj.municipality, addrObj.countryCode].filter(Boolean).join(', ') ||
-    null;
+  // Address: structured fields or subtitles fallback
+  const addrObj = r.address && typeof r.address === 'object' ? r.address : {};
+  let address = null;
+  if (addrObj.freeformAddress) {
+    address = String(addrObj.freeformAddress).trim();
+  } else {
+    const parts = [
+      [addrObj.street, addrObj.houseNumber].filter(Boolean).join(' '),
+      addrObj.municipality || addrObj.municipalitySubdivision,
+      addrObj.postalCode,
+      addrObj.country,
+    ].filter(Boolean);
+    if (parts.length) address = parts.join(', ');
+  }
+  if (!address && Array.isArray(r.subtitles) && r.subtitles.length) {
+    address = r.subtitles.filter((s) => s && String(s).trim()).join(', ') || null;
+  }
 
-  const poi = r.poi || {};
-  const phone =
-    (poi.phone && String(poi.phone)) ||
-    (Array.isArray(poi.phones) && poi.phones[0] && String(poi.phones[0])) ||
-    (r.phone && String(r.phone)) ||
-    null;
-  const website =
-    (poi.url && String(poi.url)) ||
-    (Array.isArray(poi.urls) && poi.urls[0] && String(poi.urls[0])) ||
-    (r.url && String(r.url)) ||
-    null;
+  // Contacts: contacts[].phones / contacts[].websites
+  let phone = null;
+  let website = null;
+  if (Array.isArray(r.contacts)) {
+    for (const c of r.contacts) {
+      if (!c || typeof c !== 'object') continue;
+      if (!phone && Array.isArray(c.phones) && c.phones.length) {
+        phone = String(c.phones[0]).trim() || null;
+      }
+      if (!website && Array.isArray(c.websites) && c.websites.length) {
+        website = String(c.websites[0]).trim() || null;
+      }
+      if (phone && website) break;
+    }
+  }
+  // Legacy fallbacks (old poiSearch-style payloads)
+  if (!phone) {
+    const poi = r.poi || {};
+    phone =
+      (poi.phone && String(poi.phone).trim()) ||
+      (Array.isArray(poi.phones) && poi.phones[0] && String(poi.phones[0]).trim()) ||
+      (r.phone && String(r.phone).trim()) ||
+      null;
+  }
+  if (!website) {
+    const poi = r.poi || {};
+    website =
+      (poi.url && String(poi.url).trim()) ||
+      (Array.isArray(poi.urls) && poi.urls[0] && String(poi.urls[0]).trim()) ||
+      (r.url && String(r.url).trim()) ||
+      null;
+  }
 
+  // Position: GeoJSON Point coordinates [longitude, latitude]
   let lat = null;
   let lng = null;
-  if (r.position) {
-    if (r.position.lat != null) lat = Number(r.position.lat);
-    if (r.position.lon != null) lng = Number(r.position.lon);
-    else if (r.position.lng != null) lng = Number(r.position.lng);
+  if (r.position && typeof r.position === 'object') {
+    if (Array.isArray(r.position.coordinates) && r.position.coordinates.length >= 2) {
+      lng = Number(r.position.coordinates[0]);
+      lat = Number(r.position.coordinates[1]);
+    } else {
+      // Legacy lat/lon
+      if (r.position.lat != null) lat = Number(r.position.lat);
+      if (r.position.lon != null) lng = Number(r.position.lon);
+      else if (r.position.lng != null) lng = Number(r.position.lng);
+    }
   }
   if ((lat == null || lng == null) && r.geometry && Array.isArray(r.geometry.coordinates)) {
     const coords = r.geometry.coordinates;
@@ -101,26 +149,28 @@ function mapDiscoverItem(r, idx, criteria) {
   if (!Number.isFinite(lat)) lat = null;
   if (!Number.isFinite(lng)) lng = null;
 
-  const categories = Array.isArray(poi.categories)
-    ? poi.categories
-    : Array.isArray(r.poiTypes)
-      ? r.poiTypes
-      : [];
-  const category = categories[0] || criteria.query || null;
+  // Category from poiTypes[].name (preferred role first)
+  let category = null;
+  if (Array.isArray(r.poiTypes) && r.poiTypes.length) {
+    const preferred = r.poiTypes.find((t) => t && t.role === 'preferred') || r.poiTypes[0];
+    if (preferred) {
+      category = preferred.name || preferred.id || null;
+    }
+  }
+  if (!category && r.poi && Array.isArray(r.poi.categories) && r.poi.categories[0]) {
+    category = r.poi.categories[0];
+  }
+  if (!category) category = criteria.query || null;
 
   const externalId =
-    r.id != null
-      ? String(r.id)
-      : r.placeId != null
-        ? String(r.placeId)
-        : `tomtom-${idx}`;
+    r.id != null ? String(r.id) : r.placeId != null ? String(r.placeId) : `tomtom-${idx}`;
 
   return {
     name: String(name).trim(),
     address: address ? String(address).trim() : null,
-    phone: phone ? String(phone).trim() : null,
+    phone: phone || null,
     email: null,
-    website: website ? String(website).trim() : null,
+    website: website || null,
     rating: null,
     reviewsCount: null,
     category: category ? String(category).trim() : null,
@@ -129,7 +179,7 @@ function mapDiscoverItem(r, idx, criteria) {
     photoUrl: null,
     sourceProvider: CODE,
     externalId,
-    raw: { id: r.id != null ? r.id : null },
+    raw: { id: r.id != null ? r.id : null, type: r.type || null },
   };
 }
 
@@ -342,7 +392,7 @@ async function search(criteria, signalOrOpts) {
 
     const attributes =
       process.env.TOMTOM_DISCOVER_ATTRIBUTES ||
-      'results(name,id,position,address,poi,distanceInMeters)';
+      'results(id,title,type,position,address,subtitles,contacts,poiTypes,distanceInMeters)';
 
     requestSent = true;
     const data = await withTimeout(

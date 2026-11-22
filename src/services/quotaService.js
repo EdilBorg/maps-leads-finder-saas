@@ -185,7 +185,7 @@ async function authorizeAndReserve(client, {
     let geoBlocked = false;
 
     if (code === 'tomtom') {
-      const estCalls = Math.max(3, Math.ceil(wantResults / 100) + 1);
+      const estCalls = 1;
       globalReserve = await providerUsageService.reserveGlobalTomTomCalls(estCalls, {
         searchId,
         userId,
@@ -219,7 +219,7 @@ async function authorizeAndReserve(client, {
       periodStart: window.periodStart,
       periodEnd: window.periodEnd,
       results: wantResults,
-      apiCalls: code === 'tomtom' ? Math.max(3, Math.ceil(wantResults / 100) + 1) : 1,
+      apiCalls: code === 'tomtom' ? 1 : 1,
       includeFixedCost: code === 'apify',
       searchId,
       idempotencyKey: `reserve:${userId}:${searchId}:${code}`,
@@ -336,8 +336,11 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
   });
 
   if (reservation.global && reservation.global.periodStart && !reservation.global.geo) {
-    const calls = (Number.isFinite(actualApiCalls) ? actualApiCalls : 0)
-      + (Number.isFinite(geocodeCalls) ? geocodeCalls : 0);
+    // Discover quota only — never include geocodeCalls
+    let calls = Number.isFinite(actualApiCalls) ? actualApiCalls : 0;
+    // Conservative: if Discover request was sent, count at least 1
+    if (calls === 0 && metrics && metrics.requestSent) calls = 1;
+    calls = Math.min(1, Math.max(0, calls));
     await providerUsageService.commitGlobalTomTomCalls(
       reservation.global.periodStart,
       reservation.global.reservedCalls || 0,
@@ -452,7 +455,7 @@ async function releaseAllReservations(userId, searchId, providers, { force = fal
   for (const p of providers || []) {
     if (!p.allowed || !p.reserve) continue;
     try {
-      if (!force && (p.code === 'apify' || p.code === 'brightdata')) {
+      if (!force && (p.code === 'apify' || p.code === 'brightdata' || p.code === 'dataforseo')) {
         // Keep reservation; record pending remote for reconciliation.
         await markPendingRemote(userId, searchId, p.code, p.reserve, {
           pendingRemote: true,

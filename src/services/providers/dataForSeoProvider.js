@@ -389,16 +389,32 @@ async function search(criteria, signalOrOpts) {
       return errorResult('CANCELLED', 'DataForSEO search cancelled');
     }
     if (err && err.code === 'PROVIDER_TIMEOUT') {
-      // Task may still complete remotely — mark pending so reconciler can fetch later
-      return errorResult('TIMEOUT', err.message || 'DataForSEO timeout', {
+      // Task was POSTed and billed — do NOT treat as zero-cost failure.
+      // pendingRemote must stay true so reservations are not released.
+      const taskId = err.taskId || null;
+      const out = errorResult('TIMEOUT', err.message || 'DataForSEO timeout', {
         errorStage: 'poll',
         metadata: {
-          snapshotId: err.taskId || null,
+          snapshotId: taskId,
           providerCode: CODE,
           recoverable: true,
         },
-        snapshotId: err.taskId || null,
+        snapshotId: taskId,
       });
+      out.pendingRemote = true;
+      out.externalRunId = taskId;
+      out.runId = taskId;
+      out.snapshotId = taskId;
+      out.metrics = {
+        rawCount: 0,
+        apiCalls: 1, // task_post already charged
+        geocodeCalls: 0,
+        pendingRemote: true,
+        externalRunId: taskId,
+        runId: taskId,
+        snapshotId: taskId,
+      };
+      return out;
     }
     if (err && err.code === 'AUTH_ERROR') {
       return errorResult('AUTH_ERROR', err.message || 'DataForSEO auth failed', {
@@ -439,11 +455,22 @@ async function fetchExistingTask(taskId, signal) {
     });
   } catch (err) {
     if (err && err.code === 'PROVIDER_TIMEOUT') {
-      return errorResult('TIMEOUT', err.message || 'DataForSEO recovery timeout', {
+      const out = errorResult('TIMEOUT', err.message || 'DataForSEO recovery timeout', {
         errorStage: 'poll',
         metadata: { snapshotId: String(taskId), providerCode: CODE, recoverable: true },
         snapshotId: String(taskId),
       });
+      out.pendingRemote = true;
+      out.externalRunId = String(taskId);
+      out.metrics = {
+        rawCount: 0,
+        apiCalls: 0,
+        geocodeCalls: 0,
+        pendingRemote: true,
+        externalRunId: String(taskId),
+        snapshotId: String(taskId),
+      };
+      return out;
     }
     return errorResult(err.code || 'PROVIDER_ERROR', err.message || 'dataforseo recovery failed', {
       httpStatus: err.httpStatus || null,

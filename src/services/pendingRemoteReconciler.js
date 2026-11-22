@@ -1,5 +1,5 @@
 /**
- * Reconciles pending Apify / Bright Data remote executions with usage ledger.
+ * Reconciles pending Apify / Bright Data / DataForSEO remote executions with usage ledger.
  * Pattern mirrors abandonedSearchRecovery: start/stop/waitForIdle, short DB transactions.
  */
 const crypto = require('crypto');
@@ -228,8 +228,51 @@ async function processRow(row) {
 
   if (row.provider_code === 'dataforseo') {
     const dfs = require('./providers/dataForSeoProvider');
-    const result = await dfs.fetchExistingTask(row.external_run_id, null);
-    return result;
+    let result;
+    try {
+      result = await dfs.fetchExistingTask(row.external_run_id, null);
+    } catch (err) {
+      await scheduleRetry(row, (err && err.message) || 'dataforseo_fetch_error');
+      return;
+    }
+    if (!(await stillOwnsLease(row.id))) return;
+
+    // Still polling / recoverable timeout — keep pending and retry later
+    if (result && result.pendingRemote) {
+      await scheduleRetry(row, 'still_running:pendingRemote');
+      return;
+    }
+    if (result && result.errorCode === 'TIMEOUT') {
+      await scheduleRetry(row, 'still_running:poll_timeout');
+      return;
+    }
+
+    const status = result && result.status;
+    if (status === 'ok' || status === 'empty') {
+      const count = Array.isArray(result.results) ? result.results.length : 0;
+      const metrics = result.metrics || {};
+      const unit = row.unit_cost_micro_usd != null ? BigInt(String(row.unit_cost_micro_usd)) : 0n;
+      const fixed = row.include_fixed_cost && row.fixed_execution_cost_micro_usd != null
+        ? BigInt(String(row.fixed_execution_cost_micro_usd)) : 0n;
+      const cost = BigInt(count) * unit + fixed;
+      // task_post already billed once; recovery GET is free → apiCalls for ledger = reserved or 1
+      const apiCalls = Math.max(1, Number(row.reserved_api_calls) || 1);
+      await resolveSuccess(row, {
+        results: count,
+        apiCalls,
+        costMicroUsd: cost.toString(),
+      });
+      return;
+    }
+
+    // Terminal auth / hard errors — fail the pending row without releasing as zero if POST happened
+    if (result && (result.errorCode === 'AUTH_ERROR' || result.errorCode === 'NOT_CONFIGURED')) {
+      await scheduleRetry(row, 'terminal:' + (result.errorCode || status));
+      return;
+    }
+
+    await scheduleRetry(row, 'dataforseo_status:' + (status || result && result.errorCode || 'unknown'));
+    return;
   }
   if (row.provider_code === 'apify') {
     const data = await fetchApifyStatus(externalId);

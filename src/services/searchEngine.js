@@ -472,6 +472,8 @@ async function executeSearch(input, opts = {}) {
     if (r.runId && !metrics.runId) metrics.runId = r.runId;
     if (r.snapshotId && !metrics.snapshotId) metrics.snapshotId = r.snapshotId;
     if (r.requestSent != null) metrics.requestSent = Boolean(r.requestSent);
+    if (r.pendingRemote != null) metrics.pendingRemote = Boolean(r.pendingRemote);
+    else if (r.metrics && r.metrics.pendingRemote != null) metrics.pendingRemote = Boolean(r.metrics.pendingRemote);
     internalProviders.push({
       code: pr.code,
       status: r.status,
@@ -483,6 +485,7 @@ async function executeSearch(input, opts = {}) {
       errorStage: r.errorStage,
       httpStatus: r.httpStatus,
       requestSent: r.requestSent != null ? Boolean(r.requestSent) : undefined,
+      pendingRemote: metrics.pendingRemote === true,
     });
     for (const item of (r.results || [])) allRaw.push(item);
   }
