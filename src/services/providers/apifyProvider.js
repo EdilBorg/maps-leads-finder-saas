@@ -14,7 +14,8 @@ const {
 const CODE = 'apify';
 const POLL_INTERVAL_MS = 2000;
 const MAX_WAIT_MS = parseInt(process.env.APIFY_MAX_WAIT_MS || '180000', 10) || 180000;
-const MAX_RAW = 200;
+/** Cap per Apify contribution. Global search limit may be up to 500. */
+const MAX_RAW = 500;
 
 function isConfigured() {
   return Boolean(
@@ -28,15 +29,21 @@ function escapeJsonString(s) {
   return JSON.stringify(String(s)).slice(1, -1);
 }
 
+function clampLimit(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(Math.floor(n), MAX_RAW);
+}
+
 function buildActorInput(criteria) {
+  const limit = clampLimit(criteria.limit != null ? criteria.limit : 100);
   if (process.env.APIFY_INPUT_JSON) {
     const raw = process.env.APIFY_INPUT_JSON
       .replace(/\{\{query\}\}/g, escapeJsonString(criteria.query))
       .replace(/\{\{location\}\}/g, escapeJsonString(criteria.location || ''))
-      .replace(/\{\{limit\}\}/g, String(Number(criteria.limit) || 100));
+      .replace(/\{\{limit\}\}/g, String(limit));
     return JSON.parse(raw);
   }
-  const limit = Math.min(Math.max(Number(criteria.limit) || 100, 1), MAX_RAW);
   return {
     searchStringsArray: [String(criteria.query || '').trim()],
     locationQuery: String(criteria.location || '').trim(),
@@ -168,6 +175,31 @@ async function sleep(ms, signal) {
   });
 }
 
+const ABORT_TIMEOUT_MS = 8000;
+
+/**
+ * Best-effort abort of a remote Apify run. Never throws; never blocks longer
+ * than ABORT_TIMEOUT_MS. Does not log or return the token.
+ */
+async function abortRunWithTimeout(base, runId, token) {
+  if (!runId || !token) return { ok: false, reason: 'missing' };
+  try {
+    await withTimeout(
+      (sig) =>
+        fetch(base + '/actor-runs/' + encodeURIComponent(runId) + '/abort', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + token },
+          signal: sig,
+        }),
+      ABORT_TIMEOUT_MS,
+      'apify-abort'
+    );
+    return { ok: true };
+  } catch (_) {
+    return { ok: false, reason: 'timeout_or_error' };
+  }
+}
+
 async function search(criteria, signalOrOpts) {
   let signal = signalOrOpts;
   let onRemoteStarted = null;
@@ -186,15 +218,16 @@ async function search(criteria, signalOrOpts) {
     const startUrl =
       base + '/acts/' + encodeURIComponent(actorId) + '/runs?waitForFinish=0';
     const startRes = await withTimeout(
-      fetch(startUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: 'Bearer ' + token,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(input),
-        signal,
-      }),
+      (sig) =>
+        fetch(startUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer ' + token,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(input),
+          signal: sig,
+        }),
       DEFAULT_TIMEOUT_MS,
       signal
     );
@@ -214,38 +247,95 @@ async function search(criteria, signalOrOpts) {
       });
     }
     if (typeof onRemoteStarted === 'function') {
-      await onRemoteStarted({
-        providerCode: CODE,
-        externalRunId: String(runId),
-        runId: String(runId),
-        metadata: { stage: 'triggered' },
-      });
+      try {
+        await onRemoteStarted({
+          providerCode: CODE,
+          externalRunId: String(runId),
+          runId: String(runId),
+          metadata: { stage: 'triggered' },
+        });
+      } catch (cbErr) {
+        // Persistence failed after the remote run was already started.
+        // Best-effort abort so the run is not left untracked; return explicit error.
+        await abortRunWithTimeout(base, runId, token);
+        return errorResult(CODE, 'REMOTE_PERSIST_FAILED',
+          'Failed to persist Apify run id: ' + ((cbErr && cbErr.message) || 'callback error'), {
+            errorStage: 'persist',
+          });
+      }
     }
     const deadline = Date.now() + MAX_WAIT_MS;
     let status = 'RUNNING';
+    let transientPollFailures = 0;
+    const MAX_TRANSIENT_POLL_FAILURES = 8;
     while (Date.now() < deadline) {
       if (signal && signal.aborted) {
-        try {
-          await fetch(base + '/actor-runs/' + runId + '/abort', {
-            method: 'POST',
-            headers: { Authorization: 'Bearer ' + token },
-          });
-        } catch (_) {}
+        await abortRunWithTimeout(base, runId, token);
         const err = new Error('cancelled');
         err.code = 'CANCELLED';
         throw err;
       }
       await sleep(POLL_INTERVAL_MS, signal);
-      const stRes = await withTimeout(
-        fetch(base + '/actor-runs/' + runId, {
-          headers: { Authorization: 'Bearer ' + token },
-          signal,
-        }),
-        DEFAULT_TIMEOUT_MS,
-        signal
-      );
-      if (!stRes.ok) continue;
-      const stJson = await stRes.json();
+      let stRes;
+      try {
+        stRes = await withTimeout(
+          (sig) =>
+            fetch(base + '/actor-runs/' + runId, {
+              headers: { Authorization: 'Bearer ' + token },
+              signal: sig,
+            }),
+          DEFAULT_TIMEOUT_MS,
+          signal
+        );
+      } catch (pollErr) {
+        if (pollErr && (pollErr.code === 'CANCELLED' || pollErr.name === 'AbortError')) throw pollErr;
+        transientPollFailures += 1;
+        if (transientPollFailures >= MAX_TRANSIENT_POLL_FAILURES) {
+          await abortRunWithTimeout(base, runId, token);
+          return errorResult(CODE, 'TIMEOUT', 'Apify poll failed repeatedly', {
+            errorStage: 'poll',
+          });
+        }
+        continue;
+      }
+      if (!stRes.ok) {
+        if (stRes.status === 401 || stRes.status === 403) {
+          return errorResult(CODE, 'AUTH_ERROR', 'Apify poll auth failed: ' + stRes.status, {
+            errorStage: 'poll',
+            httpStatus: stRes.status,
+          });
+        }
+        if (stRes.status === 404) {
+          return errorResult(CODE, 'HTTP_ERROR', 'Apify run not found during poll', {
+            errorStage: 'poll',
+            httpStatus: 404,
+          });
+        }
+        // 429 / 5xx: limited retries within the global deadline
+        transientPollFailures += 1;
+        if (transientPollFailures >= MAX_TRANSIENT_POLL_FAILURES) {
+          await abortRunWithTimeout(base, runId, token);
+          return errorResult(CODE, 'HTTP_ERROR', 'Apify poll HTTP failures exhausted: ' + stRes.status, {
+            errorStage: 'poll',
+            httpStatus: stRes.status,
+          });
+        }
+        continue;
+      }
+      let stJson;
+      try {
+        stJson = await stRes.json();
+      } catch (_) {
+        transientPollFailures += 1;
+        if (transientPollFailures >= MAX_TRANSIENT_POLL_FAILURES) {
+          await abortRunWithTimeout(base, runId, token);
+          return errorResult(CODE, 'INVALID_RESPONSE', 'Apify poll JSON invalid repeatedly', {
+            errorStage: 'poll',
+          });
+        }
+        continue;
+      }
+      transientPollFailures = 0;
       status = (stJson.data && stJson.data.status) || status;
       if (status === 'SUCCEEDED' || status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
         break;
@@ -253,12 +343,7 @@ async function search(criteria, signalOrOpts) {
     }
     if (status !== 'SUCCEEDED') {
       if (status === 'RUNNING') {
-        try {
-          await fetch(base + '/actor-runs/' + runId + '/abort', {
-            method: 'POST',
-            headers: { Authorization: 'Bearer ' + token },
-          });
-        } catch (_) {}
+        await abortRunWithTimeout(base, runId, token);
         return errorResult(CODE, 'TIMEOUT', 'Apify run timed out', { errorStage: 'poll' });
       }
       return errorResult(CODE, 'PROVIDER_ERROR', 'Apify run status: ' + status, {
@@ -266,10 +351,10 @@ async function search(criteria, signalOrOpts) {
       });
     }
     const dsRes = await withTimeout(
-      fetch(base + '/actor-runs/' + runId + '/dataset/items?clean=true&format=json',
-        {
+      (sig) =>
+        fetch(base + '/actor-runs/' + runId + '/dataset/items?clean=true&format=json', {
           headers: { Authorization: 'Bearer ' + token },
-          signal,
+          signal: sig,
         }),
       DEFAULT_TIMEOUT_MS,
       signal
@@ -301,18 +386,11 @@ async function search(criteria, signalOrOpts) {
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
       if (runId) {
-        try {
-          await fetch(
-            (process.env.APIFY_BASE_URL || 'https://api.apify.com/v2').replace(/\/$/, '') +
-              '/actor-runs/' +
-              runId +
-              '/abort',
-            {
-              method: 'POST',
-              headers: { Authorization: 'Bearer ' + process.env.APIFY_TOKEN },
-            }
-          );
-        } catch (_) {}
+        await abortRunWithTimeout(
+          (process.env.APIFY_BASE_URL || 'https://api.apify.com/v2').replace(/\/$/, ''),
+          runId,
+          process.env.APIFY_TOKEN
+        );
       }
       throw err;
     }
@@ -330,5 +408,7 @@ module.exports = {
   buildActorInput,
   extractPhotoUrl,
   escapeJsonString,
+  clampLimit,
+  abortRunWithTimeout,
   MAX_RAW,
 };

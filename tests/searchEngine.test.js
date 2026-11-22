@@ -41,8 +41,8 @@ describe('provider registry contract', () => {
     assert.deepEqual(MODALITIES.standard.providerCodes, PROVIDER_CODES);
   });
 
-  it('per-provider max limits are 200/200/200', () => {
-    assert.equal(PROVIDER_MAX.apify, 200);
+  it('per-provider max limits allow Apify up to 500', () => {
+    assert.equal(PROVIDER_MAX.apify, 500);
     assert.equal(PROVIDER_MAX.tomtom, 200);
     assert.equal(PROVIDER_MAX.brightdata, 200);
   });
@@ -57,7 +57,7 @@ describe('provider registry contract', () => {
   });
 
   it('providerLimit respects global and per-provider caps', () => {
-    assert.equal(providerLimit('apify', 500), 200);
+    assert.equal(providerLimit('apify', 500), 500);
     assert.equal(providerLimit('brightdata', 500), 200);
     assert.equal(providerLimit('tomtom', 100), 100);
   });

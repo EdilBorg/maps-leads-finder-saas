@@ -8,7 +8,8 @@ const brightdata = require('./providers/brightDataProvider');
 
 const PROVIDER_CODES = Object.freeze(['apify', 'tomtom', 'brightdata']);
 const ALLOWED_LIMITS = Object.freeze([100, 200, 300, 400, 500]);
-const PROVIDER_MAX = Object.freeze({ apify: 200, tomtom: 200, brightdata: 200 });
+/** Per-provider contribution cap. Apify can contribute up to the full global limit. */
+const PROVIDER_MAX = Object.freeze({ apify: 500, tomtom: 200, brightdata: 200 });
 
 function normalizeLimit(value) {
   const n = parseInt(value, 10);
@@ -413,6 +414,22 @@ async function executeSearch(input, opts = {}) {
     location: String(input.location || '').trim(),
     filters: input.filters || {},
   };
+  // Propagate optional geographic context only when present and valid. Never invent.
+  const { toIso2Country } = require('./providers/countryCodes');
+  const country = toIso2Country(input.country);
+  if (country) baseCriteria.country = country;
+  const latN = input.lat != null ? Number(input.lat) : NaN;
+  const lngN =
+    input.lng != null ? Number(input.lng)
+      : input.long != null ? Number(input.long)
+        : NaN;
+  if (Number.isFinite(latN) && Number.isFinite(lngN) && latN >= -90 && latN <= 90 && lngN >= -180 && lngN <= 180) {
+    baseCriteria.lat = latN;
+    baseCriteria.lng = lngN;
+  }
+  if (input.radius != null && Number.isFinite(Number(input.radius)) && Number(input.radius) > 0) {
+    baseCriteria.radius = Number(input.radius);
+  }
   if (!baseCriteria.query) { const err = new Error('Categoria/query obrigatória.'); err.code = 'VALIDATION'; throw err; }
   if (!baseCriteria.location) { const err = new Error('Localização obrigatória.'); err.code = 'VALIDATION'; throw err; }
   if (signal && signal.aborted) {

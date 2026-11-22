@@ -20,11 +20,13 @@ describe('apifyProvider unit', () => {
     assert.equal(body.maxCrawledPlacesPerSearch, 10);
   });
 
-  it('buildActorInput caps limit at 200', () => {
+  it('buildActorInput caps limit at MAX_RAW (500)', () => {
     delete process.env.APIFY_INPUT_JSON;
-    const body = buildActorInput({ query: 'loja', location: 'Beira', limit: 500 });
-    assert.equal(body.maxCrawledPlacesPerSearch, 200);
-    assert.equal(MAX_RAW, 200);
+    const body = buildActorInput({ query: 'loja', location: 'Beira', limit: 800 });
+    assert.equal(body.maxCrawledPlacesPerSearch, 500);
+    assert.equal(MAX_RAW, 500);
+    const body2 = buildActorInput({ query: 'loja', location: 'Beira', limit: 200 });
+    assert.equal(body2.maxCrawledPlacesPerSearch, 200);
   });
 
   it('buildActorInput JSON template with special chars stays valid', () => {
@@ -71,5 +73,33 @@ describe('apifyProvider unit', () => {
     assert.equal(m.address, null);
     assert.equal(m.rating, null);
     assert.equal(m.sourceProvider, 'apify');
+  });
+});
+
+describe('apifyProvider — limit clamp including custom template', () => {
+  const { buildActorInput, clampLimit, MAX_RAW } = require('../src/services/providers/apifyProvider');
+
+  it('clampLimit never exceeds MAX_RAW', () => {
+    assert.equal(clampLimit(500), 500);
+    assert.equal(clampLimit(501), 500);
+    assert.equal(clampLimit(800), 500);
+    assert.equal(clampLimit(0), 1);
+    assert.equal(clampLimit(-5), 1);
+    assert.equal(MAX_RAW, 500);
+  });
+
+  it('default input respects clamp', () => {
+    delete process.env.APIFY_INPUT_JSON;
+    assert.equal(buildActorInput({ query: 'q', location: 'l', limit: 500 }).maxCrawledPlacesPerSearch, 500);
+    assert.equal(buildActorInput({ query: 'q', location: 'l', limit: 501 }).maxCrawledPlacesPerSearch, 500);
+    assert.equal(buildActorInput({ query: 'q', location: 'l', limit: 800 }).maxCrawledPlacesPerSearch, 500);
+  });
+
+  it('custom APIFY_INPUT_JSON template also clamps {{limit}}', () => {
+    process.env.APIFY_INPUT_JSON = '{"q":"{{query}}","n":{{limit}}}';
+    assert.equal(buildActorInput({ query: 'x', location: 'y', limit: 500 }).n, 500);
+    assert.equal(buildActorInput({ query: 'x', location: 'y', limit: 501 }).n, 500);
+    assert.equal(buildActorInput({ query: 'x', location: 'y', limit: 800 }).n, 500);
+    delete process.env.APIFY_INPUT_JSON;
   });
 });

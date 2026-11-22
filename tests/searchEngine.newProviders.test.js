@@ -17,11 +17,11 @@ describe('new search engine', () => {
     assert.deepEqual(PROVIDER_CODES, ['apify', 'tomtom', 'brightdata']);
   });
 
-  it('provider max limits are 200/200/200', () => {
-    assert.equal(PROVIDER_MAX.apify, 200);
+  it('provider max limits allow Apify up to global limit', () => {
+    assert.equal(PROVIDER_MAX.apify, 500);
     assert.equal(PROVIDER_MAX.tomtom, 200);
     assert.equal(PROVIDER_MAX.brightdata, 200);
-    assert.equal(providerLimit('apify', 500), 200);
+    assert.equal(providerLimit('apify', 500), 500);
     assert.equal(providerLimit('tomtom', 300), 200);
     assert.equal(providerLimit('brightdata', 500), 200);
     assert.equal(providerLimit('brightdata', 100), 100);
@@ -230,7 +230,7 @@ describe('new search engine', () => {
       },
     };
     await executeSearch({ query: 'q', location: 'l', limit: 500, providers });
-    assert.equal(seen.apify, 200);
+    assert.equal(seen.apify, 500);
     assert.equal(seen.tomtom, 200);
     assert.equal(seen.brightdata, 200);
   });
