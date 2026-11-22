@@ -1,7 +1,7 @@
 /**
  * Plan catalogue and per-provider limits.
  */
-const PROVIDER_CODES = Object.freeze(['apify', 'brightdata', 'tomtom']);
+const PROVIDER_CODES = Object.freeze(['dataforseo', 'tomtom', 'apify', 'brightdata']);
 function getPool() { return require('../db/pool').getPool(); }
 
 async function listPlans({ activeOnly = true } = {}) {

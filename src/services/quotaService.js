@@ -18,9 +18,11 @@ const { PROVIDER_MAX } = require('./searchEngine');
 
 const TRIAL_MAX_LEADS = 200;
 const DEFAULT_PAID_LIMITS = Object.freeze({
+  dataforseo: { maxResults: null, maxCostMicroUsd: null, maxApiCalls: null },
+  tomtom: { maxResults: null, maxCostMicroUsd: null, maxApiCalls: null },
+  // historical
   apify: { maxResults: 1000, maxCostMicroUsd: null },
   brightdata: { maxResults: 1500, maxCostMicroUsd: null },
-  tomtom: { maxResults: null, maxCostMicroUsd: null, maxApiCalls: null },
 });
 
 function getPool() {
@@ -32,11 +34,9 @@ function getPool() {
  * Bright Data may perform geocoding (1 call). Used by both trial and paid paths.
  */
 async function reserveTrialGlobalTomTom(userId, searchId, providerCodes) {
+  // Discover only: at most 1 call per search. Geocoding does not consume Discover quota.
   const needsTomTom = providerCodes.includes('tomtom');
-  const needsGeo = providerCodes.includes('brightdata');
-  let estCalls = 0;
-  if (needsTomTom) estCalls += Math.max(3, Math.ceil(TRIAL_MAX_LEADS / 100) + 1);
-  if (needsGeo) estCalls += 1;
+  let estCalls = needsTomTom ? 1 : 0;
   if (estCalls === 0) return null;
 
   const globalReserve = await providerUsageService.reserveGlobalTomTomCalls(estCalls, {
@@ -58,7 +58,7 @@ async function authorizeAndReserve(client, {
   userId,
   searchId = null,
   requestedLimit = 100,
-  providerCodes = ['apify', 'brightdata', 'tomtom'],
+  providerCodes = ['dataforseo', 'tomtom'],
 }) {
   const hold = await acquireFreeSearchHold(client, userId, searchId);
   if (hold.allowed) {
@@ -370,7 +370,7 @@ async function markPendingRemote(userId, searchId, providerCode, reservation, me
     err.code = 'PENDING_REMOTE_INVALID';
     throw err;
   }
-  if (providerCode !== 'apify' && providerCode !== 'brightdata') return null;
+  if (providerCode !== 'apify' && providerCode !== 'brightdata' && providerCode !== 'dataforseo') return null;
 
   const externalRunId = metrics.externalRunId || metrics.runId || metrics.snapshotId || null;
   if (!externalRunId) {
@@ -423,10 +423,15 @@ async function markPendingRemote(userId, searchId, providerCode, reservation, me
 
 async function commitTrialGlobalTomTom(userId, searchId, globalReserve, metricsByProvider) {
   if (!globalReserve || globalReserve.unlimited || !globalReserve.periodStart) return;
+  // Discover quota only — ignore geocodeCalls
   let actual = 0;
-  for (const m of Object.values(metricsByProvider || {})) {
-    if (m && Number.isFinite(m.apiCalls)) actual += m.apiCalls;
-    if (m && Number.isFinite(m.geocodeCalls)) actual += m.geocodeCalls;
+  const tomtomMetrics = metricsByProvider && metricsByProvider.tomtom;
+  if (tomtomMetrics && Number.isFinite(tomtomMetrics.apiCalls)) {
+    actual = Math.min(1, Math.max(0, Number(tomtomMetrics.apiCalls)));
+  }
+  // Conservative: if request was sent but status error/timeout, still count 1
+  if (actual === 0 && tomtomMetrics && tomtomMetrics.requestSent) {
+    actual = 1;
   }
   await providerUsageService.commitGlobalTomTomCalls(
     globalReserve.periodStart,

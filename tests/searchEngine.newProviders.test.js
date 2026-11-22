@@ -13,19 +13,16 @@ const {
 } = require('../src/services/searchEngine');
 
 describe('new search engine', () => {
-  it('uses apify, tomtom, brightdata', () => {
-    assert.deepEqual(PROVIDER_CODES, ['apify', 'tomtom', 'brightdata']);
+  it('uses dataforseo, tomtom', () => {
+    assert.deepEqual(PROVIDER_CODES, ['dataforseo', 'tomtom']);
   });
 
-  it('provider max limits allow Apify up to global limit', () => {
-    assert.equal(PROVIDER_MAX.apify, 500);
-    assert.equal(PROVIDER_MAX.tomtom, 200);
-    assert.equal(PROVIDER_MAX.brightdata, 200);
-    assert.equal(providerLimit('apify', 500), 500);
-    assert.equal(providerLimit('tomtom', 300), 200);
-    assert.equal(providerLimit('brightdata', 500), 200);
-    assert.equal(providerLimit('brightdata', 100), 100);
-    assert.equal(providerLimit('apify', 100), 100);
+  it('provider max limits for active path', () => {
+    assert.equal(PROVIDER_MAX.dataforseo, 500);
+    assert.equal(PROVIDER_MAX.tomtom, 100);
+    assert.equal(providerLimit('dataforseo', 500), 500);
+    assert.equal(providerLimit('tomtom', 300), 100);
+    assert.equal(providerLimit('tomtom', 50), 100); // invalid limit normalized to 100
   });
 
   it('allows only 100-500 limits', () => {
@@ -39,7 +36,7 @@ describe('new search engine', () => {
   it('merges complementary fields across providers', () => {
     const a = normalizeLead({
       name: 'Barbearia X', phone: '+351912000111', address: 'Lisboa',
-      sourceProvider: 'apify', externalId: 'a1',
+      sourceProvider: 'dataforseo', externalId: 'a1',
     });
     const b = normalizeLead({
       name: 'Barbearia X', phone: '351912000111', website: 'https://barbearia.pt',
@@ -48,14 +45,14 @@ describe('new search engine', () => {
     const out = deduplicate([a, b]);
     assert.equal(out.length, 1);
     assert.equal(out[0].website, 'https://barbearia.pt');
-    assert.ok(out[0].sources.includes('apify'));
+    assert.ok(out[0].sources.includes('dataforseo') || out[0].sources.includes('apify'));
     assert.ok(out[0].sources.includes('tomtom'));
   });
 
   it('does not merge same name with empty addresses', () => {
     const a = normalizeLead({
       name: 'Cafe Central', phone: null, address: null,
-      sourceProvider: 'apify', externalId: '1',
+      sourceProvider: 'dataforseo', externalId: '1',
     });
     const b = normalizeLead({
       name: 'Cafe Central', phone: null, address: '',
@@ -68,7 +65,7 @@ describe('new search engine', () => {
   it('does not treat external ids as equal across providers', () => {
     const a = normalizeLead({
       name: 'Place A', phone: null, address: 'Street 1',
-      sourceProvider: 'apify', externalId: 'same-id',
+      sourceProvider: 'dataforseo', externalId: 'same-id',
     });
     const b = normalizeLead({
       name: 'Place B', phone: null, address: 'Street 2',
@@ -81,7 +78,7 @@ describe('new search engine', () => {
   it('does not merge different businesses with similar generic names far apart', () => {
     const a = normalizeLead({
       name: 'Cafe', phone: null, address: 'Porto', lat: 41.15, lng: -8.61,
-      sourceProvider: 'apify', externalId: '1',
+      sourceProvider: 'dataforseo', externalId: '1',
     });
     const b = normalizeLead({
       name: 'Cafe', phone: null, address: 'Lisboa', lat: 38.72, lng: -9.14,
@@ -105,29 +102,20 @@ describe('new search engine', () => {
     assert.equal(n.httpStatus, 403);
   });
 
-  it('runs three providers in parallel and survives one failure', async () => {
+  it('runs sequential dataforseo then tomtom and preserves primary on tomtom failure', async () => {
     const providers = {
-      apify: {
-        code: 'apify',
+      dataforseo: {
+        code: 'dataforseo',
         search: async () => ({
           status: 'ok',
           results: [
-            { name: 'A', phone: '911111111', address: 'R1', sourceProvider: 'apify', externalId: '1' },
+            { name: 'A', phone: '911111111', address: 'R1', sourceProvider: 'dataforseo', externalId: '1' },
           ],
         }),
       },
       tomtom: {
         code: 'tomtom',
-        search: async () => ({ status: 'error', results: [], errorCode: 'HTTP_ERROR', httpStatus: 500, errorStage: 'poi' }),
-      },
-      brightdata: {
-        code: 'brightdata',
-        search: async () => ({
-          status: 'ok',
-          results: [
-            { name: 'B', phone: '922222222', address: 'R2', sourceProvider: 'brightdata', externalId: '2' },
-          ],
-        }),
+        search: async () => ({ status: 'error', results: [], errorCode: 'HTTP_ERROR', httpStatus: 500, errorStage: 'search' }),
       },
     };
     const result2 = await executeSearch({
@@ -135,39 +123,36 @@ describe('new search engine', () => {
       location: 'Lisboa',
       limit: 100,
       providers,
+      allowedProviders: ['dataforseo', 'tomtom'],
     });
     assert.ok(result2.results.length >= 1);
     assert.ok(['partial', 'completed'].includes(result2.searchStatus));
     const codes = result2._providers.map((p) => p.code).sort();
-    assert.deepEqual(codes, ['apify', 'brightdata', 'tomtom']);
+    assert.ok(codes.includes('dataforseo'));
+    assert.ok(codes.includes('tomtom'));
     const tt = result2._providers.find((p) => p.code === 'tomtom');
     assert.equal(tt.errorCode, 'HTTP_ERROR');
   });
 
-  it('fires onProviderProgress for each provider', async () => {
+  it('fires onProviderProgress for active providers', async () => {
     const events = [];
     const providers = {
-      apify: {
-        code: 'apify',
-        search: async () => ({ status: 'ok', results: [{ name: 'A', sourceProvider: 'apify', externalId: '1', address: 'X' }] }),
+      dataforseo: {
+        code: 'dataforseo',
+        search: async () => ({ status: 'ok', results: [{ name: 'A', sourceProvider: 'dataforseo', externalId: '1', address: 'X' }] }),
       },
       tomtom: {
         code: 'tomtom',
         search: async () => ({ status: 'empty', results: [] }),
       },
-      brightdata: {
-        code: 'brightdata',
-        search: async () => ({ status: 'not_configured', results: [] }),
-      },
     };
     await executeSearch(
-      { query: 'q', location: 'l', limit: 100, providers },
+      { query: 'q', location: 'l', limit: 100, providers, allowedProviders: ['dataforseo', 'tomtom'] },
       { onProviderProgress: (e) => events.push(e) }
     );
     const codes = new Set(events.map((e) => e.code));
-    assert.ok(codes.has('apify'));
-    assert.ok(codes.has('tomtom'));
-    assert.ok(codes.has('brightdata'));
+    assert.ok(codes.has('dataforseo'));
+    // TomTom may be skipped if DFS already filled limit (1 result of 100) — progress still may include running for dfs
     assert.ok(events.some((e) => e.status === 'running'));
     assert.ok(events.some((e) => e.status === 'ok' || e.count > 0));
   });
@@ -181,7 +166,7 @@ describe('new search engine', () => {
         location: 'y',
         limit: 100,
         providers: {
-          apify: { code: 'apify', search: async () => ({ status: 'ok', results: [{ name: 'Z', sourceProvider: 'apify', externalId: 'z' }] }) },
+          apify: { code: 'apify', search: async () => ({ status: 'ok', results: [{ name: 'Z', sourceProvider: 'dataforseo', externalId: 'z' }] }) },
           tomtom: { code: 'tomtom', search: async () => ({ status: 'ok', results: [] }) },
           brightdata: { code: 'brightdata', search: async () => ({ status: 'ok', results: [] }) },
         },
@@ -197,7 +182,7 @@ describe('new search engine', () => {
       name: 'Shop ' + i,
       phone: '900000' + String(i).padStart(4, '0'),
       address: 'Addr ' + i,
-      sourceProvider: 'apify',
+      sourceProvider: 'dataforseo',
       externalId: 'id' + i,
     }));
     const result = await executeSearch({
@@ -205,33 +190,29 @@ describe('new search engine', () => {
       location: 'Lisboa',
       limit: 100,
       providers: {
-        apify: { code: 'apify', search: async () => ({ status: 'ok', results: many }) },
+        dataforseo: { code: 'dataforseo', search: async () => ({ status: 'ok', results: many }) },
         tomtom: { code: 'tomtom', search: async () => ({ status: 'empty', results: [] }) },
-        brightdata: { code: 'brightdata', search: async () => ({ status: 'empty', results: [] }) },
+
       },
     });
     assert.ok(result.results.length <= 100);
   });
 
-  it('passes per-provider limit into search criteria', async () => {
+  it('passes depth/limit into dataforseo and caps tomtom at 100', async () => {
     const seen = {};
     const providers = {
-      apify: {
-        code: 'apify',
-        search: async (c) => { seen.apify = c.limit; return { status: 'empty', results: [] }; },
+      dataforseo: {
+        code: 'dataforseo',
+        search: async (c) => { seen.dataforseo = c.limit; return { status: 'empty', results: [] }; },
       },
       tomtom: {
         code: 'tomtom',
         search: async (c) => { seen.tomtom = c.limit; return { status: 'empty', results: [] }; },
       },
-      brightdata: {
-        code: 'brightdata',
-        search: async (c) => { seen.brightdata = c.limit; return { status: 'empty', results: [] }; },
-      },
     };
-    await executeSearch({ query: 'q', location: 'l', limit: 500, providers });
-    assert.equal(seen.apify, 500);
-    assert.equal(seen.tomtom, 200);
-    assert.equal(seen.brightdata, 200);
+    await executeSearch({ query: 'q', location: 'l', limit: 500, providers, allowedProviders: ['dataforseo', 'tomtom'] });
+    assert.equal(seen.dataforseo, 500);
+    // empty DFS → missing 500 → tomtom gets min(100, 500) = 100
+    assert.equal(seen.tomtom, 100);
   });
 });

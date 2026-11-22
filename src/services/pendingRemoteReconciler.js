@@ -226,6 +226,11 @@ async function processRow(row) {
     return;
   }
 
+  if (row.provider_code === 'dataforseo') {
+    const dfs = require('./providers/dataForSeoProvider');
+    const result = await dfs.fetchExistingTask(row.external_run_id, null);
+    return result;
+  }
   if (row.provider_code === 'apify') {
     const data = await fetchApifyStatus(externalId);
     const status = String(data.status || '').toUpperCase();

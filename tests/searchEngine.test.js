@@ -21,16 +21,16 @@ const {
 } = require('../src/services/searchEngine');
 
 describe('provider registry contract', () => {
-  it('PROVIDER_CODES are apify, tomtom, brightdata only', () => {
-    assert.deepEqual(PROVIDER_CODES, ['apify', 'tomtom', 'brightdata']);
+  it('PROVIDER_CODES are dataforseo, tomtom (active)', () => {
+    assert.deepEqual(PROVIDER_CODES, ['dataforseo', 'tomtom']);
   });
 
-  it('providersForModality returns the three current providers', () => {
-    assert.deepEqual(providersForModality('standard'), ['apify', 'tomtom', 'brightdata']);
-    assert.deepEqual(providersForModality('anything'), ['apify', 'tomtom', 'brightdata']);
+  it('providersForModality returns active providers', () => {
+    assert.deepEqual(providersForModality('standard'), ['dataforseo', 'tomtom']);
+    assert.deepEqual(providersForModality('anything'), ['dataforseo', 'tomtom']);
   });
 
-  it('resolveModality returns standard with three providers', () => {
+  it('resolveModality returns standard with active providers', () => {
     const m = resolveModality();
     assert.equal(m.id, 'standard');
     assert.deepEqual(m.providerCodes, PROVIDER_CODES);
@@ -41,9 +41,11 @@ describe('provider registry contract', () => {
     assert.deepEqual(MODALITIES.standard.providerCodes, PROVIDER_CODES);
   });
 
-  it('per-provider max limits allow Apify up to 500', () => {
+  it('per-provider max limits for active providers', () => {
+    assert.equal(PROVIDER_MAX.dataforseo, 500);
+    assert.equal(PROVIDER_MAX.tomtom, 100);
+    // historical codes retained for recovery
     assert.equal(PROVIDER_MAX.apify, 500);
-    assert.equal(PROVIDER_MAX.tomtom, 200);
     assert.equal(PROVIDER_MAX.brightdata, 200);
   });
 
@@ -57,9 +59,10 @@ describe('provider registry contract', () => {
   });
 
   it('providerLimit respects global and per-provider caps', () => {
-    assert.equal(providerLimit('apify', 500), 500);
-    assert.equal(providerLimit('brightdata', 500), 200);
+    assert.equal(providerLimit('dataforseo', 500), 500);
+    assert.equal(providerLimit('tomtom', 500), 100);
     assert.equal(providerLimit('tomtom', 100), 100);
+    assert.equal(providerLimit('apify', 500), 500); // historical
   });
 });
 

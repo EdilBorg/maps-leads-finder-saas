@@ -349,12 +349,16 @@ async function getTomTomGlobalConfig() {
       max = n > 0 ? n : null; // 0 or negative treated as unlimited? No: 0 = zero allowance
       if (n === 0) max = 0;
     }
+    const periodMode = (v.period_mode === 'calendar_month_utc') ? 'calendar_month_utc'
+      : (v.period_mode === 'fixed_days') ? 'fixed_days'
+        : (max != null ? 'calendar_month_utc' : 'fixed_days');
     const periodDaysRaw = v.period_days != null ? Number(v.period_days) : 30;
     const periodDays = Number.isFinite(periodDaysRaw) && periodDaysRaw > 0 && periodDaysRaw <= 366
       ? Math.floor(periodDaysRaw) : 30;
     return {
       maxCallsPerPeriod: max,
-      periodDays,
+      periodDays: periodMode === 'calendar_month_utc' ? null : periodDays,
+      periodMode,
     };
   } catch (err) {
     // DB unavailable / query error → fail closed (deny further calls)
@@ -362,8 +366,22 @@ async function getTomTomGlobalConfig() {
   }
 }
 
-function globalPeriodWindow(periodDays, now = new Date()) {
-  const dayMs = periodDays * 24 * 60 * 60 * 1000;
+/**
+ * Global quota period window.
+ * Prefer calendar month in UTC when period_mode is calendar_month_utc (or periodDays is null).
+ * Fallback: fixed-length windows from Unix epoch for legacy period_days config.
+ */
+function globalPeriodWindow(periodDays, now = new Date(), periodMode = null) {
+  const mode = periodMode || (periodDays == null || periodDays === 0 ? 'calendar_month_utc' : 'fixed_days');
+  if (mode === 'calendar_month_utc') {
+    const y = now.getUTCFullYear();
+    const m = now.getUTCMonth();
+    const periodStart = new Date(Date.UTC(y, m, 1, 0, 0, 0, 0)).toISOString();
+    const periodEnd = new Date(Date.UTC(y, m + 1, 1, 0, 0, 0, 0)).toISOString();
+    return { periodStart, periodEnd };
+  }
+  const days = Number(periodDays) > 0 ? Number(periodDays) : 30;
+  const dayMs = days * 24 * 60 * 60 * 1000;
   const startMs = Math.floor(now.getTime() / dayMs) * dayMs;
   return {
     periodStart: new Date(startMs).toISOString(),
@@ -389,7 +407,7 @@ async function reserveGlobalTomTomCalls(calls, { searchId = null, userId = null,
     err.code = 'VALIDATION';
     throw err;
   }
-  const window = globalPeriodWindow(cfg.periodDays);
+  const window = globalPeriodWindow(cfg.periodDays, new Date(), cfg.periodMode || null);
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');

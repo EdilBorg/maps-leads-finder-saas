@@ -1,15 +1,20 @@
 /**
- * Search engine: parallel providers, normalize, dedupe, filters, limits.
- * Providers: apify, tomtom, brightdata only.
+ * Search engine: sequential providers (DataForSEO primary → TomTom Discover complementary).
+ * Apify / Bright Data remain on disk for historical recovery only — not used for new searches.
  */
-const apify = require('./providers/apifyProvider');
+const dataforseo = require('./providers/dataForSeoProvider');
 const tomtom = require('./providers/tomtomProvider');
+// Historical providers kept available for recovery/reconciler only
+const apify = require('./providers/apifyProvider');
 const brightdata = require('./providers/brightDataProvider');
 
-const PROVIDER_CODES = Object.freeze(['apify', 'tomtom', 'brightdata']);
+/** Active providers for new searches (order matters: primary first). */
+const PROVIDER_CODES = Object.freeze(['dataforseo', 'tomtom']);
+/** All known codes including historical (diagnostics / recovery). */
+const ALL_PROVIDER_CODES = Object.freeze(['dataforseo', 'tomtom', 'apify', 'brightdata']);
 const ALLOWED_LIMITS = Object.freeze([100, 200, 300, 400, 500]);
-/** Per-provider contribution cap. Apify can contribute up to the full global limit. */
-const PROVIDER_MAX = Object.freeze({ apify: 500, tomtom: 200, brightdata: 200 });
+/** Per-provider contribution cap for active path. */
+const PROVIDER_MAX = Object.freeze({ dataforseo: 500, tomtom: 100, apify: 500, brightdata: 200 });
 
 function normalizeLimit(value) {
   const n = parseInt(value, 10);
@@ -400,8 +405,10 @@ function classifySearchOutcome(statuses, hasResults) {
 }
 
 const DEFAULT_PROVIDERS = {
-  apify,
+  dataforseo,
   tomtom,
+  // historical (not selected for new searches unless explicitly injected)
+  apify,
   brightdata,
 };
 
@@ -437,63 +444,24 @@ async function executeSearch(input, opts = {}) {
       totals: { raw: 0, normalized: 0, afterDedup: 0, afterFilters: 0, returned: 0, limit: globalLimit }, results: [], cancelled: true };
   }
   const registry = { ...DEFAULT_PROVIDERS, ...(input.providers || {}) };
+  // Active allow-list: only dataforseo + tomtom for new searches.
+  // Historical providers (apify/brightdata) are never selected unless injected via input.providers for recovery.
   const allowList = Array.isArray(input.allowedProviders) && input.allowedProviders.length
-    ? input.allowedProviders.map(String)
+    ? input.allowedProviders.map(String).filter((c) => PROVIDER_CODES.includes(c) || c === 'dataforseo' || c === 'tomtom')
     : PROVIDER_CODES.slice();
-  const selected = PROVIDER_CODES.filter((code) => allowList.includes(code)).map((code) => {
-    const p = registry[code];
-    return (!p || typeof p.search !== 'function')
-      ? { code, search: null }
-      : { code, search: p.search.bind(p) };
-  });
-  const skippedQuota = PROVIDER_CODES.filter((code) => !allowList.includes(code)).map((code) => ({
+  // Force active set intersection with PROVIDER_CODES (excludes apify/brightdata from new runs)
+  const activeAllow = PROVIDER_CODES.filter((code) => allowList.includes(code));
+  const skippedQuota = PROVIDER_CODES.filter((code) => !activeAllow.includes(code)).map((code) => ({
     code,
     status: 'skipped_quota',
     count: 0,
     metrics: { rawCount: 0, apiCalls: 0, geocodeCalls: 0 },
   }));
   const started = Date.now();
-
-  const providerResults = await Promise.all(
-    selected.map(async (p) => {
-      if (onProviderProgress) {
-        try { onProviderProgress({ code: p.code, status: 'running', count: 0 }); } catch (_) {}
-      }
-      const criteria = { ...baseCriteria, limit: providerLimit(p.code, globalLimit) };
-      const providerCriteria = { ...criteria };
-      if (Array.isArray(input.geoBlockedProviders) && input.geoBlockedProviders.includes(p.code)) {
-        providerCriteria.geoBlocked = true;
-      }
-      const out = await runProviderSafe(p, providerCriteria, signal, {
-        onRemoteStarted: opts.onRemoteStarted || null,
-      });
-      if (onProviderProgress) {
-        try {
-          onProviderProgress({
-            code: out.code,
-            status: out.result.status,
-            count: Array.isArray(out.result.results) ? out.result.results.length : 0,
-            errorCode: out.result.errorCode || null,
-          });
-        } catch (_) {}
-      }
-      return out;
-    })
-  );
-
-  if (signal && signal.aborted) {
-    return { outcome: 'error', searchStatus: 'cancelled',
-      _providers: providerResults.map((pr) => ({
-        code: pr.code, status: 'cancelled', count: 0, errorCode: 'CANCELLED',
-      })),
-      durationMs: Date.now() - started,
-      totals: { raw: 0, normalized: 0, afterDedup: 0, afterFilters: 0, returned: 0, limit: globalLimit },
-      results: [], cancelled: true };
-  }
-
-  const allRaw = [];
   const internalProviders = skippedQuota.slice();
-  for (const pr of providerResults) {
+  const allRaw = [];
+
+  function pushProviderResult(pr) {
     const r = pr.result;
     const metrics = r.metrics || {
       rawCount: Array.isArray(r.results) ? r.results.length : 0,
@@ -503,6 +471,7 @@ async function executeSearch(input, opts = {}) {
     if (r.externalRunId && !metrics.externalRunId) metrics.externalRunId = r.externalRunId;
     if (r.runId && !metrics.runId) metrics.runId = r.runId;
     if (r.snapshotId && !metrics.snapshotId) metrics.snapshotId = r.snapshotId;
+    if (r.requestSent != null) metrics.requestSent = Boolean(r.requestSent);
     internalProviders.push({
       code: pr.code,
       status: r.status,
@@ -513,10 +482,146 @@ async function executeSearch(input, opts = {}) {
       errorMessage: r.errorMessage,
       errorStage: r.errorStage,
       httpStatus: r.httpStatus,
+      requestSent: r.requestSent != null ? Boolean(r.requestSent) : undefined,
     });
     for (const item of (r.results || [])) allRaw.push(item);
   }
 
+  // ---- 1) DataForSEO (primary) ----
+  let dataforseoOk = false;
+  let dataforseoUniqueCount = 0;
+  let dataforseoLeads = [];
+
+  if (activeAllow.includes('dataforseo')) {
+    const p = registry.dataforseo;
+    const bound = (!p || typeof p.search !== 'function')
+      ? { code: 'dataforseo', search: null }
+      : { code: 'dataforseo', search: p.search.bind(p) };
+    if (onProviderProgress) {
+      try { onProviderProgress({ code: 'dataforseo', status: 'running', count: 0 }); } catch (_) {}
+    }
+    const dfsCriteria = {
+      ...baseCriteria,
+      limit: globalLimit, // depth matches requested limit
+      searchId: input.searchId || null,
+    };
+    if (Array.isArray(input.geoBlockedProviders) && input.geoBlockedProviders.includes('dataforseo')) {
+      dfsCriteria.geoBlocked = true;
+    }
+    if (input.existingTaskId) dfsCriteria.existingTaskId = input.existingTaskId;
+    const out = await runProviderSafe(bound, dfsCriteria, signal, {
+      onRemoteStarted: opts.onRemoteStarted || null,
+    });
+    if (onProviderProgress) {
+      try {
+        onProviderProgress({
+          code: out.code,
+          status: out.result.status,
+          count: Array.isArray(out.result.results) ? out.result.results.length : 0,
+          errorCode: out.result.errorCode || null,
+        });
+      } catch (_) {}
+    }
+    pushProviderResult(out);
+
+    if (signal && signal.aborted) {
+      return {
+        outcome: 'error', searchStatus: 'cancelled',
+        _providers: internalProviders.map((pr) => ({ ...pr, status: pr.status === 'running' ? 'cancelled' : pr.status })),
+        durationMs: Date.now() - started,
+        totals: { raw: 0, normalized: 0, afterDedup: 0, afterFilters: 0, returned: 0, limit: globalLimit },
+        results: [], cancelled: true,
+      };
+    }
+
+    const dfsStatus = out.result.status;
+    if (dfsStatus === 'ok' || dfsStatus === 'empty') {
+      dataforseoOk = true;
+      const normalizedDfs = [];
+      for (const item of (out.result.results || [])) {
+        const n = normalizeLead(item);
+        if (n) normalizedDfs.push(n);
+      }
+      dataforseoLeads = deduplicate(normalizedDfs);
+      dataforseoUniqueCount = applyFilters(dataforseoLeads, baseCriteria.filters).length;
+    } else {
+      // Hard failure of primary: do NOT call TomTom as fallback
+      dataforseoOk = false;
+    }
+  } else {
+    internalProviders.push({
+      code: 'dataforseo',
+      status: 'skipped_quota',
+      count: 0,
+      metrics: { rawCount: 0, apiCalls: 0, geocodeCalls: 0 },
+    });
+  }
+
+  // ---- 2) TomTom complementary only if primary succeeded and still missing results ----
+  const missing = globalLimit - dataforseoUniqueCount;
+  const shouldCallTomTom =
+    dataforseoOk &&
+    missing > 0 &&
+    activeAllow.includes('tomtom');
+
+  if (shouldCallTomTom) {
+    const p = registry.tomtom;
+    const bound = (!p || typeof p.search !== 'function')
+      ? { code: 'tomtom', search: null }
+      : { code: 'tomtom', search: p.search.bind(p) };
+    if (onProviderProgress) {
+      try { onProviderProgress({ code: 'tomtom', status: 'running', count: 0 }); } catch (_) {}
+    }
+    const tomtomLimit = Math.min(100, missing);
+    const tomtomCriteria = {
+      ...baseCriteria,
+      limit: tomtomLimit,
+    };
+    if (Array.isArray(input.geoBlockedProviders) && input.geoBlockedProviders.includes('tomtom')) {
+      tomtomCriteria.geoBlocked = true;
+    }
+    const out = await runProviderSafe(bound, tomtomCriteria, signal, {
+      onRemoteStarted: opts.onRemoteStarted || null,
+    });
+    if (onProviderProgress) {
+      try {
+        onProviderProgress({
+          code: out.code,
+          status: out.result.status,
+          count: Array.isArray(out.result.results) ? out.result.results.length : 0,
+          errorCode: out.result.errorCode || null,
+        });
+      } catch (_) {}
+    }
+    pushProviderResult(out);
+  } else if (activeAllow.includes('tomtom')) {
+    // Explicitly record that TomTom was not needed or blocked by primary failure / quota skip
+    const reason = !dataforseoOk
+      ? 'skipped_primary_failed'
+      : missing <= 0
+        ? 'skipped_sufficient'
+        : 'skipped_quota';
+    if (!internalProviders.some((p) => p.code === 'tomtom')) {
+      internalProviders.push({
+        code: 'tomtom',
+        status: reason,
+        count: 0,
+        metrics: { rawCount: 0, apiCalls: 0, geocodeCalls: 0 },
+      });
+    }
+  }
+
+  if (signal && signal.aborted) {
+    return {
+      outcome: 'error', searchStatus: 'cancelled',
+      _providers: internalProviders,
+      durationMs: Date.now() - started,
+      totals: { raw: 0, normalized: 0, afterDedup: 0, afterFilters: 0, returned: 0, limit: globalLimit },
+      results: [], cancelled: true,
+    };
+  }
+
+  // Combined normalize → dedupe → filters → limit
   const normalized = [];
   for (const item of allRaw) {
     const n = normalizeLead(item);
@@ -529,10 +634,22 @@ async function executeSearch(input, opts = {}) {
   const classified = classifySearchOutcome(statuses, limited.length > 0);
 
   return {
-    outcome: classified.outcome, searchStatus: classified.searchStatus, _providers: internalProviders,
+    outcome: classified.outcome,
+    searchStatus: classified.searchStatus,
+    _providers: internalProviders,
     durationMs: Date.now() - started,
-    totals: { raw: allRaw.length, normalized: normalized.length, afterDedup: afterDedup.length, afterFilters: afterFilters.length, returned: limited.length, limit: globalLimit },
-    results: limited, cancelled: false,
+    totals: {
+      raw: allRaw.length,
+      normalized: normalized.length,
+      afterDedup: afterDedup.length,
+      afterFilters: afterFilters.length,
+      returned: limited.length,
+      limit: globalLimit,
+      dataforseoUnique: dataforseoUniqueCount,
+      tomtomCalled: shouldCallTomTom,
+    },
+    results: limited,
+    cancelled: false,
   };
 }
 

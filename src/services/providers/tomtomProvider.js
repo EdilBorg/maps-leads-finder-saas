@@ -1,7 +1,13 @@
 /**
- * TomTom Places / POI Search API adapter.
- * Docs: https://developer.tomtom.com/search-api/documentation/search-service/points-of-interest-search
- * Key only on server. Supports offset pagination (limit max 100 per call).
+ * TomTom Places Search API — Discover v3 (Orbis).
+ * Docs: https://docs.tomtom.com/places-search-api/documentation/places-search/discover
+ *
+ * Discover: POST https://api.tomtom.com/maps/orbis/places/discover
+ * Headers: TomTom-Api-Key, TomTom-Api-Version: 3, Attributes
+ * maxResults: 1–100 (hard max 100). One Discover call per search from the engine.
+ *
+ * Geocoding remains Search API v2 (/search/2/geocode) and MUST NOT consume the
+ * Discover global quota of 5000 calls/month.
  */
 const {
   withTimeout,
@@ -14,8 +20,10 @@ const {
 const { toIso2Country } = require('./countryCodes');
 
 const CODE = 'tomtom';
+const DISCOVER_URL = 'https://api.tomtom.com/maps/orbis/places/discover';
 const MAX_PER_PAGE = 100;
-const MAX_RAW = 200;
+/** Hard ceiling for a single Discover call (engine also enforces one call). */
+const MAX_RAW = 100;
 const DEFAULT_RADIUS_M = 25000;
 
 function isConfigured() {
@@ -25,39 +33,6 @@ function isConfigured() {
 
 function apiKey() {
   return String(process.env.TOMTOM_API_KEY || '').trim();
-}
-
-function mapItem(r, idx, criteria) {
-  const poi = r.poi || {};
-  const addr = r.address || {};
-  const pos = r.position || {};
-  const name = poi.name || r.name || null;
-  if (!name) return null;
-  const phone =
-    (poi.phone && String(poi.phone)) ||
-    (Array.isArray(poi.phones) && poi.phones[0]) ||
-    null;
-  const website =
-    (poi.url && String(poi.url)) ||
-    (Array.isArray(poi.urls) && poi.urls[0]) ||
-    null;
-  const categories = Array.isArray(poi.categories) ? poi.categories : [];
-  return {
-    name: String(name).trim(),
-    address: addr.freeformAddress || addr.streetName || null,
-    phone: phone ? String(phone).trim() : null,
-    email: null,
-    website: website ? String(website).trim() : null,
-    rating: null,
-    reviewsCount: null,
-    category: categories[0] || criteria.query,
-    lat: pos.lat != null ? Number(pos.lat) : null,
-    lng: pos.lon != null ? Number(pos.lon) : pos.lng != null ? Number(pos.lng) : null,
-    photoUrl: null,
-    sourceProvider: CODE,
-    externalId: r.id != null ? String(r.id) : `tomtom-${idx}`,
-    raw: { id: r.id },
-  };
 }
 
 function resolveSignal(second) {
@@ -78,45 +53,93 @@ function isValidLatLng(lat, lng) {
   );
 }
 
-function buildSearchUrl({ key, query, location, country, lat, lng, radius, pageSize, ofs }) {
-  const term = String(query || '').trim();
-  const loc = String(location || '').trim();
-  // With valid coordinates: pure category term + lat/lon/radius.
-  // Without coordinates: always include location in the text query so the city
-  // is never dropped (even when countrySet is present as a geographic filter).
-  let pathQuery = term;
-  if (isValidLatLng(lat, lng)) {
-    pathQuery = term;
-  } else if (loc) {
-    pathQuery = `${term} ${loc}`.trim();
+/**
+ * Map Discover v3 result item to internal lead contract.
+ */
+function mapDiscoverItem(r, idx, criteria) {
+  if (!r || typeof r !== 'object') return null;
+
+  const name =
+    r.name ||
+    (r.poi && r.poi.name) ||
+    (r.address && (r.address.freeformAddress || r.address.streetName)) ||
+    null;
+  if (!name) return null;
+
+  const addrObj = r.address || {};
+  const address =
+    addrObj.freeformAddress ||
+    [addrObj.streetName, addrObj.municipality, addrObj.countryCode].filter(Boolean).join(', ') ||
+    null;
+
+  const poi = r.poi || {};
+  const phone =
+    (poi.phone && String(poi.phone)) ||
+    (Array.isArray(poi.phones) && poi.phones[0] && String(poi.phones[0])) ||
+    (r.phone && String(r.phone)) ||
+    null;
+  const website =
+    (poi.url && String(poi.url)) ||
+    (Array.isArray(poi.urls) && poi.urls[0] && String(poi.urls[0])) ||
+    (r.url && String(r.url)) ||
+    null;
+
+  let lat = null;
+  let lng = null;
+  if (r.position) {
+    if (r.position.lat != null) lat = Number(r.position.lat);
+    if (r.position.lon != null) lng = Number(r.position.lon);
+    else if (r.position.lng != null) lng = Number(r.position.lng);
   }
-  const q = encodeURIComponent(pathQuery || term || 'business');
-
-  const params = new URLSearchParams();
-  params.set('key', key);
-  params.set('limit', String(pageSize));
-  params.set('ofs', String(ofs));
-  params.set('language', process.env.TOMTOM_LANGUAGE || 'pt-PT');
-
-  if (country) params.set('countrySet', country);
-  if (isValidLatLng(lat, lng)) {
-    params.set('lat', String(lat));
-    params.set('lon', String(lng));
-    params.set('radius', String(radius || DEFAULT_RADIUS_M));
+  if ((lat == null || lng == null) && r.geometry && Array.isArray(r.geometry.coordinates)) {
+    const coords = r.geometry.coordinates;
+    if (coords.length >= 2) {
+      lng = Number(coords[0]);
+      lat = Number(coords[1]);
+    }
   }
+  if (!Number.isFinite(lat)) lat = null;
+  if (!Number.isFinite(lng)) lng = null;
 
-  return `https://api.tomtom.com/search/2/poiSearch/${q}.json?${params.toString()}`;
+  const categories = Array.isArray(poi.categories)
+    ? poi.categories
+    : Array.isArray(r.poiTypes)
+      ? r.poiTypes
+      : [];
+  const category = categories[0] || criteria.query || null;
+
+  const externalId =
+    r.id != null
+      ? String(r.id)
+      : r.placeId != null
+        ? String(r.placeId)
+        : `tomtom-${idx}`;
+
+  return {
+    name: String(name).trim(),
+    address: address ? String(address).trim() : null,
+    phone: phone ? String(phone).trim() : null,
+    email: null,
+    website: website ? String(website).trim() : null,
+    rating: null,
+    reviewsCount: null,
+    category: category ? String(category).trim() : null,
+    lat,
+    lng,
+    photoUrl: null,
+    sourceProvider: CODE,
+    externalId,
+    raw: { id: r.id != null ? r.id : null },
+  };
+}
+
+/** Legacy alias for tests. */
+function mapItem(r, idx, criteria) {
+  return mapDiscoverItem(r, idx, criteria);
 }
 
 /**
- * Geocode a location string.
- * Returns a structured result — never collapses distinct failures into a silent null
- * at the call site without a reason code.
- *
- * @returns {Promise<
- *   | { ok: true, lat: number, lng: number, country: string|null }
- *   | { ok: false, code: string, message: string, httpStatus?: number }
- * >}
+ * Geocode via Search API v2. Does NOT count against Discover global quota.
  */
 async function geocodeLocation(location, signal, preferredCountry) {
   const key = apiKey();
@@ -171,17 +194,16 @@ async function geocodeLocation(location, signal, preferredCountry) {
       return { ok: false, code: 'GEOCODE_NOT_FOUND', message: 'Location not found' };
     }
 
-    // Score results by country match when preferredCountry is set.
     const scored = results.map((r) => {
       const a = r.address || {};
       const c2 = toIso2Country(a.countryCode);
       const c3 = toIso2Country(a.countryCodeISO3);
       const country = c2 || c3 || null;
       const pos = r.position || {};
-      const lat = Number(pos.lat);
-      const lng = Number(pos.lon != null ? pos.lon : pos.lng);
+      const latN = Number(pos.lat);
+      const lngN = Number(pos.lon != null ? pos.lon : pos.lng);
       const countryMatch = preferredCountry ? country === preferredCountry : true;
-      return { lat, lng, country, countryMatch, raw: r };
+      return { lat: latN, lng: lngN, country, countryMatch, raw: r };
     }).filter((s) => isValidLatLng(s.lat, s.lng));
 
     if (!scored.length) {
@@ -191,21 +213,16 @@ async function geocodeLocation(location, signal, preferredCountry) {
     if (preferredCountry) {
       const matching = scored.filter((s) => s.countryMatch);
       if (!matching.length) {
-        // Do not silently accept a result from a different country.
         return {
           ok: false,
           code: 'GEOCODE_COUNTRY_MISMATCH',
           message: 'Geocode result country does not match requested country',
         };
       }
-      if (matching.length > 1 && matching[0].country !== preferredCountry) {
-        // Ambiguous within the preferred country is still acceptable — pick first match.
-      }
       const chosen = matching[0];
       return { ok: true, lat: chosen.lat, lng: chosen.lng, country: chosen.country || preferredCountry };
     }
 
-    // No preferred country: if multiple results span different countries, treat as ambiguous.
     const countries = new Set(scored.map((s) => s.country).filter(Boolean));
     if (countries.size > 1) {
       return {
@@ -228,6 +245,52 @@ async function geocodeLocation(location, signal, preferredCountry) {
   }
 }
 
+function buildDiscoverBody({ query, location, country, lat, lng, radius, maxResults }) {
+  const term = String(query || '').trim() || 'business';
+  const body = {
+    query: term,
+    maxResults: Math.min(Math.max(Number(maxResults) || 10, 1), MAX_PER_PAGE),
+  };
+
+  if (isValidLatLng(lat, lng)) {
+    body.origin = {
+      type: 'point',
+      coordinates: [lng, lat],
+    };
+    body.preferences = {
+      geometry: {
+        type: 'point',
+        coordinates: [lng, lat],
+      },
+    };
+    const r = Number(radius) || DEFAULT_RADIUS_M;
+    if (Number.isFinite(r) && r > 0) {
+      body.filters = body.filters || {};
+      body.filters.geometry = {
+        type: 'circle',
+        center: { type: 'point', coordinates: [lng, lat] },
+        radiusInMeters: Math.min(Math.max(Math.floor(r), 1), 1000000),
+      };
+    }
+  }
+
+  if (country) {
+    body.filters = body.filters || {};
+    body.filters.countryCodesIso2 = [String(country).toUpperCase()];
+  }
+
+  body.filters = body.filters || {};
+  if (!body.filters.types) {
+    body.filters.types = ['poi'];
+  }
+
+  if (!isValidLatLng(lat, lng) && location) {
+    body.query = `${term} ${String(location).trim()}`.trim();
+  }
+
+  return body;
+}
+
 async function search(criteria, signalOrOpts) {
   if (!isConfigured()) return notConfigured(CODE);
   const signal = resolveSignal(signalOrOpts);
@@ -245,6 +308,7 @@ async function search(criteria, signalOrOpts) {
         ? Number(criteria.long)
         : NaN;
   let geocodeCalls = 0;
+  let requestSent = false;
 
   try {
     if ((!isValidLatLng(lat, lng) || !country) && location) {
@@ -264,82 +328,92 @@ async function search(criteria, signalOrOpts) {
           httpStatus: geo.httpStatus || null,
         });
       }
-      // GEOCODE_NOT_FOUND / AMBIGUOUS / COUNTRY_MISMATCH: continue without coords
-      // (structured search may still work with country only, or free-text fallback).
     }
+
+    const body = buildDiscoverBody({
+      query,
+      location,
+      country,
+      lat,
+      lng,
+      radius: criteria.radius || DEFAULT_RADIUS_M,
+      maxResults: want,
+    });
+
+    const attributes =
+      process.env.TOMTOM_DISCOVER_ATTRIBUTES ||
+      'results(name,id,position,address,poi,distanceInMeters)';
+
+    requestSent = true;
+    const data = await withTimeout(
+      (sig) =>
+        fetch(DISCOVER_URL, {
+          method: 'POST',
+          headers: {
+            'TomTom-Api-Key': key,
+            'TomTom-Api-Version': '3',
+            Attributes: attributes,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify(body),
+          signal: sig,
+        }).then(async (res) => {
+          if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 120)}`), {
+              code: 'HTTP_ERROR',
+              httpStatus: res.status,
+              requestSent: true,
+            });
+          }
+          return res.json();
+        }),
+      Math.max(DEFAULT_TIMEOUT_MS, 30000),
+      signal || CODE
+    );
+
+    const results = Array.isArray(data.results)
+      ? data.results
+      : Array.isArray(data)
+        ? data
+        : [];
 
     const all = [];
-    let ofs = 0;
-    let apiCalls = 0;
     let rawCount = 0;
-    while (all.length < want) {
-      if (signal && signal.aborted) {
-        const err = new Error('cancelled');
-        err.code = 'CANCELLED';
-        throw err;
-      }
-      const pageSize = Math.min(MAX_PER_PAGE, want - all.length);
-      const url = buildSearchUrl({
-        key,
-        query,
-        location,
-        country,
-        lat,
-        lng,
-        radius: criteria.radius || DEFAULT_RADIUS_M,
-        pageSize,
-        ofs,
-      });
-
-      apiCalls += 1;
-      const data = await withTimeout(
-        (sig) =>
-          fetch(url, {
-            method: 'GET',
-            headers: { Accept: 'application/json' },
-            signal: sig,
-          }).then(async (res) => {
-            if (!res.ok) {
-              const text = await res.text().catch(() => '');
-              throw Object.assign(new Error(`HTTP ${res.status} ${text.slice(0, 120)}`), {
-                code: 'HTTP_ERROR',
-                httpStatus: res.status,
-              });
-            }
-            return res.json();
-          }),
-        Math.max(DEFAULT_TIMEOUT_MS, 30000),
-        signal || CODE
-      );
-
-      const results = Array.isArray(data.results) ? data.results : [];
-      if (!results.length) break;
-      for (const r of results) {
-        rawCount += 1;
-        const item = mapItem(r, all.length, criteria);
-        if (item) all.push(item);
-        if (all.length >= want) break;
-      }
-      if (results.length < pageSize) break;
-      ofs += results.length;
-      if (ofs >= 2000) break;
+    for (const r of results) {
+      rawCount += 1;
+      const item = mapDiscoverItem(r, all.length, criteria);
+      if (item) all.push(item);
+      if (all.length >= want) break;
     }
-    return okResult(all.slice(0, want), {
+
+    const out = okResult(all.slice(0, want), {
       rawCount,
-      apiCalls,
+      apiCalls: 1,
       geocodeCalls,
     });
+    out.requestSent = true;
+    return out;
   } catch (err) {
     if (err && (err.code === 'CANCELLED' || err.name === 'AbortError')) {
       return errorResult('CANCELLED', 'TomTom search cancelled');
     }
     if (err && err.code === 'PROVIDER_TIMEOUT') {
-      return errorResult('TIMEOUT', err.message || 'TomTom timeout', { errorStage: 'search' });
+      const out = errorResult('TIMEOUT', err.message || 'TomTom timeout', { errorStage: 'search' });
+      out.requestSent = requestSent || true;
+      out.metrics = { rawCount: 0, apiCalls: 1, geocodeCalls };
+      return out;
     }
-    return errorResult(err.code || 'PROVIDER_ERROR', err.message || 'tomtom failed', {
+    const out = errorResult(err.code || 'PROVIDER_ERROR', err.message || 'tomtom failed', {
       httpStatus: err.httpStatus || null,
       errorStage: 'search',
     });
+    out.requestSent = requestSent || Boolean(err && err.requestSent);
+    if (out.requestSent) {
+      out.metrics = { rawCount: 0, apiCalls: 1, geocodeCalls };
+    }
+    return out;
   }
 }
 
@@ -348,8 +422,11 @@ module.exports = {
   isConfigured,
   search,
   mapItem,
-  buildSearchUrl,
+  mapDiscoverItem,
+  buildDiscoverBody,
   geocodeLocation,
   MAX_RAW,
+  MAX_PER_PAGE,
   DEFAULT_RADIUS_M,
+  DISCOVER_URL,
 };
