@@ -362,8 +362,16 @@ async function search(criteria, signalOrOpts) {
             providerCode: CODE,
             runId: taskId,
           });
-        } catch (_) {
-          // persistence failure must not drop the remote task; continue and return pending metadata
+        } catch (persistErr) {
+          // POST was accepted and billed — do NOT continue as if recoverable without persistence.
+          // Surface REMOTE_PERSIST_FAILED so searchService keeps reservations and does not re-POST.
+          const err = new Error(
+            'Failed to persist DataForSEO task id: ' + ((persistErr && persistErr.message) || 'unknown')
+          );
+          err.code = 'REMOTE_PERSIST_FAILED';
+          err.taskId = taskId;
+          err.cause = persistErr;
+          throw err;
         }
       }
     }
@@ -408,6 +416,28 @@ async function search(criteria, signalOrOpts) {
       out.metrics = {
         rawCount: 0,
         apiCalls: 1, // task_post already charged
+        geocodeCalls: 0,
+        pendingRemote: true,
+        externalRunId: taskId,
+        runId: taskId,
+        snapshotId: taskId,
+      };
+      return out;
+    }
+    if (err && err.code === 'REMOTE_PERSIST_FAILED') {
+      const taskId = err.taskId || null;
+      const out = errorResult('REMOTE_PERSIST_FAILED', err.message || 'DataForSEO remote id persist failed', {
+        errorStage: 'persist',
+        metadata: { snapshotId: taskId, providerCode: CODE, recoverable: true },
+        snapshotId: taskId,
+      });
+      out.pendingRemote = true;
+      out.externalRunId = taskId;
+      out.runId = taskId;
+      out.snapshotId = taskId;
+      out.metrics = {
+        rawCount: 0,
+        apiCalls: 1,
         geocodeCalls: 0,
         pendingRemote: true,
         externalRunId: taskId,

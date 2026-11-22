@@ -86,27 +86,63 @@ async function stillOwnsLease(id) {
   return rows.length > 0;
 }
 
+/**
+ * Atomically extend lease if this worker still owns it.
+ * Returns false if lease was lost (another worker or expiry).
+ */
+async function renewLease(id) {
+  const { rows } = await getPool().query(
+    `UPDATE pending_remote_executions SET
+       lease_expires_at = NOW() + ($3 || ' milliseconds')::interval,
+       updated_at = NOW()
+     WHERE id = $1
+       AND lease_owner = $2
+       AND status = 'reconciling'
+       AND lease_expires_at > NOW()
+     RETURNING id`,
+    [id, workerId, String(LEASE_MS)]
+  );
+  return rows.length > 0;
+}
+
 async function scheduleRetry(row, errorMessage) {
   const attempts = (row.attempts || 0) + 1;
   const delay = backoffMs(attempts);
+  // At MAX_ATTEMPTS without confirmed remote outcome: intervention (not 'failed').
+  // Reservation stays held; workers never reclaim intervention rows.
+  const terminal = attempts >= MAX_ATTEMPTS;
+  const status = terminal ? 'intervention' : 'pending';
   await getPool().query(
     `UPDATE pending_remote_executions SET
        status = $2,
        attempts = $3,
-       next_attempt_at = NOW() + ($4 || ' milliseconds')::interval,
+       next_attempt_at = CASE WHEN $2 = 'intervention' THEN NOW() + INTERVAL '100 years' ELSE NOW() + ($4 || ' milliseconds')::interval END,
        last_error = $5,
        lease_owner = NULL,
        lease_expires_at = NULL,
+       metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+         'intervention', $2 = 'intervention',
+         'intervention_reason', CASE WHEN $2 = 'intervention' THEN $5 ELSE NULL END,
+         'last_schedule_at', NOW()::text
+       ),
        updated_at = NOW()
      WHERE id = $1`,
     [
       row.id,
-      attempts >= MAX_ATTEMPTS ? 'failed' : 'pending',
+      status,
       attempts,
       String(delay),
       (errorMessage || '').slice(0, 500),
     ]
   );
+  if (terminal) {
+    log('error', 'pending_remote_intervention', {
+      id: row.id,
+      provider: row.provider_code,
+      externalRunId: row.external_run_id,
+      message: errorMessage,
+    });
+  }
 }
 
 async function resolveSuccess(row, actual) {
@@ -124,6 +160,12 @@ async function resolveSuccess(row, actual) {
     }
 
     if (row.period_start && (row.reserved_results != null || row.reserved_cost_micro_usd != null)) {
+      // Prefer the same idempotency key as the normal search path so a prior
+      // commitProviderMetrics cannot be double-applied by the reconciler.
+      const normalKey = row.search_id
+        ? `commit:${row.user_id}:${row.search_id}:${row.provider_code}`
+        : null;
+      const idempotencyKey = normalKey || `reconcile-commit:${row.id}`;
       await providerUsageService.commit({
         userId: row.user_id,
         providerCode: row.provider_code,
@@ -135,7 +177,7 @@ async function resolveSuccess(row, actual) {
         actualApiCalls: actual.apiCalls || 0,
         includeFixedCost: !!row.include_fixed_cost,
         searchId: row.search_id,
-        idempotencyKey: `reconcile-commit:${row.id}`,
+        idempotencyKey,
         client,
         unitCostMicroUsd: row.unit_cost_micro_usd,
         fixedExecutionCostMicroUsd: row.fixed_execution_cost_micro_usd,
@@ -228,50 +270,54 @@ async function processRow(row) {
 
   if (row.provider_code === 'dataforseo') {
     const dfs = require('./providers/dataForSeoProvider');
-    let result;
+    // Single GET (no long poll) so work finishes well under LEASE_MS.
+    // Renew lease before and after the remote call.
+    if (!(await renewLease(row.id))) return;
+
+    let got;
     try {
-      result = await dfs.fetchExistingTask(row.external_run_id, null);
+      got = await dfs.getTaskResult(row.external_run_id, null);
     } catch (err) {
       await scheduleRetry(row, (err && err.message) || 'dataforseo_fetch_error');
       return;
     }
     if (!(await stillOwnsLease(row.id))) return;
 
-    // Still polling / recoverable timeout — keep pending and retry later
-    if (result && result.pendingRemote) {
-      await scheduleRetry(row, 'still_running:pendingRemote');
-      return;
-    }
-    if (result && result.errorCode === 'TIMEOUT') {
-      await scheduleRetry(row, 'still_running:poll_timeout');
+    if (got.status === 'pending') {
+      await scheduleRetry(row, 'still_running:' + (got.statusCode || 'pending'));
       return;
     }
 
-    const status = result && result.status;
-    if (status === 'ok' || status === 'empty') {
-      const count = Array.isArray(result.results) ? result.results.length : 0;
-      const metrics = result.metrics || {};
+    if (got.status === 'ready') {
+      const items = Array.isArray(got.items) ? got.items : [];
+      const leads = [];
+      for (let i = 0; i < items.length; i++) {
+        const mapped = dfs.mapItem(items[i], i);
+        if (mapped) leads.push(mapped);
+      }
+      if (!(await renewLease(row.id))) return;
       const unit = row.unit_cost_micro_usd != null ? BigInt(String(row.unit_cost_micro_usd)) : 0n;
       const fixed = row.include_fixed_cost && row.fixed_execution_cost_micro_usd != null
         ? BigInt(String(row.fixed_execution_cost_micro_usd)) : 0n;
-      const cost = BigInt(count) * unit + fixed;
-      // task_post already billed once; recovery GET is free → apiCalls for ledger = reserved or 1
+      const cost = BigInt(leads.length) * unit + fixed;
       const apiCalls = Math.max(1, Number(row.reserved_api_calls) || 1);
       await resolveSuccess(row, {
-        results: count,
+        results: leads.length,
         apiCalls,
         costMicroUsd: cost.toString(),
       });
       return;
     }
 
-    // Terminal auth / hard errors — fail the pending row without releasing as zero if POST happened
-    if (result && (result.errorCode === 'AUTH_ERROR' || result.errorCode === 'NOT_CONFIGURED')) {
-      await scheduleRetry(row, 'terminal:' + (result.errorCode || status));
+    // Terminal remote error
+    if (got.status === 'error') {
+      const code = got.statusCode;
+      // Unknown / ambiguous remote state → retry then intervention; do not release reserve
+      await scheduleRetry(row, 'dataforseo_error:' + (got.message || code || 'error'));
       return;
     }
 
-    await scheduleRetry(row, 'dataforseo_status:' + (status || result && result.errorCode || 'unknown'));
+    await scheduleRetry(row, 'dataforseo_status:unknown');
     return;
   }
   if (row.provider_code === 'apify') {
@@ -394,6 +440,10 @@ async function waitForIdle(timeoutMs = 8000) {
 }
 
 module.exports = {
+  renewLease,
+  stillOwnsLease,
+  scheduleRetry,
+  resolveSuccess,
   startPendingRemoteReconciler,
   stopPendingRemoteReconciler,
   waitForIdle,

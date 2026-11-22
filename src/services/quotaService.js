@@ -197,21 +197,8 @@ async function authorizeAndReserve(client, {
       }
     }
 
-    // Bright Data geocode: pre-reserve is mandatory before any TomTom geocode call.
-    // If pre-reserve fails, mark geoBlocked so provider must not call TomTom.
-    if (code === 'brightdata') {
-      const geoReserve = await providerUsageService.reserveGlobalTomTomCalls(1, {
-        searchId,
-        userId,
-        idempotencyKey: `greserve-geo:${userId}:${searchId}:bd`,
-      });
-      if (!geoReserve.ok) {
-        geoBlocked = true;
-      } else if (!geoReserve.unlimited) {
-        globalReserve = globalReserve || {};
-        globalReserve.geo = geoReserve;
-      }
-    }
+    // Bright Data is not an active search provider. Do not reserve Discover quota for geocoding.
+    // Historical BD path: geoBlocked stays false; geocode must not touch Discover ledger.
 
     const reserveResult = await providerUsageService.reserve({
       userId,
@@ -349,18 +336,54 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
     );
   }
 
-  if (reservation.global && reservation.global.geo && reservation.global.geo.periodStart) {
-    const usedGeo = Number.isFinite(geocodeCalls) ? geocodeCalls : 0;
-    await providerUsageService.commitGlobalTomTomCalls(
-      reservation.global.geo.periodStart,
-      reservation.global.geo.reservedCalls || 0,
-      usedGeo,
-      { idempotencyKey: `gcommit-geo:${userId}:${searchId}:bd`, searchId, userId }
-    );
+  // Geocoding is tracked only via metrics.geocodeCalls for audit — never on Discover ledger.
+
+  // Normal path already committed usage. Mark any pending_remote_executions row resolved
+  // WITHOUT a second commit (reconciler uses a different idempotency key).
+  if (providerCode === 'dataforseo' || providerCode === 'apify' || providerCode === 'brightdata') {
+    try {
+      await resolvePendingRemoteAfterCommit(userId, searchId, providerCode, {
+        results: Number.isFinite(actualResults) ? actualResults : 0,
+        apiCalls: Number.isFinite(actualApiCalls) ? actualApiCalls : 0,
+      });
+    } catch (e) {
+      // Non-fatal for the search: usage is already committed; pending row can be cleaned by reconciler skip
+      console.error('[resolve-pending-after-commit]', searchId, providerCode, e && e.message);
+    }
   }
-  // No post-facto / late reserve path — geocode must be pre-reserved.
 
   return result;
+}
+
+/**
+ * After a successful normal-path commit, close the pending_remote_executions row
+ * without re-committing usage (prevents double billing with reconciler).
+ */
+async function resolvePendingRemoteAfterCommit(userId, searchId, providerCode, actual = {}) {
+  if (!searchId || !providerCode) return { ok: false, reason: 'missing_ids' };
+  const pool = getPool();
+  const { rows } = await pool.query(
+    `UPDATE pending_remote_executions SET
+       status = 'resolved',
+       actual_results = COALESCE($4, actual_results),
+       actual_api_calls = COALESCE($5, actual_api_calls),
+       resolved_at = NOW(),
+       lease_owner = NULL,
+       lease_expires_at = NULL,
+       updated_at = NOW(),
+       last_error = NULL
+     WHERE user_id = $1 AND search_id = $2 AND provider_code = $3
+       AND status IN ('pending', 'reconciling')
+     RETURNING id`,
+    [
+      userId,
+      searchId,
+      providerCode,
+      actual.results != null ? Number(actual.results) : null,
+      actual.apiCalls != null ? Number(actual.apiCalls) : null,
+    ]
+  );
+  return { ok: true, resolved: rows.length, ids: rows.map((r) => r.id) };
 }
 
 /**
@@ -479,12 +502,6 @@ async function releaseAllReservations(userId, searchId, providers, { force = fal
         await providerUsageService.releaseGlobalTomTomCalls(
           p.reserve.global.periodStart, p.reserve.global.reservedCalls || 0,
           { idempotencyKey: `grelease:${userId}:${searchId}:${p.code}:tomtom`, searchId, userId }
-        );
-      }
-      if (p.reserve.global && p.reserve.global.geo && p.reserve.global.geo.periodStart) {
-        await providerUsageService.releaseGlobalTomTomCalls(
-          p.reserve.global.geo.periodStart, p.reserve.global.geo.reservedCalls || 0,
-          { idempotencyKey: `grelease-geo:${userId}:${searchId}:bd`, searchId, userId }
         );
       }
     } catch (_) { /* best-effort */ }
@@ -666,5 +683,5 @@ async function getClientQuotaView(userId) {
 module.exports = {
   TRIAL_MAX_LEADS, DEFAULT_PAID_LIMITS,
   authorizeAndReserve, commitProviderMetrics, commitTrialGlobalTomTom,
-  releaseAllReservations, markPendingRemote, getClientQuotaView,
+  releaseAllReservations, markPendingRemote, resolvePendingRemoteAfterCommit, getClientQuotaView,
 };
