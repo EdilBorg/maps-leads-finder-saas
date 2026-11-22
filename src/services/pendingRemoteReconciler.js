@@ -42,7 +42,7 @@ async function acquireBatch() {
        WHERE status IN ('pending', 'reconciling')
          AND next_attempt_at <= NOW()
          AND attempts < $1
-         AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
+         AND (lease_expires_at IS NULL OR lease_expires_at < clock_timestamp())
        ORDER BY next_attempt_at ASC
        FOR UPDATE SKIP LOCKED
        LIMIT $2`,
@@ -57,7 +57,7 @@ async function acquireBatch() {
       `UPDATE pending_remote_executions SET
          status = 'reconciling',
          lease_owner = $2,
-         lease_expires_at = NOW() + ($3 || ' milliseconds')::interval,
+         lease_expires_at = clock_timestamp() + ($3 || ' milliseconds')::interval,
          updated_at = NOW()
        WHERE id = ANY($1::uuid[])`,
       [ids, workerId, String(LEASE_MS)]
@@ -79,7 +79,7 @@ async function acquireBatch() {
 async function stillOwnsLease(id) {
   const { rows } = await getPool().query(
     `SELECT id FROM pending_remote_executions
-     WHERE id = $1 AND lease_owner = $2 AND lease_expires_at > NOW()
+     WHERE id = $1 AND lease_owner = $2 AND lease_expires_at > clock_timestamp()
        AND status = 'reconciling'`,
     [id, workerId]
   );
@@ -93,12 +93,12 @@ async function stillOwnsLease(id) {
 async function renewLease(id) {
   const { rows } = await getPool().query(
     `UPDATE pending_remote_executions SET
-       lease_expires_at = NOW() + ($3 || ' milliseconds')::interval,
+       lease_expires_at = clock_timestamp() + ($3 || ' milliseconds')::interval,
        updated_at = NOW()
      WHERE id = $1
        AND lease_owner = $2
        AND status = 'reconciling'
-       AND lease_expires_at > NOW()
+       AND lease_expires_at > clock_timestamp()
      RETURNING id`,
     [id, workerId, String(LEASE_MS)]
   );
@@ -112,7 +112,7 @@ async function scheduleRetry(row, errorMessage) {
   // Reservation stays held; workers never reclaim intervention rows.
   const terminal = attempts >= MAX_ATTEMPTS;
   const status = terminal ? 'intervention' : 'pending';
-  await getPool().query(
+  const updated = await getPool().query(
     `UPDATE pending_remote_executions SET
        status = $2,
        attempts = $3,
@@ -126,15 +126,24 @@ async function scheduleRetry(row, errorMessage) {
          'last_schedule_at', NOW()::text
        ),
        updated_at = NOW()
-     WHERE id = $1`,
+     WHERE id = $1
+       AND lease_owner = $6
+       AND status = 'reconciling'
+       AND lease_expires_at > clock_timestamp()
+     RETURNING id`,
     [
       row.id,
       status,
       attempts,
       String(delay),
       (errorMessage || '').slice(0, 500),
+      workerId,
     ]
   );
+
+  if (!updated.rows.length) {
+    return false;
+  }
   if (terminal) {
     log('error', 'pending_remote_intervention', {
       id: row.id,
@@ -151,7 +160,11 @@ async function resolveSuccess(row, actual) {
     await client.query('BEGIN');
     const own = await client.query(
       `SELECT id FROM pending_remote_executions
-       WHERE id = $1 AND lease_owner = $2 AND status = 'reconciling' FOR UPDATE`,
+       WHERE id = $1
+         AND lease_owner = $2
+         AND status = 'reconciling'
+         AND lease_expires_at > clock_timestamp()
+       FOR UPDATE`,
       [row.id, workerId]
     );
     if (!own.rows[0]) {
@@ -185,7 +198,7 @@ async function resolveSuccess(row, actual) {
       });
     }
 
-    await client.query(
+    const resolved = await client.query(
       `UPDATE pending_remote_executions SET
          status = 'resolved',
          actual_results = $2,
@@ -195,14 +208,24 @@ async function resolveSuccess(row, actual) {
          lease_owner = NULL,
          lease_expires_at = NULL,
          updated_at = NOW()
-       WHERE id = $1`,
+       WHERE id = $1
+         AND lease_owner = $5
+         AND status = 'reconciling'
+         AND lease_expires_at > clock_timestamp()
+       RETURNING id`,
       [
         row.id,
         actual.results || 0,
         actual.costMicroUsd != null ? String(actual.costMicroUsd) : null,
         actual.apiCalls || 0,
+        workerId,
       ]
     );
+
+    if (!resolved.rows.length) {
+      await client.query('ROLLBACK');
+      return { ok: false, reason: 'lease_lost' };
+    }
     await client.query('COMMIT');
     return { ok: true };
   } catch (err) {
