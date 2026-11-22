@@ -146,9 +146,9 @@ async function resolveGeo(criteria, signal) {
     '&limit=1';
 
   const res = await withTimeout(
-    fetch(url, { method: 'GET', headers: { Accept: 'application/json' }, signal }),
+    (sig) => fetch(url, { method: 'GET', headers: { Accept: 'application/json' }, signal: sig }),
     Math.max(DEFAULT_TIMEOUT_MS, 15000),
-    CODE + '-geocode'
+    signal || (CODE + '-geocode')
   );
   if (!res.ok) return null;
   const data = await res.json();
@@ -286,7 +286,14 @@ function mapItem(p, idx) {
  */
 async function search(criteria, signalOrOpts) {
   if (!isConfigured()) return notConfigured(CODE);
-  const signal = resolveSignal(signalOrOpts);
+  // Accept (criteria, signal) or (criteria, { signal, onRemoteStarted })
+  let signal = resolveSignal(signalOrOpts);
+  let onRemoteStarted = null;
+  if (signalOrOpts && typeof signalOrOpts === 'object' && !('aborted' in signalOrOpts)) {
+    signal = signalOrOpts.signal || signal || null;
+    onRemoteStarted =
+      typeof signalOrOpts.onRemoteStarted === 'function' ? signalOrOpts.onRemoteStarted : null;
+  }
   const key = apiKey();
   const ds = datasetId();
   let snapshotId = null;
@@ -321,18 +328,19 @@ async function search(criteria, signalOrOpts) {
       '&notify=false&include_errors=true&type=discover_new&discover_by=location';
 
     const startRes = await withTimeout(
-      fetch(triggerUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: 'Bearer ' + key,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify(body),
-        signal,
-      }),
+      (sig) =>
+        fetch(triggerUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer ' + key,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify(body),
+          signal: sig,
+        }),
       Math.max(DEFAULT_TIMEOUT_MS, 30000),
-      CODE + '-trigger'
+      signal || (CODE + '-trigger')
     );
 
     if (!startRes.ok) {
@@ -357,12 +365,30 @@ async function search(criteria, signalOrOpts) {
       return errorResult('INVALID_RESPONSE', 'Bright Data snapshot_id missing');
     }
     if (typeof onRemoteStarted === 'function') {
-      await onRemoteStarted({
-        providerCode: 'brightdata',
-        externalRunId: String(snapshotId),
-        snapshotId: String(snapshotId),
-        metadata: { stage: 'triggered' },
-      });
+      try {
+        await onRemoteStarted({
+          providerCode: 'brightdata',
+          externalRunId: String(snapshotId),
+          snapshotId: String(snapshotId),
+          metadata: { stage: 'triggered' },
+        });
+      } catch (cbErr) {
+        // Persistence failed after the remote snapshot was already triggered.
+        // Do not continue polling an untracked execution — return explicit error.
+        return errorResult(
+          'REMOTE_PERSIST_FAILED',
+          'Failed to persist Bright Data snapshot id: ' + ((cbErr && cbErr.message) || 'callback error'),
+          {
+            errorStage: 'persist',
+            snapshotId: String(snapshotId),
+            metadata: {
+              snapshotId: String(snapshotId),
+              providerCode: 'brightdata',
+              recoverable: true,
+            },
+          }
+        );
+      }
     }
 
     const deadline = Date.now() + MAX_WAIT_MS;
@@ -376,13 +402,14 @@ async function search(criteria, signalOrOpts) {
       await sleep(POLL_INTERVAL_MS, signal);
 
       const progRes = await withTimeout(
-        fetch(API_BASE + '/datasets/v3/progress/' + encodeURIComponent(snapshotId), {
-          method: 'GET',
-          headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' },
-          signal,
-        }),
+        (sig) =>
+          fetch(API_BASE + '/datasets/v3/progress/' + encodeURIComponent(snapshotId), {
+            method: 'GET',
+            headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' },
+            signal: sig,
+          }),
         DEFAULT_TIMEOUT_MS,
-        CODE + '-progress'
+        signal || (CODE + '-progress')
       );
       if (!progRes.ok) {
         if (progRes.status === 401 || progRes.status === 403) {
@@ -419,17 +446,18 @@ async function search(criteria, signalOrOpts) {
     }
 
     const snapRes = await withTimeout(
-      fetch(
-        API_BASE +
-          '/datasets/v3/snapshot/' +
-          encodeURIComponent(snapshotId) +
-          '?format=json',
-        {
-          method: 'GET',
-          headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' },
-          signal,
-        }
-      ),
+      (sig) =>
+        fetch(
+          API_BASE +
+            '/datasets/v3/snapshot/' +
+            encodeURIComponent(snapshotId) +
+            '?format=json',
+          {
+            method: 'GET',
+            headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' },
+            signal: sig,
+          }
+        ),
       Math.max(DEFAULT_TIMEOUT_MS, 60000),
       CODE + '-snapshot'
     );
