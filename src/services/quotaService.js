@@ -359,6 +359,13 @@ async function commitProviderMetrics(userId, searchId, providerCode, reservation
  * After a successful normal-path commit, close the pending_remote_executions row
  * without re-committing usage (prevents double billing with reconciler).
  */
+/**
+ * Normal search path (no reconciler lease): close pending rows after usage was
+ * already committed with key commit:user:search:provider.
+ *
+ * Only updates status = 'pending'. Rows in 'reconciling' stay with the lease
+ * owner; resolveSuccess uses the same idempotency key (no double-bill).
+ */
 async function resolvePendingRemoteAfterCommit(userId, searchId, providerCode, actual = {}) {
   if (!searchId || !providerCode) return { ok: false, reason: 'missing_ids' };
   const pool = getPool();
@@ -367,13 +374,14 @@ async function resolvePendingRemoteAfterCommit(userId, searchId, providerCode, a
        status = 'resolved',
        actual_results = COALESCE($4, actual_results),
        actual_api_calls = COALESCE($5, actual_api_calls),
-       resolved_at = NOW(),
+       resolved_at = clock_timestamp(),
        lease_owner = NULL,
        lease_expires_at = NULL,
-       updated_at = NOW(),
+       updated_at = clock_timestamp(),
        last_error = NULL
      WHERE user_id = $1 AND search_id = $2 AND provider_code = $3
-       AND status IN ('pending', 'reconciling')
+       AND status = 'pending'
+       AND (lease_owner IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
      RETURNING id`,
     [
       userId,
@@ -399,13 +407,72 @@ async function markPendingRemote(userId, searchId, providerCode, reservation, me
   if (providerCode !== 'apify' && providerCode !== 'brightdata' && providerCode !== 'dataforseo') return null;
 
   const externalRunId = metrics.externalRunId || metrics.runId || metrics.snapshotId || null;
-  if (!externalRunId) {
+  // Explicit unknown-remote hold: persist intervention WITHOUT inventing an id.
+  const unknownRemote = !externalRunId && (
+    metrics.unknownRemote === true || metrics.allowMissingId === true
+  );
+
+  if (!externalRunId && !unknownRemote) {
     const err = new Error('markPendingRemote requires externalRunId/runId/snapshotId');
     err.code = 'PENDING_REMOTE_MISSING_ID';
     throw err;
   }
 
   const pool = getPool();
+  const meta = {
+    source: 'markPendingRemote',
+    global: reservation.global || null,
+    unknownRemote: !!unknownRemote,
+    reason: metrics.reason || (unknownRemote ? 'remote_id_missing' : null),
+    metrics: {
+      rawCount: metrics.rawCount,
+      apiCalls: metrics.apiCalls,
+      geocodeCalls: metrics.geocodeCalls,
+      requestSent: metrics.requestSent,
+      pendingRemote: metrics.pendingRemote,
+    },
+  };
+
+  if (unknownRemote) {
+    // Intervention rows are not claimed by workers (next_attempt far future).
+    // Reservation remains held in provider_usage until admin resolution.
+    const { rows } = await pool.query(
+      `INSERT INTO pending_remote_executions (
+         user_id, search_id, provider_code, status, external_run_id,
+         period_start, reserved_results, reserved_cost_micro_usd, reserved_api_calls,
+         unit_cost_micro_usd, fixed_execution_cost_micro_usd, include_fixed_cost,
+         pricing_version, metadata, next_attempt_at, last_error
+       ) VALUES (
+         $1,$2,$3,'intervention',NULL,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,
+         NOW() + INTERVAL '100 years',
+         $13
+       )
+       RETURNING id`,
+      [
+        userId,
+        searchId,
+        providerCode,
+        reservation.periodStart,
+        reservation.reservedResults || 0,
+        String(reservation.reservedCostMicroUsd || 0),
+        reservation.reservedApiCalls || 0,
+        reservation.unitCostMicroUsd != null ? String(reservation.unitCostMicroUsd) : null,
+        reservation.fixedExecutionCostMicroUsd != null ? String(reservation.fixedExecutionCostMicroUsd) : null,
+        !!reservation.includeFixedCost,
+        reservation.pricingVersion || null,
+        JSON.stringify(meta),
+        'remote_id_missing: reservation held for intervention',
+      ]
+    );
+    return {
+      ok: true,
+      pendingRemote: true,
+      id: rows[0] && rows[0].id,
+      externalRunId: null,
+      status: 'intervention',
+    };
+  }
+
   // Fail explicitly — callers must not treat persistence failure as success
   const { rows } = await pool.query(
     `INSERT INTO pending_remote_executions (
@@ -418,7 +485,7 @@ async function markPendingRemote(userId, searchId, providerCode, reservation, me
        WHERE search_id IS NOT NULL AND status IN ('pending', 'reconciling')
      DO UPDATE SET
        external_run_id = COALESCE(EXCLUDED.external_run_id, pending_remote_executions.external_run_id),
-       updated_at = NOW()
+       updated_at = clock_timestamp()
      RETURNING id`,
     [
       userId,
@@ -433,18 +500,16 @@ async function markPendingRemote(userId, searchId, providerCode, reservation, me
       reservation.fixedExecutionCostMicroUsd != null ? String(reservation.fixedExecutionCostMicroUsd) : null,
       !!reservation.includeFixedCost,
       reservation.pricingVersion || null,
-      JSON.stringify({
-        source: 'markPendingRemote',
-        global: reservation.global || null,
-        metrics: {
-          rawCount: metrics.rawCount,
-          apiCalls: metrics.apiCalls,
-          geocodeCalls: metrics.geocodeCalls,
-        },
-      }),
+      JSON.stringify(meta),
     ]
   );
-  return { ok: true, pendingRemote: true, id: rows[0] && rows[0].id, externalRunId: String(externalRunId) };
+  return {
+    ok: true,
+    pendingRemote: true,
+    id: rows[0] && rows[0].id,
+    externalRunId: String(externalRunId),
+    status: 'pending',
+  };
 }
 
 async function commitTrialGlobalTomTom(userId, searchId, globalReserve, metricsByProvider) {
@@ -479,11 +544,65 @@ async function releaseAllReservations(userId, searchId, providers, { force = fal
     if (!p.allowed || !p.reserve) continue;
     try {
       if (!force && (p.code === 'apify' || p.code === 'brightdata' || p.code === 'dataforseo')) {
-        // Keep reservation; record pending remote for reconciliation.
-        await markPendingRemote(userId, searchId, p.code, p.reserve, {
-          pendingRemote: true,
+        const metrics = (p.metrics && typeof p.metrics === 'object') ? { ...p.metrics } : {};
+        const externalRunId =
+          metrics.externalRunId ||
+          metrics.runId ||
+          metrics.snapshotId ||
+          p.externalRunId ||
+          (p.reserve && (p.reserve.externalRunId || p.reserve.runId || p.reserve.snapshotId)) ||
+          null;
+
+        if (externalRunId) {
+          // Provider started remote work with a known id — hold reservation for reconciler.
+          await markPendingRemote(userId, searchId, p.code, p.reserve, {
+            ...metrics,
+            externalRunId,
+            pendingRemote: true,
+            reason: 'release_protect_known_remote',
+          });
+          continue;
+        }
+
+        // No remote id available.
+        // Evidence that remote may have started (pendingRemote / requestSent / REMOTE_PERSIST_FAILED):
+        // hold reservation via intervention — never invent an id, never silent-release.
+        const mayHaveStarted =
+          p.pendingRemote === true ||
+          metrics.pendingRemote === true ||
+          metrics.requestSent === true ||
+          p.requestSent === true ||
+          p.errorCode === 'REMOTE_PERSIST_FAILED' ||
+          metrics.errorCode === 'REMOTE_PERSIST_FAILED';
+
+        if (mayHaveStarted) {
+          await markPendingRemote(userId, searchId, p.code, p.reserve, {
+            ...metrics,
+            unknownRemote: true,
+            allowMissingId: true,
+            pendingRemote: true,
+            reason: 'release_protect_unknown_remote',
+          });
+          continue;
+        }
+
+        // No evidence of remote start: safe to release the financial reservation.
+        await providerUsageService.release({
+          userId,
+          providerCode: p.code,
+          periodStart: p.reserve.periodStart,
+          reservedResults: p.reserve.reservedResults || 0,
+          reservedCostMicroUsd: p.reserve.reservedCostMicroUsd || 0,
+          reservedApiCalls: p.reserve.reservedApiCalls || 0,
+          searchId,
+          idempotencyKey: `release:${userId}:${searchId}:${p.code}`,
         });
-        // Do NOT commit or release provider_usage here.
+        if (p.reserve.global && p.reserve.global.periodStart && !p.reserve.global.geo) {
+          await providerUsageService.releaseGlobalTomTomCalls(
+            p.reserve.global.periodStart, p.reserve.global.reservedCalls || 0,
+            { idempotencyKey: `grelease:${userId}:${searchId}:${p.code}:tomtom`, searchId, userId }
+          );
+        }
         continue;
       }
 
@@ -504,7 +623,10 @@ async function releaseAllReservations(userId, searchId, providers, { force = fal
           { idempotencyKey: `grelease:${userId}:${searchId}:${p.code}:tomtom`, searchId, userId }
         );
       }
-    } catch (_) { /* best-effort */ }
+    } catch (err) {
+      // Never swallow silently — reservation may still be held, which is safer than silent free.
+      console.error('[releaseAllReservations]', searchId, p && p.code, err && err.code, err && err.message);
+    }
   }
 
   if (globalTomTom && globalTomTom.periodStart && !globalTomTom.unlimited) {

@@ -646,8 +646,15 @@ async function runSearchJob(ctx) {
 
     if (ctx.quotaMode === 'paid' && Array.isArray(ctx.quotaProviders)) {
       const byCode = {};
+      const byProvider = {};
       for (const p of engineResult._providers || []) {
-        byCode[p.code] = p.metrics || { rawCount: p.count || 0, apiCalls: 0, geocodeCalls: 0 };
+        const metrics = p.metrics || { rawCount: p.count || 0, apiCalls: 0, geocodeCalls: 0 };
+        if (p.externalRunId && !metrics.externalRunId) metrics.externalRunId = p.externalRunId;
+        if (p.pendingRemote != null && metrics.pendingRemote == null) metrics.pendingRemote = p.pendingRemote;
+        if (p.requestSent != null && metrics.requestSent == null) metrics.requestSent = p.requestSent;
+        if (p.errorCode && !metrics.errorCode) metrics.errorCode = p.errorCode;
+        byCode[p.code] = metrics;
+        byProvider[p.code] = p;
       }
       for (const p of ctx.quotaProviders) {
         if (!p.allowed || !p.reserve) continue;
@@ -657,7 +664,20 @@ async function runSearchJob(ctx) {
               ctx.userId, ctx.searchId, p.code, p.reserve, byCode[p.code]
             );
           } else {
-            await quotaService.releaseAllReservations(ctx.userId, ctx.searchId, [p]);
+            // Attach any engine-side signals so releaseAllReservations can decide
+            // between safe release vs intervention hold without inventing remote ids.
+            const eng = byProvider[p.code];
+            const enriched = eng
+              ? {
+                  ...p,
+                  metrics: byCode[p.code] || eng.metrics || null,
+                  externalRunId: eng.externalRunId || null,
+                  pendingRemote: eng.pendingRemote,
+                  requestSent: eng.requestSent,
+                  errorCode: eng.errorCode,
+                }
+              : p;
+            await quotaService.releaseAllReservations(ctx.userId, ctx.searchId, [enriched]);
           }
         } catch (qe) {
           console.error('[quota-commit]', ctx.searchId, p.code, qe && qe.message);
