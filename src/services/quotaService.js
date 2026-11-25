@@ -404,6 +404,12 @@ async function markPendingRemote(userId, searchId, providerCode, reservation, me
     err.code = 'PENDING_REMOTE_INVALID';
     throw err;
   }
+  // Partial unique index and all recovery paths require a real search_id.
+  if (searchId == null || searchId === '' || (typeof searchId === 'string' && !searchId.trim())) {
+    const err = new Error('markPendingRemote requires a valid searchId');
+    err.code = 'PENDING_REMOTE_INVALID_SEARCH_ID';
+    throw err;
+  }
   if (providerCode !== 'apify' && providerCode !== 'brightdata' && providerCode !== 'dataforseo') return null;
 
   const externalRunId = metrics.externalRunId || metrics.runId || metrics.snapshotId || null;
@@ -554,6 +560,30 @@ async function commitTrialGlobalTomTom(userId, searchId, globalReserve, metricsB
  *
  * force=true: hard release (admin / confirmed no remote cost).
  */
+/**
+ * Look up an active pending_remote_executions row for (user, search, provider).
+ * Memory objects on cancel/error may lack externalRunId even after onRemoteStarted
+ * persisted a row — DB is the source of truth before any financial release.
+ */
+async function findActivePendingRemote(userId, searchId, providerCode, client = null) {
+  if (!userId || !searchId || !providerCode) return null;
+  const q = client || getPool();
+  const { rows } = await q.query(
+    `SELECT id, status, external_run_id, lease_owner, lease_expires_at
+     FROM pending_remote_executions
+     WHERE user_id = $1
+       AND search_id = $2
+       AND provider_code = $3
+       AND status IN ('pending', 'reconciling', 'intervention')
+     ORDER BY
+       CASE status WHEN 'reconciling' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+       created_at ASC
+     LIMIT 1`,
+    [userId, searchId, providerCode]
+  );
+  return rows[0] || null;
+}
+
 async function releaseAllReservations(userId, searchId, providers, {
   force = false,
   globalTomTom = null,
@@ -578,6 +608,37 @@ async function releaseAllReservations(userId, searchId, providers, {
           p.reserve.snapshotId ||
           null;
 
+        // BLOCKER: consult DB under the same advisory lock key as writers so we cannot
+        // race markPendingRemote and free a reserve that already has an active row.
+        const pool = getPool();
+        const client = await pool.connect();
+        let activeRow = null;
+        try {
+          await client.query('BEGIN');
+          await client.query(
+            `SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))`,
+            [String(searchId), String(p.code)]
+          );
+          activeRow = await findActivePendingRemote(userId, searchId, p.code, client);
+          await client.query('COMMIT');
+        } catch (lockErr) {
+          try { await client.query('ROLLBACK'); } catch (_) {}
+          throw lockErr;
+        } finally {
+          client.release();
+        }
+
+        if (activeRow) {
+          results.push({
+            providerCode: p.code,
+            action: 'held_existing_pending_remote',
+            id: activeRow.id,
+            status: activeRow.status,
+            externalRunId: activeRow.external_run_id || null,
+          });
+          continue;
+        }
+
         if (externalRunId) {
           const held = await markPendingRemote(userId, searchId, p.code, p.reserve, {
             ...metrics,
@@ -585,7 +646,12 @@ async function releaseAllReservations(userId, searchId, providers, {
             pendingRemote: true,
             reason: 'release_protect_known_remote',
           });
-          results.push({ providerCode: p.code, action: 'held_pending_remote', id: held && held.id });
+          if (!held || !held.id) {
+            const err = new Error('markPendingRemote did not persist pending row');
+            err.code = 'PENDING_REMOTE_PERSIST_FAILED';
+            throw err;
+          }
+          results.push({ providerCode: p.code, action: 'held_pending_remote', id: held.id });
           continue;
         }
 
@@ -605,7 +671,12 @@ async function releaseAllReservations(userId, searchId, providers, {
             pendingRemote: true,
             reason: 'release_protect_unknown_remote',
           });
-          results.push({ providerCode: p.code, action: 'held_intervention', id: held && held.id });
+          if (!held || !held.id) {
+            const err = new Error('markPendingRemote did not persist intervention row');
+            err.code = 'PENDING_REMOTE_PERSIST_FAILED';
+            throw err;
+          }
+          results.push({ providerCode: p.code, action: 'held_intervention', id: held.id });
           continue;
         }
       }
@@ -833,6 +904,7 @@ async function getClientQuotaView(userId) {
 }
 
 module.exports = {
+  findActivePendingRemote,
   TRIAL_MAX_LEADS, DEFAULT_PAID_LIMITS,
   authorizeAndReserve, commitProviderMetrics, commitTrialGlobalTomTom,
   releaseAllReservations, markPendingRemote, resolvePendingRemoteAfterCommit, getClientQuotaView,
