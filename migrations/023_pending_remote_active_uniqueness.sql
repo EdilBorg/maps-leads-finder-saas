@@ -81,16 +81,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS pending_remote_executions_active_search_provid
   WHERE search_id IS NOT NULL
     AND status IN ('pending', 'reconciling', 'intervention');
 
--- Verify index exists with expected definition
+-- Verify index exists with the exact expected definition (reject same-name incompatible indexes)
 DO $$
 DECLARE
   idx_def TEXT;
   idx_unique BOOLEAN;
   idx_valid BOOLEAN;
-  table_schema TEXT;
+  col_names TEXT;
 BEGIN
-  SELECT pg_get_indexdef(i.oid), x.indisunique, x.indisvalid, n.nspname
-    INTO idx_def, idx_unique, idx_valid, table_schema
+  SELECT pg_get_indexdef(i.oid), x.indisunique, x.indisvalid,
+         (
+           SELECT string_agg(a.attname, ',' ORDER BY xord.ord)
+           FROM unnest(x.indkey) WITH ORDINALITY AS xord(attnum, ord)
+           JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = xord.attnum
+         )
+    INTO idx_def, idx_unique, idx_valid, col_names
   FROM pg_class t
   JOIN pg_namespace n ON n.oid = t.relnamespace
   JOIN pg_index x ON x.indrelid = t.oid
@@ -100,7 +105,9 @@ BEGIN
     AND i.relname = 'pending_remote_executions_active_search_provider_uidx';
 
   IF idx_def IS NULL THEN
-    RAISE EXCEPTION '023: expected unique index pending_remote_executions_active_search_provider_uidx was not created in schema %', current_schema();
+    RAISE EXCEPTION
+      '023: expected unique index pending_remote_executions_active_search_provider_uidx was not created on pending_remote_executions in schema %',
+      current_schema();
   END IF;
 
   IF idx_unique IS DISTINCT FROM TRUE OR idx_valid IS DISTINCT FROM TRUE THEN
@@ -108,10 +115,31 @@ BEGIN
       idx_unique, idx_valid, idx_def;
   END IF;
 
-  IF position('pending' in idx_def) = 0
-     OR position('reconciling' in idx_def) = 0
-     OR position('intervention' in idx_def) = 0 THEN
-    RAISE EXCEPTION '023: index predicate missing required statuses: %', idx_def;
+  IF col_names IS DISTINCT FROM 'search_id,provider_code' THEN
+    RAISE EXCEPTION
+      '023: index columns must be exactly (search_id, provider_code), got: % definition=%',
+      col_names, idx_def;
+  END IF;
+
+  IF position('search_id IS NOT NULL' in idx_def) = 0
+     AND position('search_id is not null' in lower(idx_def)) = 0 THEN
+    RAISE EXCEPTION '023: index predicate must include search_id IS NOT NULL: %', idx_def;
+  END IF;
+
+  IF position(E'\'pending\'' in idx_def) = 0
+     OR position(E'\'reconciling\'' in idx_def) = 0
+     OR position(E'\'intervention\'' in idx_def) = 0 THEN
+    RAISE EXCEPTION
+      '023: index predicate must include statuses pending, reconciling, intervention: %',
+      idx_def;
+  END IF;
+
+  IF position(E'\'failed\'' in idx_def) > 0
+     OR position(E'\'resolved\'' in idx_def) > 0
+     OR position(E'\'expired\'' in idx_def) > 0 THEN
+    RAISE EXCEPTION
+      '023: index predicate must not include terminal statuses failed/resolved/expired: %',
+      idx_def;
   END IF;
 END $$;
 
