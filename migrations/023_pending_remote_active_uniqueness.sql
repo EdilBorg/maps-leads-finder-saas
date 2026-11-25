@@ -1,0 +1,149 @@
+-- Active uniqueness for pending_remote_executions (search_id, provider_code)
+-- when status ∈ (pending, reconciling, intervention) and search_id IS NOT NULL.
+--
+-- SAFETY:
+-- - Does NOT delete, expire, merge, or free any financial rows.
+-- - On active conflicts: RAISE EXCEPTION → migration transaction ROLLBACKs →
+--   schema_migrations does NOT record this file as applied (see src/db/migrate.js).
+-- - On success: unique partial index is created inside the same transaction.
+--
+-- Concurrency: SHARE ROW EXCLUSIVE blocks concurrent INSERT/UPDATE/DELETE writers
+-- while allowing concurrent readers. Combined with the migration runner transaction,
+-- verification + index creation is atomic.
+
+-- Block concurrent writers for the duration of this transaction
+LOCK TABLE pending_remote_executions IN SHARE ROW EXCLUSIVE MODE;
+
+DO $$
+DECLARE
+  conflict_count INTEGER;
+  conflict_detail TEXT;
+BEGIN
+  SELECT COUNT(*) INTO conflict_count
+  FROM (
+    SELECT search_id, provider_code
+    FROM pending_remote_executions
+    WHERE search_id IS NOT NULL
+      AND status IN ('pending', 'reconciling', 'intervention')
+    GROUP BY search_id, provider_code
+    HAVING COUNT(*) > 1
+  ) d;
+
+  IF conflict_count > 0 THEN
+    SELECT string_agg(line, E'\n') INTO conflict_detail
+    FROM (
+      SELECT format(
+        'search_id=%s provider=%s count=%s ids=%s users=%s external_ids=%s statuses=%s reserved_results=%s reserved_cost=%s reserved_api=%s',
+        search_id::text,
+        provider_code,
+        cnt,
+        ids,
+        user_ids,
+        external_ids,
+        statuses,
+        reserved_results_list,
+        reserved_costs,
+        reserved_apis
+      ) AS line
+      FROM (
+        SELECT
+          search_id,
+          provider_code,
+          COUNT(*)::text AS cnt,
+          string_agg(id::text, ',' ORDER BY created_at, id) AS ids,
+          string_agg(DISTINCT user_id::text, ',') AS user_ids,
+          string_agg(COALESCE(external_run_id, '<null>'), ',' ORDER BY created_at, id) AS external_ids,
+          string_agg(status, ',' ORDER BY created_at, id) AS statuses,
+          string_agg(reserved_results::text, ',' ORDER BY created_at, id) AS reserved_results_list,
+          string_agg(reserved_cost_micro_usd::text, ',' ORDER BY created_at, id) AS reserved_costs,
+          string_agg(reserved_api_calls::text, ',' ORDER BY created_at, id) AS reserved_apis
+        FROM pending_remote_executions
+        WHERE search_id IS NOT NULL
+          AND status IN ('pending', 'reconciling', 'intervention')
+        GROUP BY search_id, provider_code
+        HAVING COUNT(*) > 1
+        ORDER BY search_id, provider_code
+        LIMIT 50
+      ) groups
+    ) lines;
+
+    RAISE EXCEPTION
+      '023_pending_remote_active_uniqueness: % active conflict group(s). Resolve manually, then re-run migrate. Details:%',
+      conflict_count,
+      E'\n' || COALESCE(conflict_detail, '(no detail)');
+  END IF;
+END $$;
+
+DROP INDEX IF EXISTS pending_remote_executions_search_provider_uidx;
+
+CREATE UNIQUE INDEX IF NOT EXISTS pending_remote_executions_active_search_provider_uidx
+  ON pending_remote_executions (search_id, provider_code)
+  WHERE search_id IS NOT NULL
+    AND status IN ('pending', 'reconciling', 'intervention');
+
+-- Verify index exists with the exact expected definition (reject same-name incompatible indexes)
+DO $$
+DECLARE
+  idx_def TEXT;
+  idx_unique BOOLEAN;
+  idx_valid BOOLEAN;
+  col_names TEXT;
+BEGIN
+  SELECT pg_get_indexdef(i.oid), x.indisunique, x.indisvalid,
+         (
+           SELECT string_agg(a.attname, ',' ORDER BY xord.ord)
+           FROM unnest(x.indkey) WITH ORDINALITY AS xord(attnum, ord)
+           JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = xord.attnum
+         )
+    INTO idx_def, idx_unique, idx_valid, col_names
+  FROM pg_class t
+  JOIN pg_namespace n ON n.oid = t.relnamespace
+  JOIN pg_index x ON x.indrelid = t.oid
+  JOIN pg_class i ON i.oid = x.indexrelid
+  WHERE t.relname = 'pending_remote_executions'
+    AND n.nspname = current_schema()
+    AND i.relname = 'pending_remote_executions_active_search_provider_uidx';
+
+  IF idx_def IS NULL THEN
+    RAISE EXCEPTION
+      '023: expected unique index pending_remote_executions_active_search_provider_uidx was not created on pending_remote_executions in schema %',
+      current_schema();
+  END IF;
+
+  IF idx_unique IS DISTINCT FROM TRUE OR idx_valid IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION '023: index must be valid and unique: unique=%, valid=%, definition=%',
+      idx_unique, idx_valid, idx_def;
+  END IF;
+
+  IF col_names IS DISTINCT FROM 'search_id,provider_code' THEN
+    RAISE EXCEPTION
+      '023: index columns must be exactly (search_id, provider_code), got: % definition=%',
+      col_names, idx_def;
+  END IF;
+
+  IF position('search_id IS NOT NULL' in idx_def) = 0
+     AND position('search_id is not null' in lower(idx_def)) = 0 THEN
+    RAISE EXCEPTION '023: index predicate must include search_id IS NOT NULL: %', idx_def;
+  END IF;
+
+  IF position(E'\'pending\'' in idx_def) = 0
+     OR position(E'\'reconciling\'' in idx_def) = 0
+     OR position(E'\'intervention\'' in idx_def) = 0 THEN
+    RAISE EXCEPTION
+      '023: index predicate must include statuses pending, reconciling, intervention: %',
+      idx_def;
+  END IF;
+
+  IF position(E'\'failed\'' in idx_def) > 0
+     OR position(E'\'resolved\'' in idx_def) > 0
+     OR position(E'\'expired\'' in idx_def) > 0 THEN
+    RAISE EXCEPTION
+      '023: index predicate must not include terminal statuses failed/resolved/expired: %',
+      idx_def;
+  END IF;
+END $$;
+
+
+CREATE INDEX IF NOT EXISTS pending_remote_executions_intervention_idx
+  ON pending_remote_executions (status, updated_at)
+  WHERE status = 'intervention';

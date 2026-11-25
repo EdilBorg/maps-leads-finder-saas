@@ -43,7 +43,8 @@ describe('geoBlocked and onRemoteStarted wiring', () => {
   const search = fs.readFileSync(path.join(__dirname, '../src/services/searchService.js'), 'utf8');
   it('engine propagates geoBlockedProviders', () => {
     assert.match(engine, /geoBlockedProviders/);
-    assert.match(engine, /providerCriteria\.geoBlocked/);
+    assert.match(engine, /dfsCriteria\.geoBlocked = true/);
+    assert.match(engine, /tomtomCriteria\.geoBlocked = true/);
   });
   it('resolveGeo returns null when geoBlocked', () => {
     assert.match(bd, /criteria\.geoBlocked === true/);

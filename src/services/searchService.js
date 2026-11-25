@@ -9,6 +9,37 @@
 function getPool() {
   return require('../db/pool').getPool();
 }
+
+async function recordFinancialReconcileFailure({
+  client = null, userId, searchId, context, error,
+}) {
+  if (!searchId || !userId) return false;
+
+  const details = {
+    context,
+    code: error && error.code ? error.code : 'FINANCIAL_RECONCILE_FAILED',
+    message: error && error.message ? error.message : String(error),
+    failures: error && Array.isArray(error.failures) ? error.failures : undefined,
+  };
+  const marker = `financial_reconcile_failed:${JSON.stringify(details)}`;
+
+  try {
+    const db = client || getPool();
+    const result = await db.query(
+      `UPDATE searches
+       SET error_summary = CASE
+         WHEN COALESCE(error_summary, '') = '' THEN $2
+         ELSE error_summary || E'\\n' || $2
+       END
+       WHERE id = $1 AND user_id = $3`,
+      [searchId, marker, userId]
+    );
+    return result.rowCount === 1;
+  } catch (recordErr) {
+    console.error('[financial-reconcile-record]', searchId, context, recordErr && recordErr.message);
+    return false;
+  }
+}
 const {
   executeSearch,
   publicLead,
@@ -268,7 +299,9 @@ async function startSearch(opts) {
         try { await releaseFreeSearchHold(client, opts.userId, holdToken); } catch (_) {}
       }
       if (auth && auth.mode === 'paid' && searchId) {
-        try { await quotaService.releaseAllReservations(opts.userId, searchId, auth.providers || []); } catch (e) {
+        try {
+          await quotaService.releaseAllReservations(opts.userId, searchId, auth.providers || []);
+        } catch (e) {
           console.error('[start-provider-quota-release]', searchId, e && e.message);
         }
         const lr = await leadQuotaService.releaseLeadQuotaSafe({
@@ -469,6 +502,10 @@ async function runSearchJob(ctx) {
         await quotaService.releaseAllReservations(ctx.userId, ctx.searchId, ctx.quotaProviders || []);
       } catch (e) {
         console.error('[provider-quota-release]', ctx.searchId, e && e.message);
+        await recordFinancialReconcileFailure({
+          userId: ctx.userId, searchId: ctx.searchId,
+          context: 'engine_error', error: e,
+        });
       }
       const lr = await leadQuotaService.releaseLeadQuotaSafe({
         userId: ctx.userId,
@@ -644,10 +681,19 @@ async function runSearchJob(ctx) {
 
     await client.query('COMMIT');
 
+    const financialFailures = [];
+
     if (ctx.quotaMode === 'paid' && Array.isArray(ctx.quotaProviders)) {
       const byCode = {};
+      const byProvider = {};
       for (const p of engineResult._providers || []) {
-        byCode[p.code] = p.metrics || { rawCount: p.count || 0, apiCalls: 0, geocodeCalls: 0 };
+        const metrics = p.metrics || { rawCount: p.count || 0, apiCalls: 0, geocodeCalls: 0 };
+        if (p.externalRunId && !metrics.externalRunId) metrics.externalRunId = p.externalRunId;
+        if (p.pendingRemote != null && metrics.pendingRemote == null) metrics.pendingRemote = p.pendingRemote;
+        if (p.requestSent != null && metrics.requestSent == null) metrics.requestSent = p.requestSent;
+        if (p.errorCode && !metrics.errorCode) metrics.errorCode = p.errorCode;
+        byCode[p.code] = metrics;
+        byProvider[p.code] = p;
       }
       for (const p of ctx.quotaProviders) {
         if (!p.allowed || !p.reserve) continue;
@@ -657,12 +703,40 @@ async function runSearchJob(ctx) {
               ctx.userId, ctx.searchId, p.code, p.reserve, byCode[p.code]
             );
           } else {
-            await quotaService.releaseAllReservations(ctx.userId, ctx.searchId, [p]);
+            // Attach any engine-side signals so releaseAllReservations can decide
+            // between safe release vs intervention hold without inventing remote ids.
+            const eng = byProvider[p.code];
+            const enriched = eng
+              ? {
+                  ...p,
+                  metrics: byCode[p.code] || eng.metrics || null,
+                  externalRunId: eng.externalRunId || null,
+                  pendingRemote: eng.pendingRemote,
+                  requestSent: eng.requestSent,
+                  errorCode: eng.errorCode,
+                }
+              : p;
+            await quotaService.releaseAllReservations(ctx.userId, ctx.searchId, [enriched]);
           }
         } catch (qe) {
+          financialFailures.push({
+            providerCode: p.code,
+            code: qe && qe.code ? qe.code : 'FINANCIAL_RECONCILE_FAILED',
+            message: qe && qe.message ? qe.message : String(qe),
+          });
           console.error('[quota-commit]', ctx.searchId, p.code, qe && qe.message);
         }
       }
+    }
+
+    if (financialFailures.length) {
+      const err = new Error('One or more provider reservations could not be reconciled');
+      err.code = 'FINANCIAL_RECONCILE_FAILED';
+      err.failures = financialFailures;
+      await recordFinancialReconcileFailure({
+        client, userId: ctx.userId, searchId: ctx.searchId,
+        context: 'post_commit', error: err,
+      });
     }
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
@@ -754,6 +828,10 @@ async function cancelSearch(userId, searchId) {
         await quotaService.releaseAllReservations(userId, searchId, fromRun);
       } catch (e) {
         console.error('[cancel-quota-release]', searchId, e && e.message);
+        await recordFinancialReconcileFailure({
+          client, userId, searchId,
+          context: 'cancel_search', error: e,
+        });
       }
       const lr = await leadQuotaService.releaseLeadQuotaSafe({
         userId, searchId, reason: 'cancel_search',
