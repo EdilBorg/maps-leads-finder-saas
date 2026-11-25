@@ -111,14 +111,19 @@ describe('releaseAllReservations DB guard (blocker)', () => {
     const out = await qs.releaseAllReservations('user-1', 'search-1', [{
       code: 'dataforseo',
       allowed: true,
-      reserve,
+      reserve: {
+        ...reserve,
+        global: { periodStart: reserve.periodStart, reservedCalls: 1, geo: false },
+      },
     }]);
     assert.equal(out.ok, true);
     assert.equal(calls.release.length, 1);
     assert.equal(out.results[0].action, 'released');
-    // Financial release must use the same transactional client (lock still held)
+    // Both financial releases must share the transaction protected by the advisory lock.
     assert.equal(calls.releaseClients.length, 1);
-    assert.equal(calls.release[0].client != null, true);
+    assert.ok(calls.release[0].client);
+    assert.equal(calls.releaseGlobal.length, 1);
+    assert.equal(calls.releaseGlobal[0][2].client, calls.release[0].client);
   });
 
   it('force=true closes active remote row and releases in same path', async () => {
@@ -142,14 +147,19 @@ describe('releaseAllReservations DB guard (blocker)', () => {
     const out = await qs.releaseAllReservations('user-1', 'search-1', [{
       code: 'dataforseo',
       allowed: true,
-      reserve,
+      reserve: {
+        ...reserve,
+        global: { periodStart: reserve.periodStart, reservedCalls: 1, geo: false },
+      },
     }], { force: true });
     assert.equal(out.ok, true);
     assert.equal(closed, true, 'must close pending_remote row');
     assert.equal(calls.release.length, 1);
     assert.equal(out.results[0].action, 'force_released');
     assert.equal(out.results[0].closedStatus, 'expired');
-    assert.equal(calls.release[0].client != null, true);
+    assert.ok(calls.release[0].client);
+    assert.equal(calls.releaseGlobal.length, 1);
+    assert.equal(calls.releaseGlobal[0][2].client, calls.release[0].client);
   });
 });
 

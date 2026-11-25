@@ -461,20 +461,33 @@ async function reserveGlobalTomTomCalls(calls, { searchId = null, userId = null,
   }
 }
 
-async function commitGlobalTomTomCalls(periodStart, reservedCalls, actualCalls, { idempotencyKey = null, searchId = null, userId = null } = {}) {
+async function commitGlobalTomTomCalls(periodStart, reservedCalls, actualCalls, options = {}) {
   if (!periodStart) return { ok: true, skipped: true };
-  const client = await getPool().connect();
+
+  const {
+    idempotencyKey = null,
+    searchId = null,
+    userId = null,
+    client: externalClient = null,
+  } = options || {};
+
+  const ownClient = !externalClient;
+  const client = externalClient || await getPool().connect();
+
   try {
-    await client.query('BEGIN');
+    if (ownClient) await client.query('BEGIN');
+
     if (idempotencyKey) {
       const existing = await client.query(
-        `SELECT id FROM provider_global_usage_events WHERE idempotency_key = $1`, [idempotencyKey]
+        `SELECT id FROM provider_global_usage_events WHERE idempotency_key = $1`,
+        [idempotencyKey]
       );
       if (existing.rows[0]) {
-        await client.query('COMMIT');
+        if (ownClient) await client.query('COMMIT');
         return { ok: true, replayed: true };
       }
     }
+
     await client.query(
       `UPDATE provider_global_usage SET
          calls_reserved = GREATEST(0, calls_reserved - $2),
@@ -482,6 +495,7 @@ async function commitGlobalTomTomCalls(periodStart, reservedCalls, actualCalls, 
        WHERE provider_code='tomtom' AND period_start=$1`,
       [periodStart, reservedCalls, actualCalls]
     );
+
     if (idempotencyKey) {
       await client.query(
         `INSERT INTO provider_global_usage_events (
@@ -490,13 +504,16 @@ async function commitGlobalTomTomCalls(periodStart, reservedCalls, actualCalls, 
         [actualCalls > 0 ? 'commit' : 'release', periodStart, actualCalls, searchId, userId, idempotencyKey]
       );
     }
-    await client.query('COMMIT');
+
+    if (ownClient) await client.query('COMMIT');
     return { ok: true };
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
+    if (ownClient) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+    }
     throw err;
   } finally {
-    client.release();
+    if (ownClient) client.release();
   }
 }
 

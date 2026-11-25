@@ -729,7 +729,7 @@ async function releaseAllReservations(userId, searchId, providers, {
               await providerUsageService.releaseGlobalTomTomCalls(
                 p.reserve.global.periodStart,
                 p.reserve.global.reservedCalls || 0,
-                { idempotencyKey: `grelease:${userId}:${searchId}:${p.code}:tomtom`, searchId, userId }
+                { idempotencyKey: `grelease:${userId}:${searchId}:${p.code}:tomtom`, searchId, userId, client }
               );
             }
             await client.query('COMMIT');
@@ -797,7 +797,7 @@ async function releaseAllReservations(userId, searchId, providers, {
             await providerUsageService.releaseGlobalTomTomCalls(
               p.reserve.global.periodStart,
               p.reserve.global.reservedCalls || 0,
-              { idempotencyKey: `grelease:${userId}:${searchId}:${p.code}:tomtom`, searchId, userId }
+              { idempotencyKey: `grelease:${userId}:${searchId}:${p.code}:tomtom`, searchId, userId, client }
             );
           }
           await client.query('COMMIT');
