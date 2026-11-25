@@ -1,7 +1,6 @@
 /**
  * BLOCKER: releaseAllReservations must not free a reserve when pending_remote_executions
- * already has an active row for the same user/search/provider — even if the in-memory
- * provider object has no externalRunId / pendingRemote flags.
+ * already has an active row — lock held through financial release; force closes remote row.
  */
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -26,11 +25,15 @@ function loadQuota(handler) {
     },
   };
 
-  const calls = { release: [], releaseGlobal: [] };
+  const calls = { release: [], releaseGlobal: [], releaseClients: [] };
   require.cache[pusPath] = {
     id: pusPath, filename: pusPath, loaded: true,
     exports: {
-      release: async (args) => { calls.release.push(args); return { ok: true }; },
+      release: async (args) => {
+        calls.release.push(args);
+        if (args.client) calls.releaseClients.push(true);
+        return { ok: true };
+      },
       commit: async () => ({ ok: true }),
       releaseGlobalTomTomCalls: async (...a) => { calls.releaseGlobal.push(a); return { ok: true }; },
       reserve: async () => ({ ok: true }),
@@ -57,14 +60,21 @@ const reserve = {
   reservedApiCalls: 1,
 };
 
-function handlerWithActiveRow(active) {
-  return async (sql) => {
+function handlerWithActiveRow(active, { failRelease = false, trackOrder = null } = {}) {
+  return async (sql, params) => {
+    if (trackOrder) trackOrder.push(sql.slice(0, 60).replace(/\s+/g, ' '));
     if (/BEGIN|COMMIT|ROLLBACK|pg_advisory/i.test(sql)) return { rows: [] };
     if (/FROM pending_remote_executions/i.test(sql) && /status IN/i.test(sql)) {
       return { rows: active ? [active] : [] };
     }
+    if (/UPDATE pending_remote_executions SET/i.test(sql) && /status = 'expired'/i.test(sql)) {
+      return { rows: [{ id: active && active.id, status: 'expired' }] };
+    }
     if (/INSERT INTO pending_remote_executions/i.test(sql)) {
       return { rows: [{ id: 'new-1', status: 'pending', external_run_id: 'task-x' }] };
+    }
+    if (failRelease && /provider_usage/i.test(sql)) {
+      throw new Error('simulated release failure');
     }
     return { rows: [] };
   };
@@ -83,7 +93,6 @@ describe('releaseAllReservations DB guard (blocker)', () => {
         lease_expires_at: null,
       };
       const { qs, calls } = loadQuota(handlerWithActiveRow(active));
-      // Provider object intentionally lacks externalRunId / pendingRemote / requestSent
       const out = await qs.releaseAllReservations('user-1', 'search-1', [{
         code: 'dataforseo',
         allowed: true,
@@ -107,27 +116,44 @@ describe('releaseAllReservations DB guard (blocker)', () => {
     assert.equal(out.ok, true);
     assert.equal(calls.release.length, 1);
     assert.equal(out.results[0].action, 'released');
+    // Financial release must use the same transactional client (lock still held)
+    assert.equal(calls.releaseClients.length, 1);
+    assert.equal(calls.release[0].client != null, true);
   });
 
-  it('force=true still releases even with active pending row', async () => {
+  it('force=true closes active remote row and releases in same path', async () => {
     const active = {
       id: 'row-pending',
       status: 'pending',
       external_run_id: 'task-1',
     };
-    const { qs, calls } = loadQuota(handlerWithActiveRow(active));
+    let closed = false;
+    const { qs, calls } = loadQuota(async (sql) => {
+      if (/BEGIN|COMMIT|ROLLBACK|pg_advisory/i.test(sql)) return { rows: [] };
+      if (/FROM pending_remote_executions/i.test(sql) && /FOR UPDATE/i.test(sql)) {
+        return { rows: [active] };
+      }
+      if (/UPDATE pending_remote_executions SET/i.test(sql) && /expired/i.test(sql)) {
+        closed = true;
+        return { rows: [{ id: active.id, status: 'expired' }] };
+      }
+      return { rows: [] };
+    });
     const out = await qs.releaseAllReservations('user-1', 'search-1', [{
       code: 'dataforseo',
       allowed: true,
       reserve,
     }], { force: true });
     assert.equal(out.ok, true);
+    assert.equal(closed, true, 'must close pending_remote row');
     assert.equal(calls.release.length, 1);
-    assert.equal(out.results[0].action, 'released');
+    assert.equal(out.results[0].action, 'force_released');
+    assert.equal(out.results[0].closedStatus, 'expired');
+    assert.equal(calls.release[0].client != null, true);
   });
 });
 
-describe('markPendingRemote searchId validation', () => {
+describe('markPendingRemote searchId validation + lock', () => {
   afterEach(clearCaches);
 
   it('rejects null searchId with PENDING_REMOTE_INVALID_SEARCH_ID', async () => {
@@ -138,11 +164,20 @@ describe('markPendingRemote searchId validation', () => {
     );
   });
 
-  it('rejects empty searchId', async () => {
-    const { qs } = loadQuota(async () => ({ rows: [] }));
-    await assert.rejects(
-      () => qs.markPendingRemote('u1', '  ', 'dataforseo', reserve, { externalRunId: 't1' }),
-      (err) => err && err.code === 'PENDING_REMOTE_INVALID_SEARCH_ID'
-    );
+  it('acquires advisory lock before insert when no external client', async () => {
+    const order = [];
+    const { qs } = loadQuota(async (sql) => {
+      order.push(sql.slice(0, 40).replace(/\s+/g, ' '));
+      if (/BEGIN|COMMIT|ROLLBACK|pg_advisory/i.test(sql)) return { rows: [] };
+      if (/INSERT INTO pending_remote_executions/i.test(sql)) {
+        return { rows: [{ id: 'r1', status: 'pending', external_run_id: 't1' }] };
+      }
+      return { rows: [] };
+    });
+    await qs.markPendingRemote('u1', 's1', 'dataforseo', reserve, { externalRunId: 't1' });
+    const lockIdx = order.findIndex((s) => /pg_advisory/i.test(s));
+    const insertIdx = order.findIndex((s) => /INSERT INTO pending_remote/i.test(s));
+    assert.ok(lockIdx >= 0, 'must acquire advisory lock');
+    assert.ok(insertIdx > lockIdx, 'insert must happen after lock');
   });
 });

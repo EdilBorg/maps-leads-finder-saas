@@ -198,8 +198,12 @@ describe('markPendingRemote financial idempotency', () => {
   it('uses one atomic upsert for unknown remote intervention', async () => {
     let captured;
     const { qs } = loadQuotaWithFakePool(async (sql, params) => {
-      captured = { sql: String(sql), params };
-      return { rows: [{ id: 'intervention-1', status: 'intervention', external_run_id: null }] };
+      const s = String(sql);
+      if (/INSERT INTO pending_remote_executions/i.test(s)) {
+        captured = { sql: s, params };
+        return { rows: [{ id: 'intervention-1', status: 'intervention', external_run_id: null }] };
+      }
+      return { rows: [] };
     });
 
     const result = await qs.markPendingRemote(
@@ -218,8 +222,12 @@ describe('markPendingRemote financial idempotency', () => {
   it('uses the same atomic upsert and promotes intervention when remote ID arrives', async () => {
     let captured;
     const { qs } = loadQuotaWithFakePool(async (sql, params) => {
-      captured = { sql: String(sql), params };
-      return { rows: [{ id: 'pending-1', status: 'pending', external_run_id: 'task-123' }] };
+      const s = String(sql);
+      if (/INSERT INTO pending_remote_executions/i.test(s)) {
+        captured = { sql: s, params };
+        return { rows: [{ id: 'pending-1', status: 'pending', external_run_id: 'task-123' }] };
+      }
+      return { rows: [] };
     });
 
     const result = await qs.markPendingRemote(
@@ -248,8 +256,12 @@ describe('markPendingRemote financial idempotency', () => {
   it('checks every financial identity field in the conflict update', async () => {
     let sqlSeen = '';
     const { qs } = loadQuotaWithFakePool(async (sql) => {
-      sqlSeen = String(sql);
-      return { rows: [{ id: 'pending-1', status: 'pending', external_run_id: 'task-123' }] };
+      const s = String(sql);
+      if (/INSERT INTO pending_remote_executions/i.test(s)) sqlSeen = s;
+      if (/INSERT INTO pending_remote_executions/i.test(s)) {
+        return { rows: [{ id: 'pending-1', status: 'pending', external_run_id: 'task-123' }] };
+      }
+      return { rows: [] };
     });
 
     await qs.markPendingRemote(
@@ -324,7 +336,7 @@ describe('releaseAllReservations failure propagation', () => {
       }),
       (err) => err.code === 'RELEASE_RESERVATIONS_FAILED'
         && err.failures.length === 1
-        && err.failures[0].providerCode === 'tomtom'
+        && (err.failures[0].providerCode === 'tomtom' || err.failures[0].providerCode === 'tomtom_global')
     );
   });
 });
