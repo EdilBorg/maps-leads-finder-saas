@@ -85,20 +85,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS pending_remote_executions_active_search_provid
 DO $$
 DECLARE
   idx_def TEXT;
+  idx_unique BOOLEAN;
+  idx_valid BOOLEAN;
+  table_schema TEXT;
 BEGIN
-  SELECT pg_get_indexdef(i.oid) INTO idx_def
+  SELECT pg_get_indexdef(i.oid), x.indisunique, x.indisvalid, n.nspname
+    INTO idx_def, idx_unique, idx_valid, table_schema
   FROM pg_class t
+  JOIN pg_namespace n ON n.oid = t.relnamespace
   JOIN pg_index x ON x.indrelid = t.oid
   JOIN pg_class i ON i.oid = x.indexrelid
   WHERE t.relname = 'pending_remote_executions'
+    AND n.nspname = current_schema()
     AND i.relname = 'pending_remote_executions_active_search_provider_uidx';
 
   IF idx_def IS NULL THEN
-    RAISE EXCEPTION '023: expected unique index pending_remote_executions_active_search_provider_uidx was not created';
+    RAISE EXCEPTION '023: expected unique index pending_remote_executions_active_search_provider_uidx was not created in schema %', current_schema();
   END IF;
 
-  IF position('UNIQUE' in upper(idx_def)) = 0 THEN
-    RAISE EXCEPTION '023: index is not UNIQUE: %', idx_def;
+  IF idx_unique IS DISTINCT FROM TRUE OR idx_valid IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION '023: index must be valid and unique: unique=%, valid=%, definition=%',
+      idx_unique, idx_valid, idx_def;
   END IF;
 
   IF position('pending' in idx_def) = 0
